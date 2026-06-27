@@ -1,0 +1,24 @@
+{
+  "venvPath": "/home/dan/miniconda3/envs",
+  "venv": "vitquant",
+
+  // This project's own code is fully type-annotated and is still checked
+  // strictly (type mismatches, undefined names, bad returns, etc. all error).
+  //
+  // The rules disabled below only ever fire at the boundary with third-party
+  // libraries whose type stubs are incomplete, NOT on our code:
+  //   * PyTorch types `Module.__call__`, `DataLoader` iteration, and
+  //     `Tensor.item()` as `Any`.
+  //   * torchvision's `weights.transforms()` returns `Any`.
+  //   * matplotlib's stubs use untyped `**kwargs` and return artist objects
+  //     (BarContainer, Text, ...) that we intentionally discard.
+  // There is no way to satisfy these rules in our code, so we turn them off
+  // rather than scatter dozens of `# pyright: ignore` comments.
+  "reportMissingTypeStubs": false,
+  "reportAny": false,
+  "reportExplicitAny": false,
+  "reportUnknownVariableType": false,
+  "reportUnknownMemberType": false,
+  "reportUnknownArgumentType": false,
+  "reportUnusedCallResult": false,
+}

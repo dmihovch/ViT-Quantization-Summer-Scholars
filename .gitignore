@@ -1,0 +1,96 @@
+# =============================================================================
+# Project data & generated outputs
+# -----------------------------------------------------------------------------
+# The ImageNet validation images (downloaded with download_imagenet_val.py) and
+# all experiment results (JSON, CSV, plots) are large and/or reproducible, so
+# they are never committed. The scripts recreate these folders as needed.
+# =============================================================================
+data/
+outputs/
+
+# =============================================================================
+# Python bytecode & build artifacts
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+
+# =============================================================================
+# Testing & type-checker caches
+# =============================================================================
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+
+# =============================================================================
+# Virtual environments
+# -----------------------------------------------------------------------------
+# This project uses a conda env (see environment.yml). These patterns cover
+# any local virtualenvs you might create as well.
+# =============================================================================
+.venv/
+venv/
+env/
+ENV/
+
+# =============================================================================
+# Jupyter / IPython
+# =============================================================================
+.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+
+# =============================================================================
+# Machine-learning artifacts & caches
+# -----------------------------------------------------------------------------
+# Model weights and Hugging Face / torch caches normally live in ~/.cache, but
+# ignore any that land inside the repo (e.g. if you set HF_HOME or TORCH_HOME
+# to a local folder). Never commit access tokens.
+# =============================================================================
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.safetensors
+.cache/
+huggingface/
+torch_cache/
+*.token
+
+# =============================================================================
+# Secrets & environment files
+# =============================================================================
+.env
+.env.*
+*.local
+
+# =============================================================================
+# Editor / IDE settings
+# -----------------------------------------------------------------------------
+# .zed/settings.json contains a machine-specific Python path, so it is ignored.
+# If you want to share project editor settings, commit a sanitized copy instead.
+# =============================================================================
+.zed/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# =============================================================================
+# Operating-system clutter
+# =============================================================================
+.DS_Store
+Thumbs.db
+desktop.ini
