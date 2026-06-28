@@ -58,15 +58,25 @@ vit_thesis_workspace/
 ## 4. EXPERIMENT SPECIFICATIONS
 
 ### Experiment 1: Full Per-Layer Outlier Characterization (The Decision Engine)
-**Goal:** Map the distribution, density, and persistence of activation outliers across all 48 linear projection layers in `ViT-B/16` using 4,096 ImageNet validation images.
+**Goal:** Map the distribution, density, and persistence of activation outliers across every linear projection layer in `ViT-B/16` using 4,096 ImageNet validation images.
+
+**Model implementation (IMPORTANT):** Use the `timm` implementation of ViT-B/16 (`vit_base_patch16_224`), **not** torchvision's. torchvision routes attention through a fused `nn.MultiheadAttention` kernel that bypasses the internal `out_proj` submodule and fuses Q/K/V into one opaque weight, so forward hooks can only observe the whole attention block's output (collapsing four projections into one measurement point, 37 hookable modules total). `timm` instead exposes every projection as a plain, independently hookable `nn.Linear`:
+  * `blocks.N.attn.qkv` - fused Query/Key/Value projection,
+  * `blocks.N.attn.proj` - attention output projection,
+  * `blocks.N.mlp.fc1` / `blocks.N.mlp.fc2` - the two MLP linears,
+  * `head` - the final classifier.
+
+  This yields **49 separately hookable linear layers** (12 blocks x 4 in-block linears + 1 head), matching the goal of characterizing each projection independently. Q, K and V still share one fused `qkv` weight and cannot be split at the module level; if per-Q/K/V analysis is needed, chunk the `qkv` output tensor into three along its feature axis inside the hook.
 
 **Implementation Details for Agent:**
-* Use forward hooks attached to `nn.Linear` layers.
-* **Layer Tagging:** Differentiate and tag layers based on topology: `Attention_QKV` vs. `FeedForward_MLP`.
-* **Metrics to compute on-the-fly (inside the hook):**
-    1.  **Maximum Magnitude:** The absolute maximum value observed.
-    2.  **Outlier Density (Routing Fraction):** The percentage of values exceeding specific thresholds (e.g., `magnitude > 6.0`, and `> 3 standard deviations`). This represents the fraction of math that would be routed to FP16.
-    3.  **Channel Persistence (CRITICAL):** Calculate the variance of outlier locations across the channel dimension. We must prove if outliers are localized to specific feature channels across tokens/images, or if they are scattered.
+* **Measure matmul INPUTS, not outputs (forward PRE-hooks).** Attach a forward *pre*-hook to every `nn.Linear` and characterize the activation **entering** each projection (`inputs[0]`) - the post-LayerNorm hidden state `X` that the GEMM consumes. For `Y = X @ W.T`, `LLM.int8()` inspects `X` and decides, per input feature column, whether to route to INT8 or FP16. Measuring `X` therefore captures the outliers at the **exact point where the routing decision is made**; measuring the output would characterize a different tensor the quantizer never routes on. (For ViT-B/16 the input width is 768 for `attn.qkv`/`attn.proj`/`mlp.fc1` and the `head`, and 3072 for `mlp.fc2`.)
+* **Use a rigorous TWO-PASS algorithm (exactness over speed).** The fixed `|x| > 6.0` threshold needs no data statistics, but the statistical `3-sigma` threshold is defined relative to each layer's mean and standard deviation, which are only known after seeing every image. So run two passes over the (deterministic, unshuffled) data: **Pass 1** computes each layer's *exact* global mean and std using the numerically-stable Chan/Welford parallel merge in float64; **Pass 2** freezes those statistics and counts outliers/routing fractions for both thresholds. Reading the data twice is the deliberate price of an exact `3-sigma` cutoff rather than a per-batch approximation. Surface the exact `global_mean`/`global_std` in the output so every threshold is auditable.
+* **Layer Tagging:** Differentiate and tag layers based on topology: `Attention_QKV` (both `attn.qkv` and `attn.proj`) vs. `FeedForward_MLP` (both `mlp.fc1` and `mlp.fc2`).
+* **Metrics to compute on-the-fly (inside the pre-hook), over the INPUT activation:**
+    1.  **Maximum Magnitude:** The absolute maximum input value observed.
+    2.  **Routing Fraction (PRIMARY, per-column - the true LLM.int8 cost):** `LLM.int8()` is a *structured* scheme - cuBLAS INT8 GEMMs force it to route **entire input feature columns** to FP16, never arbitrary scattered scalars. So the routing cost is the fraction of input feature **columns** that are *outlier columns*: columns exceeding the threshold (`magnitude > 6.0`, and separately `> 3 standard deviations`) in **at least 25% of tokens**. The 25% participation bar is `LLM.int8()`'s own criterion for an outlier feature dimension; it also prevents the metric from saturating to ~1.0 as we stream thousands of images (a single stray spike must not flag a whole column). This per-column fraction is the actual share of the matmul's contraction dimension pushed to FP16.
+    3.  **Per-Value Outlier Density (unstructured baseline):** Also record the fraction of *individual* input values exceeding each threshold (`magnitude > 6.0`, and the exact `> 3 standard deviations`) - the cost an idealized per-scalar scheme would pay. The **gap** between this and the matching per-column routing fraction quantifies the penalty of `LLM.int8()`'s whole-column constraint: a small gap means outliers are neatly column-aligned (routing works); a large gap means they are scattered and `LLM.int8()` over-routes. Reporting **both thresholds** for both the routing fraction and the per-value density makes the fixed-6.0-vs-3-sigma comparison direct.
+    4.  **Channel Persistence (CRITICAL):** Calculate the variance of outlier locations across the **input feature dimension** (the columns `LLM.int8()` routes over). We must prove if outliers are localized to specific feature channels across tokens/images, or if they are scattered.
 
 ### Experiment 2: Accuracy by Quantization Granularity
 **Goal:** Measure the Top-1 ImageNet accuracy of simulated INT8 implementations.

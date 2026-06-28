@@ -38,11 +38,9 @@ LAYER_TYPE_COLORS: dict[LayerType, str] = {
 def shorten_layer_name(layer_name: str) -> str:
     """
     Make long module paths readable on a chart axis, e.g.
-    'encoder.layers.encoder_layer_5.mlp.0' -> 'L5.mlp.0'.
+    'blocks.5.mlp.fc1' -> 'L5.mlp.fc1' and 'blocks.5.attn.qkv' -> 'L5.attn.qkv'.
     """
-    short_name = layer_name.replace("encoder.layers.encoder_layer_", "L")
-    short_name = short_name.replace(".self_attention", ".attn")
-    return short_name
+    return layer_name.replace("blocks.", "L")
 
 
 def _plot_metric_bars(
@@ -88,29 +86,43 @@ def generate_all_plots(
 
     _plot_metric_bars(
         summaries,
-        values=[s.fixed_outlier_density for s in summaries],
-        title="Outlier density per layer (|activation| > 6.0)",
-        y_label="Fraction of values routed to FP16",
-        output_path=output_dir / "outlier_density_fixed.png",
+        values=[s.routing_fraction_fixed for s in summaries],
+        title="LLM.int8 FP16 routing fraction per layer (|x| > 6.0, \u2265 25% of tokens)",
+        y_label="Fraction of input columns routed to FP16",
+        output_path=output_dir / "routing_fraction_fixed.png",
     )
     _plot_metric_bars(
         summaries,
-        values=[s.statistical_outlier_density for s in summaries],
-        title="Outlier density per layer (> 3 std-dev from mean)",
-        y_label="Fraction of values flagged as outliers",
-        output_path=output_dir / "outlier_density_statistical.png",
+        values=[s.routing_fraction_statistical for s in summaries],
+        title="FP16 routing fraction per layer (> 3 std-dev, \u2265 25% of tokens)",
+        y_label="Fraction of input columns routed to FP16",
+        output_path=output_dir / "routing_fraction_statistical.png",
+    )
+    _plot_metric_bars(
+        summaries,
+        values=[s.value_outlier_density_fixed for s in summaries],
+        title="Per-value outlier density per layer (unstructured baseline, |x| > 6.0)",
+        y_label="Fraction of individual input values over threshold",
+        output_path=output_dir / "value_outlier_density_fixed.png",
+    )
+    _plot_metric_bars(
+        summaries,
+        values=[s.value_outlier_density_statistical for s in summaries],
+        title="Per-value outlier density per layer (unstructured baseline, > 3 std-dev)",
+        y_label="Fraction of individual input values over threshold",
+        output_path=output_dir / "value_outlier_density_statistical.png",
     )
     _plot_metric_bars(
         summaries,
         values=[s.max_magnitude for s in summaries],
-        title="Maximum activation magnitude per layer",
-        y_label="Max |activation|",
+        title="Maximum input-activation magnitude per layer",
+        y_label="Max |x| entering the matmul",
         output_path=output_dir / "max_magnitude.png",
     )
     _plot_metric_bars(
         summaries,
         values=[s.channel_persistence_variance for s in summaries],
-        title="Channel persistence per layer (variance of per-channel outlier counts)",
+        title="Channel persistence per layer (variance across input feature channels)",
         y_label="Variance  (high = persistent, low = scattered)",
         output_path=output_dir / "channel_persistence.png",
     )

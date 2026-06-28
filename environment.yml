@@ -13,3 +13,6 @@ dependencies:
   - pytest
   - huggingface_hub
   - datasets
+  - pip
+  - pip:
+      - timm

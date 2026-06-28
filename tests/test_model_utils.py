@@ -14,14 +14,14 @@ from src.model_utils import LayerType, classify_linear_layer
 @pytest.mark.parametrize(
     ("layer_name", "expected_type"),
     [
-        # Anything under self_attention is tagged ATTENTION.
-        ("encoder.layers.encoder_layer_0.self_attention.out_proj", LayerType.ATTENTION),
-        ("encoder.layers.encoder_layer_11.self_attention", LayerType.ATTENTION),
+        # Both attention projections (fused qkv and the output proj) are ATTENTION.
+        ("blocks.0.attn.qkv", LayerType.ATTENTION),
+        ("blocks.11.attn.proj", LayerType.ATTENTION),
         # The two MLP linears in each block are FEEDFORWARD.
-        ("encoder.layers.encoder_layer_0.mlp.0", LayerType.FEEDFORWARD),
-        ("encoder.layers.encoder_layer_5.mlp.3", LayerType.FEEDFORWARD),
+        ("blocks.0.mlp.fc1", LayerType.FEEDFORWARD),
+        ("blocks.5.mlp.fc2", LayerType.FEEDFORWARD),
         # The final classifier head is neither attention nor MLP.
-        ("heads.head", LayerType.OTHER),
+        ("head", LayerType.OTHER),
     ],
 )
 def test_classify_linear_layer(layer_name: str, expected_type: LayerType) -> None:

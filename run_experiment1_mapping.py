@@ -7,11 +7,19 @@ layer of ViT-B/16.
 
 The pipeline, end to end:
   1. Load the model and its matching preprocessing transform.
-  2. Attach a measurement hook to every linear layer.
-  3. Stream a configurable number of ImageNet images through the model
-     (forward passes only).
-  4. Each hook reduces its layer's activations to scalar statistics on the fly.
+  2. PASS 1: stream the images and compute each layer's EXACT global mean and
+     standard deviation (these define the statistical 3-sigma threshold).
+  3. PASS 2: stream the SAME images again and, using the frozen pass-1
+     statistics, measure outliers on the activation entering each matmul - the
+     LLM.int8() routing decision point - for both the fixed 6.0 and the 3-sigma
+     thresholds.
+  4. Every hook reduces its layer's input activations to scalar statistics on
+     the fly (no raw activations are stored).
   5. Save the per-layer summaries to JSON and render charts.
+
+We read the data twice (two passes) on purpose: it lets the 3-sigma threshold
+use exact global statistics instead of a per-batch approximation. The data
+loader is deterministic, so both passes see identical inputs.
 
 This file is intentionally lightweight: all reusable logic lives in `src/`.
 
@@ -36,14 +44,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+from timm.models.vision_transformer import VisionTransformer
 from torch import Tensor
 from torch.utils.data import DataLoader
 from torch.utils.hooks import RemovableHandle
-from torchvision.models import VisionTransformer
 
 from src import visualizer
 from src.data_loader import build_image_dataloader
-from src.hooks import LayerOutlierSummary, OutlierStatsCollector, make_outlier_hook
+from src.hooks import (
+    ActivationRecorder,
+    LayerOutlierSummary,
+    LayerThresholds,
+    MomentCollector,
+    OutlierStatsCollector,
+    make_measurement_hook,
+)
 from src.model_utils import (
     ImageTransform,
     iter_measured_modules,
@@ -131,22 +146,25 @@ def parse_config() -> ExperimentConfig:
     )
 
 
-def attach_hooks(
-    model: VisionTransformer, collector: OutlierStatsCollector
+def attach_measurement_hooks(
+    model: VisionTransformer, recorder: ActivationRecorder
 ) -> list[RemovableHandle]:
     """
-    Register one measurement hook per linear layer and tell the collector about
-    each layer up front.
+    Register one measurement PRE-hook per linear layer and tell the recorder
+    about each layer up front. A pre-hook fires just before the matmul runs, so
+    it sees the layer's input activation - the exact tensor LLM.int8() inspects
+    to decide INT8-vs-FP16 routing. The same wiring drives both passes; only the
+    recorder (a `MomentCollector` or an `OutlierStatsCollector`) differs.
 
     Returns the list of handles so we can detach the hooks afterwards. Leaving
     hooks attached would keep measuring during any later use of the model.
     """
     handles: list[RemovableHandle] = []
     for layer_name, module, layer_type in iter_measured_modules(model):
-        collector.register_layer(layer_name, layer_type)
+        recorder.register_layer(layer_name, layer_type)
 
-        hook = make_outlier_hook(collector, layer_name)
-        handle: RemovableHandle = module.register_forward_hook(hook)
+        hook = make_measurement_hook(recorder, layer_name)
+        handle: RemovableHandle = module.register_forward_pre_hook(hook)
         handles.append(handle)
     return handles
 
@@ -172,6 +190,35 @@ def run_forward_passes(
     print()  # finish the in-place progress line with a newline
 
 
+def compute_thresholds(
+    model: VisionTransformer,
+    dataloader: DataLoader[Tensor],
+    config: ExperimentConfig,
+) -> LayerThresholds:
+    """PASS 1: stream the data to compute each layer's exact global mean/std."""
+    moment_collector = MomentCollector()
+    handles = attach_measurement_hooks(model, moment_collector)
+    run_forward_passes(model, dataloader, config)
+    for handle in handles:
+        handle.remove()
+    return moment_collector.build_thresholds()
+
+
+def characterize_outliers(
+    model: VisionTransformer,
+    dataloader: DataLoader[Tensor],
+    config: ExperimentConfig,
+    thresholds: LayerThresholds,
+) -> list[LayerOutlierSummary]:
+    """PASS 2: stream the SAME data, counting outliers against frozen thresholds."""
+    collector = OutlierStatsCollector(thresholds)
+    handles = attach_measurement_hooks(model, collector)
+    run_forward_passes(model, dataloader, config)
+    for handle in handles:
+        handle.remove()
+    return collector.build_summaries()
+
+
 def export_summaries_to_json(summaries: list[LayerOutlierSummary], path: Path) -> None:
     """Write the per-layer summaries to a pretty-printed JSON file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -191,12 +238,7 @@ def main() -> None:
     transform: ImageTransform
     model, transform = load_vit_b_16(config.device)
 
-    # 2. Attach measurement hooks to every linear layer.
-    collector = OutlierStatsCollector()
-    handles = attach_hooks(model, collector)
-    print(f"Attached hooks to {len(handles)} linear layers.")
-
-    # 3. Build the image stream.
+    # 2. Build the (deterministic) image stream, reused identically by both passes.
     print(f"Loading up to {config.num_images} images from '{config.data_dir}' ...")
     dataloader: DataLoader[Tensor] = build_image_dataloader(
         image_dir=config.data_dir,
@@ -205,16 +247,17 @@ def main() -> None:
         max_images=config.num_images,
     )
 
-    # 4. Run the forward passes; the hooks accumulate statistics as we go.
-    print("Running forward passes ...")
-    run_forward_passes(model, dataloader, config)
+    # 3. PASS 1 - exact global mean/std per layer (defines the 3-sigma threshold).
+    print("Pass 1/2: computing exact global mean & std per layer ...")
+    thresholds = compute_thresholds(model, dataloader, config)
 
-    # 5. Detach the hooks now that measurement is complete.
-    for handle in handles:
-        handle.remove()
+    # 4. PASS 2 - outlier characterization against the frozen thresholds.
+    print("Pass 2/2: characterizing outliers (fixed 6.0 and 3-sigma) ...")
+    summaries: list[LayerOutlierSummary] = characterize_outliers(
+        model, dataloader, config, thresholds
+    )
 
-    # 6. Finalize the accumulators, then save the results and charts.
-    summaries: list[LayerOutlierSummary] = collector.build_summaries()
+    # 5. Save the results and charts.
     export_summaries_to_json(summaries, config.json_output_path)
     print(f"Wrote stats for {len(summaries)} layers to '{config.json_output_path}'.")
 

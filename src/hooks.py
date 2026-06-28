@@ -2,36 +2,64 @@
 hooks.py
 ========
 
-The measurement machinery for Experiment 1.
+The measurement machinery for Experiment 1, implemented as a rigorous TWO-PASS
+algorithm so the statistical (3-sigma) threshold uses EXACT global statistics
+rather than a per-batch approximation.
 
-What is a forward hook?
------------------------
-PyTorch lets us attach a "forward hook" to any module. After that module runs
-during a forward pass, PyTorch calls our hook function and hands it the
-module's output tensor. This lets us *observe* the activations flowing through
-each linear layer without modifying the model's code at all.
+Why two passes?
+---------------
+The fixed `|x| > 6.0` threshold needs no data statistics, so it could be applied
+in a single streaming pass. The statistical threshold, however, is defined
+relative to "the layer's mean" and "the layer's standard deviation" - quantities
+that are only known once every image has been seen. To threshold a value exactly
+we must therefore know the global mean and std *before* we start counting
+outliers. Hence:
+
+  * PASS 1 (`LayerMomentAccumulator`) - stream every image and accumulate, per
+    layer, the exact global mean and standard deviation of its input activation.
+    We use the Chan/Welford parallel merge in float64, which is numerically
+    stable (no catastrophic cancellation) and exact up to floating-point round-
+    off. The output is one `LayerThreshold` per layer.
+
+  * PASS 2 (`LayerOutlierAccumulator`) - stream every image again and, using the
+    FROZEN per-layer mean/std from pass 1, count outliers and routing fractions
+    for both thresholds. Because the data loader is deterministic (no shuffling),
+    both passes see byte-identical inputs, so the global statistics computed in
+    pass 1 apply exactly in pass 2.
+
+Speed is sacrificed (we read the data twice) in favour of mathematical
+exactness, which is the right trade-off for the thesis numbers.
+
+Why inputs, not outputs?
+------------------------
+For a matmul `Y = X @ W.T`, `LLM.int8()` inspects the INPUT activation `X` and
+decides, per feature column of `X`, whether that column is an outlier column
+(routed to FP16) or not (computed in INT8). So `X` - the post-LayerNorm hidden
+state entering the matmul - is the exact tensor at which the routing decision is
+made. We hook inputs (via forward PRE-hooks) so our statistics characterize
+activations at precisely that decision point.
+
+Structured (per-column) vs unstructured (per-value) outliers
+------------------------------------------------------------
+LLM.int8() is a STRUCTURED scheme: it routes ENTIRE outlier feature columns to
+FP16, never arbitrary scattered scalars. So the routing cost is the fraction of
+input feature COLUMNS that must go to FP16. We report both the per-column routing
+fraction (PRIMARY) and the per-value outlier density (BASELINE); the gap between
+them shows how much the whole-column constraint over-routes on each layer.
 
 The hard memory rule (8 GB VRAM budget)
 ---------------------------------------
-A single activation tensor can be large (tens of MB), there are dozens of
-layers, and we stream thousands of images. If we ever stored the raw tensors we
-would run out of memory almost immediately. So every hook reduces its tensor to
-a handful of scalar numbers *on the fly* and then lets the tensor be discarded.
-
-Design: three small types
---------------------------
-  1. `LayerActivationStats` - a mutable accumulator that folds in one batch at a
-     time. It holds ONLY scalar counters, never a raw activation tensor.
-  2. `LayerOutlierSummary`  - the final, immutable, human-readable result for one
-     layer. This is what we save to JSON and plot.
-  3. `OutlierStatsCollector`- owns one accumulator per layer and routes each
-     layer's activations to the right place.
+Every accumulator reduces its tensor to scalar counters (and, in pass 2, one
+fixed-size per-column counter of length = feature width) *on the fly*, then lets
+the raw activation tensor be discarded. No raw activations are ever stored.
 """
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Protocol, TypeAlias
 
+import torch
 import torch.nn as nn
 from torch import Tensor
 
@@ -39,43 +67,165 @@ from src.model_utils import LayerType
 
 # --- what counts as an "outlier" ---------------------------------------------
 
-# The fixed magnitude threshold used by the LLM.int8() paper. Any activation
-# value whose absolute size exceeds this would be routed to FP16 under a
-# mixed-precision scheme, so this fraction is the "routing cost".
+# The fixed magnitude threshold used by the LLM.int8() paper. A value whose
+# absolute size exceeds this is a candidate outlier.
 FIXED_OUTLIER_THRESHOLD: float = 6.0
 
 # The statistical threshold: a value is an outlier if it sits more than this
-# many standard deviations away from its layer's mean activation.
+# many standard deviations away from its layer's (global) mean activation.
 STD_THRESHOLD_MULTIPLIER: float = 3.0
+
+# An input feature column counts as an "outlier column" (one LLM.int8 would route
+# to FP16) only if it carries a threshold-exceeding value in at least this
+# fraction of tokens. This mirrors LLM.int8()'s own criterion - outlier feature
+# dimensions are those whose magnitude exceeds the threshold in >= 25% of
+# sequence positions. Requiring PERSISTENCE (not a single stray spike) is what
+# keeps the routing fraction meaningful and non-saturating.
+OUTLIER_COLUMN_PARTICIPATION_FRACTION: float = 0.25
+
+
+# =============================================================================
+# PASS 1: exact global mean and standard deviation
+# =============================================================================
 
 
 @dataclass(frozen=True)
-class LayerOutlierSummary:
+class LayerThreshold:
     """
-    The final outlier report for ONE linear layer, after every image has been
-    processed. `frozen=True` makes it read-only: once computed, it cannot change.
+    The exact global mean and standard deviation of one layer's input
+    activation, computed in pass 1. These define that layer's statistical
+    (3-sigma) outlier cutoff, frozen for use in pass 2.
+    """
+
+    global_mean: float
+    global_std: float
+
+    @property
+    def statistical_cutoff(self) -> float:
+        """A value `x` is a statistical outlier when `|x - global_mean|` exceeds
+        this (i.e. it lies more than 3 standard deviations from the mean)."""
+        return STD_THRESHOLD_MULTIPLIER * self.global_std
+
+
+@dataclass
+class LayerMomentAccumulator:
+    """
+    Pass-1 accumulator: folds in one batch at a time to compute the EXACT global
+    mean and variance of a layer's input activation, holding only three scalars.
+
+    Uses the Chan et al. parallel variance merge (a batched form of Welford's
+    algorithm) in float64, which avoids the catastrophic cancellation that a
+    naive sum-of-squares accumulation would suffer.
     """
 
     layer_name: str
     layer_type: LayerType
 
-    # The largest absolute activation value seen anywhere in this layer.
+    # Running aggregate: total count, running mean, and M2 (sum of squared
+    # deviations from the running mean).
+    count: int = 0
+    mean: float = 0.0
+    m2: float = 0.0
+
+    def update(self, activations: Tensor) -> None:
+        """Merge one batch's values into the running mean/variance aggregate."""
+        # float64 for numerical rigor; flatten across tokens and features so the
+        # statistic is taken over ALL of the layer's activation values.
+        values: Tensor = activations.detach().reshape(-1).double()
+        batch_count: int = values.numel()
+        if batch_count == 0:
+            return
+
+        batch_mean: float = float(values.mean().item())
+        batch_m2: float = float(((values - values.mean()) ** 2).sum().item())
+
+        if self.count == 0:
+            self.count = batch_count
+            self.mean = batch_mean
+            self.m2 = batch_m2
+            return
+
+        # Chan/Welford parallel merge of two aggregates (numerically stable).
+        delta: float = batch_mean - self.mean
+        combined_count: int = self.count + batch_count
+        self.mean = self.mean + delta * (batch_count / combined_count)
+        self.m2 = (
+            self.m2
+            + batch_m2
+            + delta * delta * (self.count * batch_count / combined_count)
+        )
+        self.count = combined_count
+
+    def finalize(self) -> LayerThreshold:
+        """Produce the exact global mean and (population) standard deviation."""
+        if self.count == 0:
+            return LayerThreshold(global_mean=0.0, global_std=0.0)
+        # Population variance (divide by N): the exact second central moment of
+        # the activation values we observed.
+        variance: float = self.m2 / self.count
+        return LayerThreshold(global_mean=self.mean, global_std=math.sqrt(variance))
+
+
+@dataclass(frozen=True)
+class LayerThresholds:
+    """
+    Immutable handoff between the two passes: the per-layer `LayerThreshold`s
+    computed in pass 1, looked up by layer name in pass 2. Wrapping the lookup
+    behind a method keeps a raw dictionary from being passed around as state.
+    """
+
+    _by_layer: dict[str, LayerThreshold]
+
+    def for_layer(self, layer_name: str) -> LayerThreshold:
+        return self._by_layer[layer_name]
+
+
+# =============================================================================
+# PASS 2: outlier counts and routing fractions, using the frozen thresholds
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class LayerOutlierSummary:
+    """
+    The final outlier report for ONE linear layer, after both passes complete.
+    `frozen=True` makes it read-only: once computed, it cannot change.
+    """
+
+    layer_name: str
+    layer_type: LayerType
+
+    # The largest absolute input value seen anywhere in this layer.
     max_magnitude: float
 
-    # Fraction (0.0 .. 1.0) of activation values with |x| > 6.0.
-    # This is the share of math a fixed-threshold scheme would push to FP16.
-    fixed_outlier_density: float
+    # The exact global mean/std (from pass 1) that define the 3-sigma cutoff,
+    # surfaced here so the statistical threshold used is fully auditable.
+    global_mean: float
+    global_std: float
 
-    # Fraction (0.0 .. 1.0) of activation values lying > 3 std-devs from the mean.
-    statistical_outlier_density: float
+    # PRIMARY LLM.int8 METRICS (per-column). Fraction (0.0 .. 1.0) of input
+    # feature columns that are "outlier columns": columns exceeding the threshold
+    # in at least OUTLIER_COLUMN_PARTICIPATION_FRACTION of tokens. Because
+    # LLM.int8 routes whole columns to FP16, this is the true fraction of the
+    # matmul's contraction dimension pushed to FP16 - the real structured cost.
+    routing_fraction_fixed: float  # threshold: |x| > 6.0
+    routing_fraction_statistical: float  # threshold: |x - mean| > 3 std
 
-    # How concentrated the outliers are within specific feature channels:
-    #   HIGH -> outliers cluster in a few persistent channels (good for routing)
+    # UNSTRUCTURED BASELINES (per-value). Fraction (0.0 .. 1.0) of individual
+    # input values exceeding each threshold, ignoring column structure. The GAP
+    # between a routing fraction and its matching density quantifies the penalty
+    # of LLM.int8's whole-column routing on this layer.
+    value_outlier_density_fixed: float
+    value_outlier_density_statistical: float
+
+    # How concentrated outliers are within specific input feature columns:
+    #   HIGH -> outliers cluster in a few persistent columns (good for routing)
     #   LOW  -> outliers are scattered everywhere (the LLM.int8 premise breaks)
     channel_persistence_variance: float
 
-    # How many individual activation numbers we examined (for transparency).
+    # Transparency: how many individual values and how many tokens we examined.
     total_values_seen: int
+    total_tokens_seen: int
 
     def to_dict(self) -> dict[str, object]:
         """Convert to plain Python types so `json.dump` can serialize it."""
@@ -83,95 +233,104 @@ class LayerOutlierSummary:
             "layer_name": self.layer_name,
             "layer_type": self.layer_type.value,
             "max_magnitude": self.max_magnitude,
-            "fixed_outlier_density": self.fixed_outlier_density,
-            "statistical_outlier_density": self.statistical_outlier_density,
+            "global_mean": self.global_mean,
+            "global_std": self.global_std,
+            "routing_fraction_fixed": self.routing_fraction_fixed,
+            "routing_fraction_statistical": self.routing_fraction_statistical,
+            "value_outlier_density_fixed": self.value_outlier_density_fixed,
+            "value_outlier_density_statistical": self.value_outlier_density_statistical,
             "channel_persistence_variance": self.channel_persistence_variance,
             "total_values_seen": self.total_values_seen,
+            "total_tokens_seen": self.total_tokens_seen,
         }
 
 
 @dataclass
-class LayerActivationStats:
+class LayerOutlierAccumulator:
     """
-    Running statistics for ONE linear layer while images stream through it.
+    Pass-2 accumulator: folds in one batch at a time to count outliers and
+    per-column routing fractions, using the FROZEN per-layer threshold from
+    pass 1 for the statistical cutoff.
 
-    Every field is a small scalar accumulator - never a raw activation tensor -
-    so memory usage stays flat no matter how many images we process.
+    Holds only scalar counters plus two fixed-size per-column counters (length =
+    the layer's input feature width), never a raw activation tensor, so memory
+    stays flat regardless of how many images we process.
     """
 
     layer_name: str
     layer_type: LayerType
+    threshold: LayerThreshold  # exact global mean/std from pass 1
 
-    # Running maximum of |activation| seen so far.
     max_magnitude: float = 0.0
 
-    # Running totals, combined into densities only at the very end.
-    fixed_outlier_count: int = 0
-    statistical_outlier_count: int = 0
+    # Per-value outlier counts (numerators of the unstructured densities).
+    fixed_value_outlier_count: int = 0
+    statistical_value_outlier_count: int = 0
     total_value_count: int = 0
+    total_token_count: int = 0
 
-    # Channel persistence is measured once per batch; we average across batches.
+    # Per-COLUMN token-participation counters, lazily allocated on the first
+    # batch. Each holds, per input feature column, the number of TOKENS in which
+    # that column was an outlier under the respective threshold.
+    fixed_tokens_per_channel: Tensor | None = None
+    statistical_tokens_per_channel: Tensor | None = None
+
+    # Channel persistence (fixed threshold) is measured per batch and averaged.
     channel_variance_sum: float = 0.0
     batch_count: int = 0
 
     def update(self, activations: Tensor) -> None:
-        """
-        Fold one batch of activations into the running statistics.
-
-        `activations` has shape [Batch, Sequence, Features]:
-          * Batch    - images in this mini-batch (e.g. 64)
-          * Sequence - tokens per image (197 for ViT-B/16: 196 patches + 1 CLS)
-          * Features - this layer's output width (e.g. 768, or 3072 inside MLPs)
-        """
-        # We only READ these numbers, so detach from the autograd graph.
+        """Fold one batch of INPUT activations into the running outlier counts."""
         activations = activations.detach()
 
-        # Collapse [Batch, Sequence] into a single "one row per token" axis. The
-        # result is a 2-D matrix: rows are tokens, columns are feature channels.
+        # Collapse [Batch, Sequence] into a single "one row per token" axis:
+        # rows are tokens, columns are input feature channels.
         feature_count: int = activations.shape[-1]
         tokens: Tensor = activations.reshape(-1, feature_count)  # [Tokens, Features]
+        token_count: int = tokens.shape[0]
+        abs_tokens: Tensor = tokens.abs()
 
-        # --- Metric 1: maximum magnitude ------------------------------------
-        # The single largest absolute value anywhere in this batch.
-        batch_max_magnitude: float = float(tokens.abs().max().item())
-        self.max_magnitude = max(self.max_magnitude, batch_max_magnitude)
+        # Lazily allocate the per-column counters now that the width is known.
+        fixed_per_channel: Tensor = (
+            self.fixed_tokens_per_channel
+            if self.fixed_tokens_per_channel is not None
+            else torch.zeros(feature_count, dtype=torch.long, device=tokens.device)
+        )
+        statistical_per_channel: Tensor = (
+            self.statistical_tokens_per_channel
+            if self.statistical_tokens_per_channel is not None
+            else torch.zeros(feature_count, dtype=torch.long, device=tokens.device)
+        )
 
-        # --- Metric 2a: fixed-threshold outlier density ---------------------
-        # A boolean matrix, True wherever |value| exceeds 6.0.
-        fixed_outlier_mask: Tensor = tokens.abs() > FIXED_OUTLIER_THRESHOLD
-        self.fixed_outlier_count += int(fixed_outlier_mask.sum().item())
+        # --- Maximum magnitude ----------------------------------------------
+        self.max_magnitude = max(self.max_magnitude, float(abs_tokens.max().item()))
 
-        # --- Metric 2b: statistical-threshold outlier density ---------------
-        # Here "outlier" means far from this batch's own mean activation. We use
-        # the batch's mean and standard deviation to define the cutoff.
-        mean: Tensor = tokens.mean()
-        std: Tensor = tokens.std()
-        statistical_cutoff: Tensor = STD_THRESHOLD_MULTIPLIER * std
-        statistical_outlier_mask: Tensor = (tokens - mean).abs() > statistical_cutoff
-        self.statistical_outlier_count += int(statistical_outlier_mask.sum().item())
+        # --- Fixed-threshold mask (|x| > 6.0) -------------------------------
+        fixed_mask: Tensor = abs_tokens > FIXED_OUTLIER_THRESHOLD
+        self.fixed_value_outlier_count += int(fixed_mask.sum().item())
 
-        # The denominator shared by both densities.
+        # --- Statistical-threshold mask (|x - global_mean| > 3 * global_std) -
+        # Uses the EXACT global mean/std frozen from pass 1, not per-batch stats.
+        deviations: Tensor = (tokens - self.threshold.global_mean).abs()
+        statistical_mask: Tensor = deviations > self.threshold.statistical_cutoff
+        self.statistical_value_outlier_count += int(statistical_mask.sum().item())
+
         self.total_value_count += tokens.numel()
+        self.total_token_count += token_count
 
-        # --- Metric 3: channel persistence ----------------------------------
-        # For each feature channel (column), count how many fixed-threshold
-        # outliers landed in it. Summing down dim=0 collapses the token axis.
-        outliers_per_channel: Tensor = fixed_outlier_mask.sum(
-            dim=0
-        ).float()  # [Features]
+        # Per-column participation: how many tokens make each column an outlier.
+        self.fixed_tokens_per_channel = fixed_per_channel + fixed_mask.sum(dim=0)
+        self.statistical_tokens_per_channel = (
+            statistical_per_channel + statistical_mask.sum(dim=0)
+        )
 
-        # Now ask: are those per-channel counts spread out, or all similar?
-        # We compute the population variance explicitly so the math is visible:
-        #     variance = average of (count - average_count) ** 2
-        # A few channels hogging all the outliers -> large variance (persistent).
-        # Outliers sprinkled evenly across channels -> small variance (scattered).
+        # --- Channel persistence (variance of per-column outlier counts) ----
+        outliers_per_channel: Tensor = fixed_mask.sum(dim=0).float()  # [Features]
         mean_outliers_per_channel: Tensor = outliers_per_channel.mean()
         squared_deviations: Tensor = (
             outliers_per_channel - mean_outliers_per_channel
         ) ** 2
-        batch_channel_variance: float = float(squared_deviations.mean().item())
-
-        self.channel_variance_sum += batch_channel_variance
+        self.channel_variance_sum += float(squared_deviations.mean().item())
         self.batch_count += 1
 
         # `activations`, `tokens`, and the masks all fall out of scope here, so
@@ -179,54 +338,111 @@ class LayerActivationStats:
 
     def finalize(self) -> LayerOutlierSummary:
         """Turn the running accumulators into the final per-layer summary."""
+        fixed_per_channel: Tensor | None = self.fixed_tokens_per_channel
+        statistical_per_channel: Tensor | None = self.statistical_tokens_per_channel
+
         # Defensive guard: if a layer somehow never fired, report all zeros
         # instead of dividing by zero.
-        if self.total_value_count == 0 or self.batch_count == 0:
+        if (
+            self.total_value_count == 0
+            or self.total_token_count == 0
+            or self.batch_count == 0
+            or fixed_per_channel is None
+            or statistical_per_channel is None
+        ):
             return LayerOutlierSummary(
                 layer_name=self.layer_name,
                 layer_type=self.layer_type,
                 max_magnitude=0.0,
-                fixed_outlier_density=0.0,
-                statistical_outlier_density=0.0,
+                global_mean=self.threshold.global_mean,
+                global_std=self.threshold.global_std,
+                routing_fraction_fixed=0.0,
+                routing_fraction_statistical=0.0,
+                value_outlier_density_fixed=0.0,
+                value_outlier_density_statistical=0.0,
                 channel_persistence_variance=0.0,
                 total_values_seen=0,
+                total_tokens_seen=0,
             )
 
-        fixed_density: float = self.fixed_outlier_count / self.total_value_count
+        fixed_density: float = self.fixed_value_outlier_count / self.total_value_count
         statistical_density: float = (
-            self.statistical_outlier_count / self.total_value_count
+            self.statistical_value_outlier_count / self.total_value_count
         )
-        average_channel_variance: float = self.channel_variance_sum / self.batch_count
+
+        # A column is an outlier column if it exceeded the threshold in at least
+        # the participation fraction of all tokens seen. The routing fraction is
+        # the share of such columns = the fraction of the matmul's contraction
+        # dimension LLM.int8 would send to FP16.
+        min_outlier_tokens: float = (
+            OUTLIER_COLUMN_PARTICIPATION_FRACTION * self.total_token_count
+        )
+        feature_count: int = fixed_per_channel.numel()
+        fixed_outlier_columns: int = int(
+            (fixed_per_channel.float() >= min_outlier_tokens).sum().item()
+        )
+        statistical_outlier_columns: int = int(
+            (statistical_per_channel.float() >= min_outlier_tokens).sum().item()
+        )
 
         return LayerOutlierSummary(
             layer_name=self.layer_name,
             layer_type=self.layer_type,
             max_magnitude=self.max_magnitude,
-            fixed_outlier_density=fixed_density,
-            statistical_outlier_density=statistical_density,
-            channel_persistence_variance=average_channel_variance,
+            global_mean=self.threshold.global_mean,
+            global_std=self.threshold.global_std,
+            routing_fraction_fixed=fixed_outlier_columns / feature_count,
+            routing_fraction_statistical=statistical_outlier_columns / feature_count,
+            value_outlier_density_fixed=fixed_density,
+            value_outlier_density_statistical=statistical_density,
+            channel_persistence_variance=self.channel_variance_sum / self.batch_count,
             total_values_seen=self.total_value_count,
+            total_tokens_seen=self.total_token_count,
+        )
+
+
+# =============================================================================
+# Collectors: one accumulator per layer, for each pass
+# =============================================================================
+
+
+class MomentCollector:
+    """Owns one `LayerMomentAccumulator` per layer for PASS 1."""
+
+    def __init__(self) -> None:
+        self._stats_by_layer: dict[str, LayerMomentAccumulator] = {}
+
+    def register_layer(self, layer_name: str, layer_type: LayerType) -> None:
+        """Create an empty moment accumulator for a layer before pass 1 starts."""
+        self._stats_by_layer[layer_name] = LayerMomentAccumulator(
+            layer_name=layer_name,
+            layer_type=layer_type,
+        )
+
+    def record_activations(self, layer_name: str, activations: Tensor) -> None:
+        """Fold one batch of activations into the named layer's accumulator."""
+        self._stats_by_layer[layer_name].update(activations)
+
+    def build_thresholds(self) -> LayerThresholds:
+        """Finalize every layer's exact global mean/std into a frozen handoff."""
+        return LayerThresholds(
+            {name: stats.finalize() for name, stats in self._stats_by_layer.items()}
         )
 
 
 class OutlierStatsCollector:
-    """
-    Owns one `LayerActivationStats` accumulator per hooked layer and routes each
-    layer's activations to the right accumulator.
+    """Owns one `LayerOutlierAccumulator` per layer for PASS 2."""
 
-    We keep an internal dict for fast name-based lookup, but it is hidden behind
-    methods so the rest of the program never passes a raw dictionary around as a
-    stand-in for a real type.
-    """
-
-    def __init__(self) -> None:
-        self._stats_by_layer: dict[str, LayerActivationStats] = {}
+    def __init__(self, thresholds: LayerThresholds) -> None:
+        self._thresholds: LayerThresholds = thresholds
+        self._stats_by_layer: dict[str, LayerOutlierAccumulator] = {}
 
     def register_layer(self, layer_name: str, layer_type: LayerType) -> None:
-        """Create an empty accumulator for a layer before measurement starts."""
-        self._stats_by_layer[layer_name] = LayerActivationStats(
+        """Create an outlier accumulator seeded with this layer's pass-1 threshold."""
+        self._stats_by_layer[layer_name] = LayerOutlierAccumulator(
             layer_name=layer_name,
             layer_type=layer_type,
+            threshold=self._thresholds.for_layer(layer_name),
         )
 
     def record_activations(self, layer_name: str, activations: Tensor) -> None:
@@ -238,46 +454,66 @@ class OutlierStatsCollector:
         return [stats.finalize() for stats in self._stats_by_layer.values()]
 
 
-def extract_activation_tensor(module_output: object) -> Tensor | None:
-    """
-    Reduce a module's forward output to a single activation tensor.
+# =============================================================================
+# Hook wiring (shared by both passes)
+# =============================================================================
 
-    Different modules return different shapes of output:
-      * an `nn.Linear` returns a Tensor directly;
-      * an `nn.MultiheadAttention` returns a tuple (attn_output, attn_weights),
-        where we want the first element (and attn_weights is often None).
 
-    We return the first Tensor we find, or None if there is nothing measurable
-    (in which case the caller simply skips this batch).
+class ActivationRecorder(Protocol):
     """
-    if isinstance(module_output, Tensor):
-        return module_output
-    if isinstance(module_output, (tuple, list)):
-        for element in module_output:
+    The capability both collectors share: register layers up front, then receive
+    each layer's input activations during a forward pass. The hook machinery and
+    the driver depend only on this protocol, so the same wiring drives pass 1
+    (`MomentCollector`) and pass 2 (`OutlierStatsCollector`).
+    """
+
+    def register_layer(self, layer_name: str, layer_type: LayerType) -> None: ...
+
+    def record_activations(self, layer_name: str, activations: Tensor) -> None: ...
+
+
+def extract_activation_tensor(module_inputs: object) -> Tensor | None:
+    """
+    Reduce a forward pre-hook's `inputs` to a single activation tensor.
+
+    A pre-hook receives the module's positional inputs as a tuple; for an
+    `nn.Linear` the activation we want is the first (and only) element. We return
+    the first Tensor we find, or None if there is nothing measurable (in which
+    case the caller simply skips this batch). A bare Tensor is also accepted and
+    returned unchanged, which keeps the helper easy to unit-test.
+    """
+    if isinstance(module_inputs, Tensor):
+        return module_inputs
+    if isinstance(module_inputs, (tuple, list)):
+        for element in module_inputs:
             if isinstance(element, Tensor):
                 return element
     return None
 
 
-# A forward hook is called as hook(module, inputs, output) and returns nothing.
-# `output` is typed `object` because, depending on the module, it may be a
-# Tensor or a tuple - `extract_activation_tensor` normalizes the difference.
-ForwardHook: TypeAlias = Callable[[nn.Module, tuple[Tensor, ...], object], None]
+# A forward pre-hook is called as hook(module, inputs) and returns nothing.
+# `inputs` is the tuple of positional arguments about to enter the module;
+# `extract_activation_tensor` pulls the input activation out of it.
+PreForwardHook: TypeAlias = Callable[[nn.Module, tuple[Tensor, ...]], None]
 
 
-def make_outlier_hook(collector: OutlierStatsCollector, layer_name: str) -> ForwardHook:
+def make_measurement_hook(
+    recorder: ActivationRecorder, layer_name: str
+) -> PreForwardHook:
     """
-    Build a forward hook bound to one specific layer.
+    Build a forward PRE-hook bound to one specific layer and recorder.
 
-    PyTorch will call the returned `hook` right after the module runs, handing us
-    its `output`. We normalize that to a single activation tensor and pass it to
-    the collector, which reduces it to scalars and discards it. The `_module`
-    and `_inputs` arguments are part of the hook signature but unused here.
+    PyTorch calls the returned `hook` right BEFORE the module runs, handing us
+    its `inputs`. We normalize that to a single activation tensor - the matmul's
+    input, i.e. the tensor `LLM.int8()` would decompose - and pass it to the
+    recorder, which reduces it to scalars and discards it. The same factory works
+    for both passes; only the recorder differs. The `_module` argument is part of
+    the hook signature but unused here.
     """
 
-    def hook(_module: nn.Module, _inputs: tuple[Tensor, ...], output: object) -> None:
-        activations = extract_activation_tensor(output)
+    def hook(_module: nn.Module, inputs: tuple[Tensor, ...]) -> None:
+        activations = extract_activation_tensor(inputs)
         if activations is not None:
-            collector.record_activations(layer_name, activations)
+            recorder.record_activations(layer_name, activations)
 
     return hook
