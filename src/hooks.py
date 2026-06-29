@@ -129,15 +129,23 @@ class LayerMomentAccumulator:
 
     def update(self, activations: Tensor) -> None:
         """Merge one batch's values into the running mean/variance aggregate."""
-        # float64 for numerical rigor; flatten across tokens and features so the
-        # statistic is taken over ALL of the layer's activation values.
-        values: Tensor = activations.detach().reshape(-1).double()
-        batch_count: int = values.numel()
+        # Flatten across tokens and features so the statistic is taken over ALL
+        # of the layer's activation values. We keep the original dtype here and
+        # pass dtype=torch.float64 into the accumulation ops below. This avoids
+        # materialising a full float64 copy of the activation tensor (what the
+        # old `.double()` approach did, doubling peak VRAM per batch) while still
+        # accumulating the mean and M2 in float64 for numerical rigour.
+        values_flat: Tensor = activations.detach().reshape(-1)
+        batch_count: int = values_flat.numel()
         if batch_count == 0:
             return
 
-        batch_mean: float = float(values.mean().item())
-        batch_m2: float = float(((values - values.mean()) ** 2).sum().item())
+        batch_mean: float = float(values_flat.mean(dtype=torch.float64).item())
+        # Reuse batch_mean rather than calling .mean() a second time; accumulate
+        # the squared deviations in float64 via sum's dtype argument.
+        batch_m2: float = float(
+            ((values_flat - batch_mean).pow(2)).sum(dtype=torch.float64).item()
+        )
 
         if self.count == 0:
             self.count = batch_count
