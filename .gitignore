@@ -4,9 +4,9 @@
 # The ImageNet validation images (downloaded with download_imagenet_val.py) and
 # all experiment results (JSON, CSV, plots) are large and/or reproducible, so
 # they are never committed. The scripts recreate these folders as needed.
+# Committing outputs/
 # =============================================================================
 data/
-outputs/
 
 # =============================================================================
 # Python bytecode & build artifacts
