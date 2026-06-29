@@ -70,8 +70,13 @@ def test_two_pass_pipeline_measures_every_layer() -> None:
     # (12 fc1 + 12 fc2) + 1 classifier head = 49 modules.
     assert len(summaries) == 49
     assert all(summary.total_values_seen > 0 for summary in summaries)
-    # Every layer carries the exact global std used for its 3-sigma threshold.
+    # Every layer carries the exact per-channel statistics and derived aggregates.
     assert all(summary.global_std >= 0.0 for summary in summaries)
+    assert all(len(summary.channel_means) > 0 for summary in summaries)
+    assert all(len(summary.channel_stds) > 0 for summary in summaries)
+    # Per-channel arrays match the layer's feature width.
+    for summary in summaries:
+        assert len(summary.channel_means) == len(summary.channel_stds)
 
     counts_by_type: dict[LayerType, int] = {layer_type: 0 for layer_type in LayerType}
     for summary in summaries:

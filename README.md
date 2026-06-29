@@ -12,16 +12,30 @@ exact point where the routing decision is made.
 
 The headline metric is the **per-column routing fraction**: because `LLM.int8()`
 routes *entire* input feature columns to FP16 (not scattered scalars), we flag a
-column as an outlier column only when it exceeds the threshold in at least 25% of
-tokens (`LLM.int8()`'s own participation criterion, which also keeps the metric
-from saturating). We also report the per-value outlier density as an unstructured
-baseline - the gap between the two reveals how much the whole-column constraint
-over-routes on each layer.
+column as an outlier column only when it exceeds the threshold in at least a
+minimum fraction of tokens. The participation bar differs by threshold:
+
+- **Fixed threshold (`|x| > 6.0`): 25% bar** — the faithful LLM.int8() criterion.
+  This answers "what would LLM.int8() actually route?"
+- **Statistical threshold (`> 3 per-channel std`): 5% bar** — calibrated to
+  ViT-B/16's ~1% per-channel outlier density. A 25% bar would flag zero columns
+  on every layer (ViT outliers are moderate and evenly distributed, unlike LLM
+  outliers which are extreme and persistent). The 5% bar still requires
+  persistence (~492K out of 9.85M tokens on a full run) but produces a
+  meaningful per-layer signal.
+
+We also report the per-value outlier density as an unstructured baseline - the
+gap between the two reveals how much the whole-column constraint over-routes on
+each layer.
 
 Every metric is reported for **two thresholds** - the fixed `|x| > 6.0` and a
-`3-sigma` cutoff - so they can be compared directly. Because the `3-sigma`
-threshold depends on each layer's mean and std, Experiment 1 runs as a rigorous
-**two-pass** sweep: pass 1 computes each layer's *exact* global mean/std (via the
+`3-sigma` cutoff - so they can be compared directly. The `3-sigma` threshold is
+computed **per input feature channel** (not globally): each of the 768 (or 3072
+for `mlp.fc2`) channels gets its own mean and standard deviation from Pass 1,
+because different feature dimensions have different activation distributions.
+Because the `3-sigma` threshold depends on per-channel statistics that are only
+known after seeing every image, Experiment 1 runs as a rigorous **two-pass**
+sweep: pass 1 computes each layer's *exact* per-channel mean/std (via the
 numerically-stable Chan/Welford merge in float64), and pass 2 freezes those
 statistics to count outliers. The data is read twice on purpose - exactness is
 prioritized over speed.
@@ -109,6 +123,25 @@ written to `outputs/exp1_outlier_maps/` (a JSON file plus PNG charts). Run
 
 ---
 
+## Known Limitations
+
+### Software simulation vs. hardware EDP
+The current summer phase is strictly **software-based accuracy simulation** on an
+x86 GPU. Experiment 4's mixed-precision decomposition simulation does not model
+the memory bandwidth penalties of gathering scattered outlier columns on shared
+LPDDR5 memory — a critical bottleneck for the Jetson Orin Nano deployment target.
+The gap between simulated accuracy recovery and actual hardware Energy-Delay
+Product (EDP) will be measured in a future hardware-in-the-loop phase.
+
+### Isolated vs. compound sensitivity
+Experiment 3 measures per-layer sensitivity by quantizing one layer at a time in
+an otherwise full-precision model. This captures *intrinsic* sensitivity but does
+not account for the compound accumulation of quantization noise through residual
+connections across the 12 sequential blocks. The compound effect is measured in
+Experiments 2 and 4.
+
+---
+
 ## The Test Suite
 
 The suite verifies the experiment's logic **without needing real ImageNet data**
@@ -129,11 +162,10 @@ pipeline.
 |------|----------------|------------------|
 | `tests/conftest.py` | Shared **fixtures** (synthetic activations, a temp image folder). Not tests themselves. | no |
 | `tests/test_model_utils.py` | Layer tagging: attention vs. MLP vs. other. | no |
-| `tests/test_hooks.py` | Pass-1 mean/std exactness, pass-2 outlier & routing-fraction math, activation extraction, two-pass collector wiring. | no |
+| `tests/test_hooks.py` | Pass-1 per-channel mean/std exactness, pass-2 outlier & routing-fraction math, activation extraction, two-pass collector wiring. | no |
 | `tests/test_data_loader.py` | Image discovery, dataset shapes, `max_images`, batching, empty-folder error. | no |
 | `tests/test_config.py` | Command-line parsing into the immutable `ExperimentConfig`. | no |
-| `tests/test_integration.py` | End-to-end: real ViT-B/16 (timm), all 49 linear layers receive data. **Marked `slow`.** | yes |. It is tagged
-`@pytest.mark.slow` so you can
+| `tests/test_integration.py` | End-to-end: real ViT-B/16 (timm), all 49 linear layers receive data. **Marked `slow`.** | yes |
 
 ### How the fast tests stay fast
 
@@ -176,7 +208,7 @@ pytest -v
 
 # A single file, or a single test.
 pytest tests/test_hooks.py
-pytest tests/test_hooks.py::test_fixed_outlier_density_is_exact
+pytest tests/test_hooks.py::test_per_channel_mean_and_std_are_exact
 
 # Stop at the first failure and drop into a short traceback.
 pytest -x
@@ -185,7 +217,7 @@ pytest -x
 Expected output for the quick loop:
 
 ```
-40 passed, 1 deselected in ~2.4s
+41 passed, 1 deselected in ~2.4s
 ```
 
 ### Adding your own tests
