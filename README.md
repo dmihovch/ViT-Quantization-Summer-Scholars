@@ -217,8 +217,12 @@ pytest -x
 Expected output for the quick loop:
 
 ```
-41 passed, 1 deselected in ~2.4s
+43 passed, 1 deselected in ~2.4s
 ```
+
+(This count was 41 before a channel-persistence-variance bug fix added one
+regression test; see `docs/advisor-touchpoint-guide.md` Section 4.8 for the
+details of that fix.)
 
 ### Adding your own tests
 

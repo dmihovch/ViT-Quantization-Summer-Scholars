@@ -115,6 +115,18 @@ vit_thesis_workspace/
 
 **Scope note (software simulation only):** This experiment is a software accuracy simulation. It does not model the memory bandwidth penalties of gathering scattered outlier columns on shared LPDDR5 memory — a critical bottleneck for the Jetson Orin Nano deployment target. Gathering non-contiguous outlier columns out of a sequential tensor for a separate FP16 kernel introduces severe memory access penalties that a pure arithmetic simulation cannot capture. The gap between simulated accuracy recovery and actual hardware Energy-Delay Product (EDP) will need to be measured in a future hardware-in-the-loop phase on the Jetson.
 
+**[PENDING ADVISOR DECISION, not yet applied here]** Experiment 1's results
+(`outputs/exp1_outlier_maps/REPORT.md` Section 5; `docs/advisor-touchpoint-guide.md`
+Section 4.5) show that threshold 2 above (the per-channel 3-sigma threshold)
+self-normalizes to each layer's own standard deviation and therefore cannot
+detect the blocks 9-10 activation-scale explosion by construction - it is
+predicted to show near-zero high-precision fraction and near-zero accuracy
+recovery at exactly the layers that matter most. `docs/advisor-touchpoint-guide.md`
+Section 4.5 recommends dropping threshold 2 from this experiment's accuracy
+sweep and keeping it as an Experiment-1-style diagnostic only. This spec has
+not been edited yet pending sign-off; if approved, update the "Test using two
+distinct thresholds" list above before implementing `run_exp4_decomposition.py`.
+
 ---
 
 ## 5. NEXT STEPS (For the Agent)

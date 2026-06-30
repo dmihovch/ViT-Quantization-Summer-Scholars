@@ -314,6 +314,31 @@ def test_channel_persistence_is_higher_when_outliers_concentrate() -> None:
     assert concentrated_variance > scattered_variance
 
 
+def test_channel_persistence_is_invariant_to_batching() -> None:
+    # Regression test for a fixed bug: channel persistence variance must be
+    # computed once over the FULL run's cumulative per-column outlier counts,
+    # not averaged across per-batch variances. Splitting the same data into
+    # two update() calls must give the identical result as one update() call.
+    full = torch.zeros(4, 8)
+    full[:, 0] = 10.0
+    full[0:2, 3] = 10.0
+
+    single_batch_stats = LayerOutlierAccumulator(
+        "single", LayerType.FEEDFORWARD, NEUTRAL_THRESHOLD
+    )
+    single_batch_stats.update(full)
+    single_batch_variance = single_batch_stats.finalize().channel_persistence_variance
+
+    two_batch_stats = LayerOutlierAccumulator(
+        "two", LayerType.FEEDFORWARD, NEUTRAL_THRESHOLD
+    )
+    two_batch_stats.update(full[:2])
+    two_batch_stats.update(full[2:])
+    two_batch_variance = two_batch_stats.finalize().channel_persistence_variance
+
+    assert two_batch_variance == pytest.approx(single_batch_variance)
+
+
 def test_finalize_with_no_data_returns_zeros() -> None:
     """A layer that never fired must not crash with a divide-by-zero."""
     summary = LayerOutlierAccumulator(

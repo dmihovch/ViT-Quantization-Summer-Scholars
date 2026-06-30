@@ -58,6 +58,16 @@ input feature COLUMNS that must go to FP16. We report both the per-column routin
 fraction (PRIMARY) and the per-value outlier density (BASELINE); the gap between
 them shows how much the whole-column constraint over-routes on each layer.
 
+Channel persistence (fixed, full-run variance)
+------------------------------------------------
+Channel persistence variance is computed ONCE in `finalize()`, from the
+cumulative per-column outlier-token counts over the ENTIRE run. An earlier
+version of this code averaged a per-batch variance across batches instead,
+which measures a different (and batch-size-dependent) quantity. That bug was
+fixed; see `docs/advisor-touchpoint-guide.md` Section 4 for the implication on
+already-reported numbers (blocks 9-10 persistence values must be re-derived
+from a re-run).
+
 The hard memory rule (8 GB VRAM budget)
 ---------------------------------------
 Every accumulator reduces its tensor to scalar counters (and, in pass 2, one
@@ -361,10 +371,6 @@ class LayerOutlierAccumulator:
     fixed_tokens_per_channel: Tensor | None = None
     statistical_tokens_per_channel: Tensor | None = None
 
-    # Channel persistence (fixed threshold) is measured per batch and averaged.
-    channel_variance_sum: float = 0.0
-    batch_count: int = 0
-
     def update(self, activations: Tensor) -> None:
         """Fold one batch of INPUT activations into the running outlier counts.
 
@@ -433,14 +439,13 @@ class LayerOutlierAccumulator:
         # Per-column participation for the fixed threshold.
         self.fixed_tokens_per_channel = fixed_per_channel + fixed_mask.sum(dim=0)
 
-        # --- Channel persistence (variance of per-column outlier counts) ----
-        outliers_per_channel: Tensor = fixed_mask.sum(dim=0).float()  # [Features]
-        mean_outliers_per_channel: Tensor = outliers_per_channel.mean()
-        squared_deviations: Tensor = (
-            outliers_per_channel - mean_outliers_per_channel
-        ) ** 2
-        self.channel_variance_sum += float(squared_deviations.mean().item())
-        self.batch_count += 1
+        # NOTE: channel persistence is no longer computed here. Computing it
+        # per-batch and averaging across batches (the previous approach) gives
+        # the average WITHIN-BATCH variance, not the variance of each column's
+        # outlier rate over the FULL run -- a batch-size-dependent quantity that
+        # is not what "channel persistence across 9.85M tokens" is supposed to
+        # mean. `finalize()` now computes the correct full-run variance directly
+        # from the cumulative `fixed_tokens_per_channel` counter below.
 
         # `activations`, `tokens`, and the masks all fall out of scope here, so
         # their GPU memory is freed before the next layer's hook runs.
@@ -455,7 +460,6 @@ class LayerOutlierAccumulator:
         if (
             self.total_value_count == 0
             or self.total_token_count == 0
-            or self.batch_count == 0
             or fixed_per_channel is None
             or statistical_per_channel is None
         ):
@@ -501,6 +505,18 @@ class LayerOutlierAccumulator:
             (statistical_per_channel.float() >= statistical_min_tokens).sum().item()
         )
 
+        # Channel persistence: the variance, across input feature columns, of
+        # each column's TOTAL outlier-token count over the FULL run (not an
+        # average of per-batch variances -- that previous approach mixed in
+        # batch-size-dependent noise and did not measure persistence over the
+        # full 9.85M-token run). Computed once, here, directly from the
+        # cumulative `fixed_tokens_per_channel` counter.
+        outlier_counts_per_channel: Tensor = fixed_per_channel.float()  # [Features]
+        mean_outlier_count: Tensor = outlier_counts_per_channel.mean()
+        channel_persistence_variance: float = float(
+            ((outlier_counts_per_channel - mean_outlier_count) ** 2).mean().item()
+        )
+
         # Extract per-channel statistics from the threshold for auditability.
         threshold_means: list[float] = self.threshold.channel_means.tolist()
         threshold_stds: list[float] = self.threshold.channel_stds.tolist()
@@ -517,7 +533,7 @@ class LayerOutlierAccumulator:
             routing_fraction_statistical=statistical_outlier_columns / feature_count,
             value_outlier_density_fixed=fixed_density,
             value_outlier_density_statistical=statistical_density,
-            channel_persistence_variance=self.channel_variance_sum / self.batch_count,
+            channel_persistence_variance=channel_persistence_variance,
             total_values_seen=self.total_value_count,
             total_tokens_seen=self.total_token_count,
         )
