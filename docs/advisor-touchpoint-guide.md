@@ -48,13 +48,6 @@ in this document is supporting detail; the full issue log is in Section 9.
    detect the blocks 9-10 explosion by construction (it self-normalizes to
    each layer's own scale). Running the full decomposition sweep with it would
    mostly reconfirm what Section 3.5 already shows. (Section 4.5)
-5. **A measurement bug was found and fixed during this review** (channel
-   persistence variance was averaged across batches instead of computed once
-   over the full run). The numbers in Section 3.4 are from the corrected code,
-   but the fix changed the result meaningfully: block 8's persistence is now
-   nearly as high as block 9's, despite a much lower routing fraction. Worth
-   discussing what that means for the "density, not scatter" claim. (Section
-   3.4, Section 4.8)
 
 ---
 
