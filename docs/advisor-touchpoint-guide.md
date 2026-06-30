@@ -17,7 +17,7 @@ designed but not yet run.
 
 ## 1. The research question and the intended novel contribution
 
-### The friction point (from the literature)
+### The friction points from literature
 
 - INT8 GEMMs (via cuBLAS) are efficient but **activation outliers wreck
   accuracy**. This is the core finding of Dettmers et al., *LLM.int8()*
@@ -27,7 +27,7 @@ designed but not yet run.
   **sparse** and **channel-persistent**: a handful of feature dimensions are
   reliably large across all tokens.
 
-### Our hypothesis (the novel angle)
+### Hypothesis
 
 > The sparsity and persistence assumptions that justify `LLM.int8()` were derived
 > from *language* models. Vision Transformers may have a **different outlier
