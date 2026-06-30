@@ -15,9 +15,9 @@ routes *entire* input feature columns to FP16 (not scattered scalars), we flag a
 column as an outlier column only when it exceeds the threshold in at least a
 minimum fraction of tokens. The participation bar differs by threshold:
 
-- **Fixed threshold (`|x| > 6.0`): 25% bar** — the faithful LLM.int8() criterion.
+- **Fixed threshold (`|x| > 6.0`): 25% bar.** The faithful LLM.int8() criterion.
   This answers "what would LLM.int8() actually route?"
-- **Statistical threshold (`> 3 per-channel std`): 5% bar** — calibrated to
+- **Statistical threshold (`> 3 per-channel std`): 5% bar.** Calibrated to
   ViT-B/16's ~1% per-channel outlier density. A 25% bar would flag zero columns
   on every layer (ViT outliers are moderate and evenly distributed, unlike LLM
   outliers which are extreme and persistent). The 5% bar still requires
@@ -129,7 +129,7 @@ written to `outputs/exp1_outlier_maps/` (a JSON file plus PNG charts). Run
 The current summer phase is strictly **software-based accuracy simulation** on an
 x86 GPU. Experiment 4's mixed-precision decomposition simulation does not model
 the memory bandwidth penalties of gathering scattered outlier columns on shared
-LPDDR5 memory — a critical bottleneck for the Jetson Orin Nano deployment target.
+LPDDR5 memory, a critical bottleneck for the Jetson Orin Nano deployment target.
 The gap between simulated accuracy recovery and actual hardware Energy-Delay
 Product (EDP) will be measured in a future hardware-in-the-loop phase.
 
@@ -176,7 +176,7 @@ central example (defined once in `conftest.py` and reused via the
 - feature **channel 2** is a persistent outlier (value `10.0` in all 8 tokens), and
 - a single spike of `100.0` fixes the maximum magnitude.
 
-That gives exact, assertable answers — e.g. the fixed-threshold outlier density
+That gives exact, assertable answers. For example, the fixed-threshold outlier density
 must be exactly `9 / 40`, and concentrating outliers in one channel must produce
 a strictly higher channel-persistence variance than scattering them. No GPU and
 no model download are involved, so the whole fast suite runs in ~2 seconds.
