@@ -34,7 +34,7 @@ The codebase must scale cleanly across four experiments. Enforce this structure:
 vit_thesis_workspace/
 │
 ├── data/                       # Git-ignored. ImageNet-1K validation split (4,096 imgs).
-├── outputs/                    # Git-ignored. Dumps for JSONs, CSVs, and plots.
+├── outputs/                    
 │   ├── exp1_outlier_maps/      
 │   ├── exp2_granularity/       
 │   ├── exp3_sensitivity/       
