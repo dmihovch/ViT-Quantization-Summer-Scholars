@@ -148,7 +148,7 @@ absolute 6.0 threshold, which maps to INT8's fixed dynamic range, correctly
 flags the broken layers. The choice of threshold is not cosmetic, and we have
 the data to show it.
 
-### Engineering credibility (worth mentioning briefly)
+### Testing
 
 - **Fully tested:** the suite verifies the outlier math against hand-computed
   tensors, plus plumbing (layer tagging, hooks, data loading, CLI). Per the
