@@ -29,7 +29,7 @@ def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     config = parse_config()
     assert config.num_images == 4096
     assert config.split == "validation"
-    assert config.output_dir == Path("data")
+    assert config.output_dir == Path("data/imagenet-val")
 
 
 def test_custom_arguments(monkeypatch: pytest.MonkeyPatch) -> None:

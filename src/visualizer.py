@@ -29,8 +29,10 @@ from src.model_utils import LayerType
 # A fixed colour per layer type, so every chart is visually consistent. This is
 # a constant lookup table (configuration), not mutable program state.
 LAYER_TYPE_COLORS: dict[LayerType, str] = {
-    LayerType.ATTENTION: "tab:blue",
-    LayerType.FEEDFORWARD: "tab:red",
+    LayerType.ATTENTION_QKV: "tab:blue",
+    LayerType.ATTENTION_PROJ: "tab:cyan",
+    LayerType.FEEDFORWARD_FC1: "tab:red",
+    LayerType.FEEDFORWARD_FC2: "tab:orange",
     LayerType.OTHER: "tab:gray",
 }
 
@@ -94,7 +96,7 @@ def generate_all_plots(
     _plot_metric_bars(
         summaries,
         values=[s.routing_fraction_statistical for s in summaries],
-        title="FP16 routing fraction per layer (> 3 std-dev, \u2265 25% of tokens)",
+        title="FP16 routing fraction per layer (> 3 std-dev, \u2265 5% of tokens)",
         y_label="Fraction of input columns routed to FP16",
         output_path=output_dir / "routing_fraction_statistical.png",
     )

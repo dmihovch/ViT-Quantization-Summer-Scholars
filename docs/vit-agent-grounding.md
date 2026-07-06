@@ -50,7 +50,7 @@ vit_thesis_workspace/
 │
 ├── run_exp1_mapping.py         # Driver script for Experiment 1
 ├── run_exp2_granularity.py     # Driver script for Experiment 2
-├── run_exp3_sensitivity.py     # Driver script for Experiment 3
+├── run_experiment3_sensitivity.py     # Driver script for Experiment 3
 ├── run_exp4_decomposition.py   # Driver script for Experiment 4
 
 ---

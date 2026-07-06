@@ -26,12 +26,27 @@ from typing import override
 
 from PIL import Image
 from torch import Tensor
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
+from torchvision import datasets, transforms
 
 from src.model_utils import ImageTransform
 
 # Image file types we will pick up from the data directory.
 IMAGE_EXTENSIONS: tuple[str, ...] = (".jpg", ".jpeg", ".png")
+
+# The standard ViT-B/16 preprocessing pipeline (matches what ``load_vit_model``
+# would produce via timm's ``data_config``).  Hard-coded here so that accuracy
+# evaluation loaders do not need to download the model just to get the transform.
+_VIT_B16_MEAN: tuple[float, float, float] = (0.5, 0.5, 0.5)
+_VIT_B16_STD: tuple[float, float, float] = (0.5, 0.5, 0.5)
+_VIT_B16_TRANSFORM: ImageTransform = transforms.Compose(
+    [
+        transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=_VIT_B16_MEAN, std=_VIT_B16_STD),
+    ]
+)
 
 
 def find_image_files(image_dir: Path) -> list[Path]:
@@ -88,17 +103,43 @@ def build_image_dataloader(
     max_images: int,
 ) -> DataLoader[Tensor]:
     """
-    Wrap `UnlabeledImageDataset` in a DataLoader that yields batches of shape
-    [Batch, 3, 224, 224].
+    Build a label-free DataLoader for Experiment 1's outlier mapping.
 
-    `shuffle=False` keeps the image order deterministic, which makes the
-    measured statistics reproducible from one run to the next.
+    Images are discovered recursively under ``image_dir``, preprocessed with
+    ``transform``, and batched without shuffling so both passes of the two-pass
+    algorithm see byte-identical inputs.
     """
     dataset = UnlabeledImageDataset(image_dir, transform, max_images)
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=4,  # decode and transform images on background CPU workers
-        pin_memory=True,  # use page-locked memory for faster host -> GPU copies
+        num_workers=4,
+        pin_memory=True,
+    )
+
+
+def create_imagenet_val_loader(
+    batch_size: int,
+    data_dir: str = "./data/imagenet-val",
+    max_images: int | None = None,
+) -> DataLoader:
+    """
+    Creates a DataLoader for the ImageNet validation set.
+
+    This loader provides both images and their corresponding labels, which is
+    necessary for accuracy evaluation.
+    """
+    # The transform needs to be loaded from the model to ensure it matches
+    dataset = datasets.ImageFolder(data_dir, transform=_VIT_B16_TRANSFORM)
+
+    if max_images is not None:
+        dataset = Subset(dataset, range(max_images))
+
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
     )

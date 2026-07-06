@@ -47,7 +47,6 @@ Examples
 
 import argparse
 import io
-import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,7 +97,7 @@ def parse_config() -> DownloadConfig:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("data"),
+        default=Path("data/imagenet-val"),
         help="Folder to save images into (created if missing).",
     )
     parser.add_argument(
@@ -219,9 +218,13 @@ def main() -> None:
     # that can crash the interpreter during normal shutdown. Our work is finished
     # and every image has already been flushed to disk, so we flush our output
     # and exit immediately, bypassing that buggy finalization entirely.
+    #
+    # We use ``sys.exit`` rather than ``os._exit`` so that ``finally`` blocks
+    # and ``__exit__`` handlers still run — this matters if the script is ever
+    # imported or called from another module.
     sys.stdout.flush()
     sys.stderr.flush()
-    os._exit(0)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

@@ -610,7 +610,9 @@ class ActivationRecorder(Protocol):
     def record_activations(self, layer_name: str, activations: Tensor) -> None: ...
 
 
-def extract_activation_tensor(module_inputs: object) -> Tensor | None:
+def extract_activation_tensor(
+    module_inputs: Tensor | tuple[object, ...] | None,
+) -> Tensor | None:
     """
     Reduce a forward pre-hook's `inputs` to a single activation tensor.
 

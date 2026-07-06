@@ -58,7 +58,7 @@ def test_per_channel_mean_and_std_are_exact() -> None:
             [4.0, 40.0],
         ]
     )  # [4 tokens, 2 features]
-    stats = LayerMomentAccumulator("demo", LayerType.FEEDFORWARD)
+    stats = LayerMomentAccumulator("demo", LayerType.FEEDFORWARD_FC1)
     stats.update(activations)
     threshold = stats.finalize()
 
@@ -89,10 +89,10 @@ def test_moment_merge_is_order_and_batching_invariant() -> None:
     data arrives in one batch or split across several. This is what makes the
     statistics exact regardless of batch size.
     """
-    all_at_once = LayerMomentAccumulator("a", LayerType.FEEDFORWARD)
+    all_at_once = LayerMomentAccumulator("a", LayerType.FEEDFORWARD_FC1)
     all_at_once.update(torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]))
 
-    in_pieces = LayerMomentAccumulator("b", LayerType.FEEDFORWARD)
+    in_pieces = LayerMomentAccumulator("b", LayerType.FEEDFORWARD_FC1)
     in_pieces.update(torch.tensor([[1.0, 2.0]]))
     in_pieces.update(torch.tensor([[3.0, 4.0], [5.0, 6.0]]))
 
@@ -115,7 +115,7 @@ def test_moments_with_no_data_are_zero() -> None:
 
 
 def test_max_magnitude_picks_the_extreme_value(synthetic_activations: Tensor) -> None:
-    stats = LayerOutlierAccumulator("demo", LayerType.FEEDFORWARD, NEUTRAL_THRESHOLD)
+    stats = LayerOutlierAccumulator("demo", LayerType.FEEDFORWARD_FC1, NEUTRAL_THRESHOLD)
     stats.update(synthetic_activations)
     assert stats.finalize().max_magnitude == 100.0
 
@@ -131,7 +131,7 @@ def test_max_magnitude_is_a_running_maximum_across_batches() -> None:
 def test_value_outlier_density_fixed_is_exact(synthetic_activations: Tensor) -> None:
     # The per-value (unstructured) density: 8 persistent-channel outliers + 1
     # spike = 9, out of 2*4*5 = 40 values.
-    stats = LayerOutlierAccumulator("demo", LayerType.FEEDFORWARD, NEUTRAL_THRESHOLD)
+    stats = LayerOutlierAccumulator("demo", LayerType.FEEDFORWARD_FC1, NEUTRAL_THRESHOLD)
     stats.update(synthetic_activations)
     summary = stats.finalize()
     assert summary.total_values_seen == 40
@@ -150,7 +150,7 @@ def test_routing_fraction_counts_only_persistent_columns() -> None:
     activations[0:2, 1] = 10.0  # column 1: outlier in 2/8 tokens (25%)  -> routed
     activations[0, 2] = 10.0  # column 2: outlier in 1/8 tokens (12.5%) -> NOT routed
 
-    stats = LayerOutlierAccumulator("demo", LayerType.FEEDFORWARD, NEUTRAL_THRESHOLD)
+    stats = LayerOutlierAccumulator("demo", LayerType.FEEDFORWARD_FC1, NEUTRAL_THRESHOLD)
     stats.update(activations)
     result = stats.finalize()
 
@@ -176,13 +176,13 @@ def test_routing_fraction_separates_persistent_from_scattered_outliers() -> None
         scattered[token_index, token_index] = 10.0  # 1 outlier per column (1/8)
 
     concentrated_stats = LayerOutlierAccumulator(
-        "c", LayerType.FEEDFORWARD, NEUTRAL_THRESHOLD
+        "c", LayerType.FEEDFORWARD_FC1, NEUTRAL_THRESHOLD
     )
     concentrated_stats.update(concentrated)
     concentrated_summary = concentrated_stats.finalize()
 
     scattered_stats = LayerOutlierAccumulator(
-        "s", LayerType.FEEDFORWARD, NEUTRAL_THRESHOLD
+        "s", LayerType.FEEDFORWARD_FC1, NEUTRAL_THRESHOLD
     )
     scattered_stats.update(scattered)
     scattered_summary = scattered_stats.finalize()
@@ -217,7 +217,7 @@ def test_statistical_threshold_uses_per_channel_cutoff() -> None:
     activations[:, 0] = 5.0  # channel 0: |5-0|=5 > 3.0 -> outlier in all 8 tokens
     activations[:, 1] = 5.0  # channel 1: |5-10|=5 <= 6.0 -> NOT an outlier
 
-    stats = LayerOutlierAccumulator("demo", LayerType.FEEDFORWARD, threshold)
+    stats = LayerOutlierAccumulator("demo", LayerType.FEEDFORWARD_FC1, threshold)
     stats.update(activations)
     summary = stats.finalize()
 
@@ -245,7 +245,7 @@ def test_statistical_threshold_differentiates_tight_vs_wide_channels() -> None:
     activations[:, 0] = 2.0  # channel 0: |2| > 1.5 -> outlier
     activations[:, 1] = 2.0  # channel 1: |2| <= 15.0 -> NOT an outlier
 
-    stats = LayerOutlierAccumulator("demo", LayerType.FEEDFORWARD, threshold)
+    stats = LayerOutlierAccumulator("demo", LayerType.FEEDFORWARD_FC1, threshold)
     stats.update(activations)
     summary = stats.finalize()
 
@@ -276,7 +276,7 @@ def test_statistical_routing_uses_5_percent_not_25_percent_bar() -> None:
     activations[:30, 1] = 10.0  # channel 1: 30% participation
     activations[:3, 2] = 10.0  # channel 2: 3% participation
 
-    stats = LayerOutlierAccumulator("demo", LayerType.FEEDFORWARD, threshold)
+    stats = LayerOutlierAccumulator("demo", LayerType.FEEDFORWARD_FC1, threshold)
     stats.update(activations)
     summary = stats.finalize()
 
@@ -301,11 +301,11 @@ def test_channel_persistence_is_higher_when_outliers_concentrate() -> None:
     scattered[0, 3, 3] = 10.0
 
     concentrated_stats = LayerOutlierAccumulator(
-        "c", LayerType.FEEDFORWARD, NEUTRAL_THRESHOLD
+        "c", LayerType.FEEDFORWARD_FC1, NEUTRAL_THRESHOLD
     )
     concentrated_stats.update(concentrated)
     scattered_stats = LayerOutlierAccumulator(
-        "s", LayerType.FEEDFORWARD, NEUTRAL_THRESHOLD
+        "s", LayerType.FEEDFORWARD_FC1, NEUTRAL_THRESHOLD
     )
     scattered_stats.update(scattered)
 
@@ -324,13 +324,13 @@ def test_channel_persistence_is_invariant_to_batching() -> None:
     full[0:2, 3] = 10.0
 
     single_batch_stats = LayerOutlierAccumulator(
-        "single", LayerType.FEEDFORWARD, NEUTRAL_THRESHOLD
+        "single", LayerType.FEEDFORWARD_FC1, NEUTRAL_THRESHOLD
     )
     single_batch_stats.update(full)
     single_batch_variance = single_batch_stats.finalize().channel_persistence_variance
 
     two_batch_stats = LayerOutlierAccumulator(
-        "two", LayerType.FEEDFORWARD, NEUTRAL_THRESHOLD
+        "two", LayerType.FEEDFORWARD_FC1, NEUTRAL_THRESHOLD
     )
     two_batch_stats.update(full[:2])
     two_batch_stats.update(full[2:])
@@ -386,7 +386,7 @@ def test_two_pass_collectors_feed_activations_through_hooks() -> None:
 
     # Pass 1: moments.
     moments = MomentCollector()
-    moments.register_layer("demo", LayerType.FEEDFORWARD)
+    moments.register_layer("demo", LayerType.FEEDFORWARD_FC1)
     handle = linear.register_forward_pre_hook(make_measurement_hook(moments, "demo"))
     _ = linear(sample)
     handle.remove()
@@ -399,7 +399,7 @@ def test_two_pass_collectors_feed_activations_through_hooks() -> None:
 
     # Pass 2: outliers, seeded with the pass-1 thresholds.
     collector = OutlierStatsCollector(thresholds)
-    collector.register_layer("demo", LayerType.FEEDFORWARD)
+    collector.register_layer("demo", LayerType.FEEDFORWARD_FC1)
     handle = linear.register_forward_pre_hook(make_measurement_hook(collector, "demo"))
     _ = linear(sample)
     handle.remove()
@@ -414,7 +414,7 @@ def test_two_pass_collectors_feed_activations_through_hooks() -> None:
 
 
 def test_summary_to_dict_is_json_serializable(synthetic_activations: Tensor) -> None:
-    stats = LayerOutlierAccumulator("demo", LayerType.ATTENTION, NEUTRAL_THRESHOLD)
+    stats = LayerOutlierAccumulator("demo", LayerType.ATTENTION_QKV, NEUTRAL_THRESHOLD)
     stats.update(synthetic_activations)
     payload = stats.finalize().to_dict()
 

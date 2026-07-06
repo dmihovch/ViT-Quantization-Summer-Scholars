@@ -16,3 +16,5 @@ dependencies:
   - pip
   - pip:
       - timm
+      - seaborn
+      - pandas
