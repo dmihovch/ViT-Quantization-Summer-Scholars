@@ -29,7 +29,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import datasets, transforms
 
-from src.model_utils import ImageTransform
+from src.model import ImageTransform
 
 # Image file types we will pick up from the data directory.
 IMAGE_EXTENSIONS: tuple[str, ...] = (".jpg", ".jpeg", ".png")
