@@ -1,0 +1,11 @@
+torch
+torchvision
+timm
+numpy
+pillow
+matplotlib
+seaborn
+pandas
+huggingface_hub
+datasets
+pytest

@@ -1,34 +1,26 @@
-# ViT-Quantization-Summer-Scholars
+# ViT Quantization & Outlier Profiling
 
-Research codebase for **integer-only edge deployment of Vision Transformers** via
-pre-GELU activation clipping. See [`OVERVIEW.md`](OVERVIEW.md) for the full
-experimental protocol.
+Research codebase for profiling and ablating massive activation outliers in a
+Vision Transformer, with a pathway toward integer-only GELU execution on NVIDIA
+Jetson edge hardware.
 
-**Target model:** `vit_base_patch16_224` via [`timm`](https://github.com/huggingface/pytorch-image-models)  
+**Target model:** `google/vit-base-patch16-224` via [`timm`](https://github.com/huggingface/pytorch-image-models)
 **Dataset:** ImageNet-1K validation split
+**Experimental spec:** [`docs/vit_profiling_framework.md`](docs/vit_profiling_framework.md)
 
 ---
 
 ## Research Summary
 
-This project investigates the non-linear activation bottleneck for ultra-low-bit
-edge deployment of ViTs. The core hypothesis (Dr. Yang's method) is that
-**stripping pre-GELU outliers to zero** is a necessary preprocessing step before
-replacing the floating-point GELU with an integer-only polynomial approximation,
-and that this co-optimization recovers accuracy lost from integer quantization
-alone.
+Pre-GELU activations in ViTs exhibit heavy-tailed distributions dominated by a
+small number of massive outliers. This project answers three questions:
 
-The four-phase protocol:
-
-1. **Profiling** – Instrument pre-GELU tensors across all FFN blocks; collect
-   distribution statistics (max, mean, variance, kurtosis).
-2. **Characterization** – Visualize distributions with log-scale histograms;
-   identify dominant outlier channels and σ-based thresholds.
-3. **Clipping Ablation** – Sweep four clipping strategies (baseline, 3σ, 2σ,
-   zero-strip) and record Top-1/Top-5 accuracy at each.
-4. **Integer GELU Integration** – Replace `nn.GELU` with an INT8/INT16
-   polynomial approximation; measure the accuracy synergy between clipping and
-   integer execution.
+1. **Where are the outliers?** — Profile the max/min/std of pre-GELU tensors
+   across all 12 encoder blocks (Phase 1).
+2. **How much do they matter?** — Zero out values beyond k·σ and measure the
+   accuracy degradation curve (Phase 2).
+3. **Can GELU run on integers?** — Build per-layer INT8 LUTs that approximate
+   GELU without any FP32 dequantization (Phase 3).
 
 ---
 
@@ -36,17 +28,50 @@ The four-phase protocol:
 
 ```
 .
-├── OVERVIEW.md                  # experimental protocol (source of truth)
-├── download_imagenet_val.py     # streams validation images from Hugging Face
+├── run_phase1_profiling.py      # Phase 1 entry point
+├── run_phase2_ablation.py       # Phase 2 entry point
+├── run_phase3_integer_gelu.py   # Phase 3 entry point
+├── download_imagenet_val.py     # streams val images from Hugging Face
+│
 ├── src/
-│   ├── model_utils.py           # load ViT-B/16, evaluate Top-1/Top-5 accuracy
-│   └── data_loader.py           # image dataset + DataLoader (labeled & unlabeled)
+│   ├── config.py                # frozen dataclasses for all experiment configs
+│   ├── model.py                 # load ViT-B/16, evaluate top-1/top-5 accuracy
+│   ├── data_loader.py           # ImageFolder-based DataLoader
+│   ├── hooks.py                 # forward hook machinery + LayerStats
+│   ├── ablation.py              # outlier zeroing, % zeroed, AblationResult
+│   ├── integer_gelu.py          # LUT construction + FP32 comparison
+│   ├── plotting.py              # all figure generation (headless matplotlib)
+│   ├── utils.py                 # seed_everything, get_device, ensure_dir
+│   ├── exceptions.py            # DataDirectoryError, HookRegistrationError, …
+│   ├── exp1_profiling.py        # Phase 1 orchestrator
+│   ├── exp2_ablation.py         # Phase 2 orchestrator
+│   └── exp3_integer_gelu.py     # Phase 3 orchestrator
+│
 ├── tests/
-│   ├── conftest.py              # shared fixtures
-│   ├── test_model_utils.py      # accuracy evaluation helper tests
-│   └── test_data_loader.py      # data loading tests
-├── pytest.ini                   # test configuration
-└── environment.yml              # conda environment
+│   ├── conftest.py              # shared fixtures (temp dirs, dummy tensors)
+│   ├── test_exceptions.py
+│   ├── test_utils.py
+│   ├── test_config.py
+│   ├── test_hooks.py
+│   ├── test_ablation.py
+│   ├── test_integer_gelu.py
+│   ├── test_data_loader.py
+│   └── test_plotting.py
+│
+├── docs/
+│   ├── vit_profiling_framework.md   # experimental spec (source of truth)
+│   ├── NEXT-STEPS.md                # implementation roadmap + reading list
+│   └── AI-DISCLAIMER.md
+│
+├── outputs/                     # written by runners (git-ignored)
+│   ├── phase1-profiling/
+│   ├── phase2-ablation/
+│   └── phase3-integer-gelu/
+│
+├── data/                        # ImageNet val images (git-ignored)
+├── docs/                        # project documentation
+├── environment.yml
+└── pytest.ini
 ```
 
 ---
@@ -54,37 +79,63 @@ The four-phase protocol:
 ## Setup
 
 ```sh
-conda env update -f environment.yml
+# Create the environment (once).
+conda env create -f environment.yml
 conda activate vitquant
 ```
 
+> **macOS note:** conda numpy and PyTorch may ship conflicting OpenMP runtimes.
+> If you see `OMP: Error #15` or `Abort trap: 6`, prefix commands with
+> `KMP_DUPLICATE_LIB_OK=TRUE`:
+> ```sh
+> KMP_DUPLICATE_LIB_OK=TRUE python run_phase1_profiling.py
+> ```
+> This is harmless — it tells the two OpenMP copies to coexist.
+
 ---
 
-## Getting the data
+## Getting the Data
 
-The experiments need ImageNet-1K validation images under `data/`. The downloader
-streams them from Hugging Face so you only pull as many images as you need:
+The experiments need ImageNet-1K validation images under `data/imagenet-val/`.
+The downloader streams them from Hugging Face — pull only what you need:
 
 ```sh
-# Download 1,024 calibration images (stratified by class).
+# 1 024 calibration images for Phase 1 profiling.
 python download_imagenet_val.py --num-images 1024
 
-# Download the full validation set for ablation sweeps.
+# Full validation set for Phase 2 accuracy sweeps.
 python download_imagenet_val.py --num-images 50000
 ```
 
 The dataset (`ILSVRC/imagenet-1k`) is **gated**: create a free Hugging Face
-account, accept the dataset terms, and run `hf auth login` once. Images are
-written in `ImageFolder` layout (`data/class_<label>/val_<n>.jpeg`).
+account, accept the dataset terms, and run `hf auth login` once.
 
 ---
 
-## Running the tests
+## Running the Experiments
 
 ```sh
-# All fast unit tests (no model download required).
-pytest -m "not slow"
+# Phase 1 — profile pre-GELU distributions (needs ~1 024 images).
+python run_phase1_profiling.py --num-images 1024
 
-# Full suite including any slow integration tests.
-pytest
+# Phase 2 — outlier ablation sweep (needs full val set).
+python run_phase2_ablation.py --sigma-thresholds 2.0 3.0 4.0 5.0
+
+# Phase 3 — integer GELU LUT construction and comparison.
+python run_phase3_integer_gelu.py
+```
+
+Outputs land in `outputs/phase{1,2,3}-*/`.
+
+---
+
+## Running the Tests
+
+```sh
+# Fast suite — no model download required.
+# macOS may need the KMP_DUPLICATE_LIB_OK workaround (see Setup above).
+KMP_DUPLICATE_LIB_OK=TRUE pytest -m "not slow"
+
+# Full suite.
+KMP_DUPLICATE_LIB_OK=TRUE pytest
 ```

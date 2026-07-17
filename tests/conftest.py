@@ -1,34 +1,114 @@
-"""
-conftest.py
-===========
+"""Shared pytest fixtures for the ViT quantization test suite.
 
-Shared pytest fixtures. Anything defined here is automatically available to
-every test file in this directory without needing an import.
+All fixtures are designed to be fast (no model weights loaded, no network
+access) and deterministic (fixed seeds, known tensor values).
 """
+
+from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
+import torch
 from PIL import Image
 
+from src.hooks import LayerStats
 
-@pytest.fixture
+
+@pytest.fixture()
 def temp_image_dir(tmp_path: Path) -> Path:
+    """Create a minimal ImageFolder-compatible directory tree.
+
+    Layout::
+
+        <tmp_path>/
+            class_0/
+                img_0.png
+                img_1.png
+                decoy_0.txt
+            class_1/
+                img_0.png
+                img_1.png
+                decoy_1.txt
+            class_2/
+                img_0.png
+                img_1.png
+                decoy_2.txt
+            class_3/
+                img_0.png
+                img_1.png
+                decoy_3.txt
+
+    Each PNG is a tiny 8×8 RGB image filled with a constant colour so that
+    construction is instantaneous.  The ``.txt`` decoys verify that
+    ``ImageFolder`` correctly ignores non-image files.
+
+    Parameters
+    ----------
+    tmp_path:
+        pytest-supplied temporary directory (unique per test invocation).
+
+    Returns
+    -------
+    Path
+        Root of the constructed ImageFolder tree.
     """
-    Create a throwaway directory holding a few tiny RGB images plus one
-    non-image file, so data-loading tests have real files to read.
+    rng = np.random.default_rng(seed=0)
+    for class_idx in range(4):
+        class_dir = tmp_path / f"class_{class_idx}"
+        class_dir.mkdir()
+        for img_idx in range(2):
+            colour = tuple(rng.integers(0, 256, size=3).tolist())
+            img = Image.new("RGB", (8, 8), colour)
+            img.save(class_dir / f"img_{img_idx}.png")
+        (class_dir / f"decoy_{class_idx}.txt").write_text("not an image\n")
+    return tmp_path
 
-    `tmp_path` is a built-in pytest fixture: a unique temporary directory that
-    is cleaned up automatically after the test.
+
+@pytest.fixture()
+def tiny_layer_stats() -> dict[str, LayerStats]:
+    """Return a dict of three fake :class:`~src.hooks.LayerStats` entries.
+
+    Values are chosen to be easy to reason about in tests:
+
+    - ``std=2.0`` → a threshold of ``1.0 * std = 2.0``
+    - ``mean=0.1`` → effectively centred
+    - ``maximum=8.0``, ``minimum=-8.0`` → symmetric, four standard deviations
+
+    Returns
+    -------
+    dict[str, LayerStats]
+        Mapping from layer name to :class:`~src.hooks.LayerStats`.
     """
-    image_dir = tmp_path / "images"
-    image_dir.mkdir()
+    names = ["blocks.0.mlp.act", "blocks.6.mlp.act", "blocks.11.mlp.act"]
+    return {
+        name: LayerStats(
+            layer_name=name,
+            maximum=8.0,
+            minimum=-8.0,
+            std=2.0,
+            mean=0.1,
+        )
+        for name in names
+    }
 
-    for index in range(3):
-        tiny_image = Image.new("RGB", (8, 8), color=(index * 10, 0, 0))
-        tiny_image.save(image_dir / f"img_{index}.png")
 
-    # A decoy file the loader must ignore.
-    (image_dir / "notes.txt").write_text("not an image")
+@pytest.fixture()
+def dummy_tensor() -> torch.Tensor:
+    """Return a realistic ViT FFN pre-GELU-shaped tensor filled with randn.
 
-    return image_dir
+    Shape is ``(4, 197, 3072)``: batch=4, tokens=197 (196 patches + CLS),
+    hidden=3072 (4× the ViT-B/16 embed dim of 768).
+
+    The seed is fixed to 0 so tests that inspect specific values are
+    deterministic across runs.
+
+    Returns
+    -------
+    torch.Tensor
+        Float32 tensor of shape ``(4, 197, 3072)``.
+    """
+    generator = torch.Generator()
+    generator.manual_seed(0)
+    return torch.randn(4, 197, 3072, generator=generator)
