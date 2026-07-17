@@ -1,5 +1,5 @@
 {
-  "venvPath": "/home/dan/miniconda3/envs",
+  "venvPath": "/Users/danmihovch/miniconda3/envs",
   "venv": "vitquant",
 
   // This project's own code is fully type-annotated and is still checked

@@ -1,20 +1,20 @@
 name: vitquant
 channels:
-  - pytorch
   - conda-forge
   - defaults
 dependencies:
   - python=3.12
-  - pytorch
-  - torchvision
-  - numpy
+  - nomkl
+  - numpy=1.26
   - pillow
   - matplotlib
   - pytest
-  - huggingface_hub
-  - datasets
   - pip
   - pip:
+      - torch
+      - torchvision
       - timm
       - seaborn
       - pandas
+      - huggingface_hub
+      - datasets
