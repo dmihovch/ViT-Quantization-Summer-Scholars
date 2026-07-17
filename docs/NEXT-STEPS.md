@@ -225,13 +225,16 @@ specific step so you learn the theory right before you need it.
   > clamping, and shifting. This gives you the vocabulary to discuss your
   > Phase 2 results.
 
-- **Dettmers et al. (2022) — LLM.int8(): 8-bit Matrix Multiplication for
-  Transformers at Scale**
-  https://arxiv.org/abs/2208.07339
-  > Section 3 shows that outlier features are systematic (same channels, across
-  > inputs) and tied to model scale. After reading this, you will know what
-  > "dominant channels" look like and can check whether your Phase 1 data shows
-  > the same pattern.
+- **Bondarenko et al. (2023) — Understanding and Overcoming the Challenges of
+  Efficient Transformer Quantization**
+  https://arxiv.org/abs/2109.12948
+  > Specifically studies **ViT** activation distributions (not LLMs). Identifies
+  > the exact quantization failure modes you are building a solution for —
+  > inter-channel variance, which layers are worst, and why standard PTQ fails
+  > on vision transformers. Read the activation distribution analysis before
+  > you interpret your Phase 1 histograms so you know what patterns to look for.
+  > After reading, you will have a concrete empirical prior for what your
+  > kurtosis measurements and channel-wise variance maps should reveal.
 
 ### Before Step 9 (integer GELU)
 
