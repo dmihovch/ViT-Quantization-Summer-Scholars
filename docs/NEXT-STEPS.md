@@ -63,28 +63,83 @@ One function. Straightforward `torchvision.datasets.ImageFolder` wrapper.
 
 ---
 
-### Step 4: `src/hooks.py` — ~45 minutes
+### Step 4: `src/hooks.py` — ~90 minutes
 
 The core profiling machinery. This is the most important module for Phase 1.
+You are now registering hooks at **five measurement sites**, not just pre-GELU.
 
-- `register_profiling_hooks(model)` — iterate `model.named_modules()`, find
-  `nn.GELU` instances, register a forward hook on each. The hook must:
-  1. Accept `(module, input, output)` — you want `input[0]`, the pre-GELU tensor.
-  2. Compute `max`, `min`, `std`, `mean` on the **flattened** tensor.
-  3. Update a shared `dict[str, LayerStats]` — if the layer already has stats,
-     update them with a running aggregate (Welford's algorithm or simple
-     per-batch accumulation). If not, insert a new `LayerStats`.
-  4. Return `HookHandle(handles=..., stats=...)`.
-  5. Raise `HookRegistrationError` if zero GELU modules found.
+#### Hook registration targets
+
+| Site key | Module type to hook | Hook type | Tensor of interest |
+|----------|--------------------|-----------|-----------------------|
+| `pre_gelu` | `nn.GELU` | `register_forward_pre_hook` | `input[0]` — pre-GELU hidden states, shape `[B, N, D_mlp]` |
+| `pre_softmax` | `nn.MultiheadAttention` | `register_forward_pre_hook` | The raw QKᵀ/√d logit tensor — accessible in PyTorch ≥ 2.0 via `need_weights=True` or by patching the `scaled_dot_product_attention` call |
+| `post_softmax` | `nn.MultiheadAttention` | `register_forward_hook` | `output[1]` — the attention weight tensor returned when `need_weights=True`, shape `[B, N, N]` (averaged over heads unless `average_attn_weights=False`) |
+| `post_layernorm` | `nn.LayerNorm` | `register_forward_hook` | `output` — the normalized tensor, shape `[B, N, D]` |
+| `residual_stream` | The `nn.LayerNorm` that closes each encoder block (i.e., the second LN in the block) | `register_forward_pre_hook` | `input[0]` — the accumulated residual *before* the final LN, shape `[B, N, D]` |
+
+> **Identifying the residual-stream hook target:** In `timm`'s ViT, each
+> encoder block has `norm1` (pre-attention LN) and `norm2` (pre-MLP LN). The
+> post-block residual is passed to the *next* block's `norm1`, or to the final
+> head `norm`. Hook the input to the *next* block's `norm1` (or the head norm
+> for the last block) to capture the accumulated residual stream after both
+> sub-blocks.
+
+#### Per-site statistics to compute inside the hook
+
+Compute all of the following **per batch** and accumulate with Welford's
+online algorithm (or simple running sum/sum-of-squares) to produce a single
+aggregate value over the full dataset pass:
+
+- **Scalar stats (all sites):** `max`, `min`, `mean`, `std`.
+- **Kurtosis (all sites):** $\kappa = \mathbb{E}[(x-\mu)^4]/\sigma^4$. Use the
+  fourth central moment formula; accumulate the first four moments online.
+- **Outlier fractions (all sites):** percentage of elements where
+  $|x| > k\sigma$ for $k \in \{3, 4, 6\}$. Store as a dict
+  `{"3": float, "4": float, "6": float}`.
+- **Per-channel σ vector (`post_layernorm` and `pre_gelu` sites only):**
+  Compute `tensor.std(dim=(0, 1))` — standard deviation over batch and token
+  dimensions, keeping the channel dimension. Shape: `[D]` or `[D_mlp]`. Store
+  as a list of floats in `LayerStats`.
+- **Attention entropy (`post_softmax` site only):** For each head,
+  $H = -\sum_j p_j \log_2 p_j$ averaged over batch and query tokens. Store as
+  a list of per-head mean entropies (length = number of heads).
+
+#### `LayerStats` dataclass — extend it to hold the new fields
+
+```python
+@dataclass
+class LayerStats:
+    site: str                        # one of the five site keys above
+    layer_name: str
+    max: float
+    min: float
+    mean: float
+    std: float
+    kurtosis: float
+    outlier_frac: dict[str, float]   # {"3": ..., "4": ..., "6": ...}
+    per_channel_std: list[float] | None   # None for sites where not applicable
+    attn_entropy: list[float] | None      # None for non-attention sites
+    n_samples: int                   # total number of elements seen (for averaging)
+```
+
+#### Function signatures
+
+- `register_profiling_hooks(model)` — iterate `model.named_modules()`,
+  match each module type to its site key, register the appropriate hook type.
+  Return `HookHandle(handles=..., stats=...)` where `stats` is
+  `dict[str, LayerStats]` keyed by `"{layer_name}/{site}"`.
+  Raise `HookRegistrationError` if zero hooks are registered.
 - `remove_hooks(handle)` — `for h in handle.handles: h.remove()`.
 - `save_stats(stats, path)` — `json.dump` with `dataclasses.asdict`.
 - `load_stats(path)` — `json.load` and reconstruct `LayerStats` from dicts.
 
-**Tests that will go green:** `test_hooks.py` (1 test)
+**Tests that will go green:** `test_hooks.py` (1 test, plus add new assertions
+for the extra fields once you expand the test)
 
 ---
 
-### Step 5: `src/exp1_profiling.py` — ~30 minutes
+### Step 5: `src/exp1_profiling.py` — ~45 minutes
 
 Wire everything together for Phase 1.
 
@@ -96,74 +151,100 @@ Wire everything together for Phase 1.
   5. `remove_hooks(hook_handle)`.
   6. `ensure_dir(config.output_dir)`.
   7. `save_stats(hook_handle.stats, config.output_dir / "layer_stats.json")`.
-  8. For each layer in stats: collect activations (you'll need to modify the
-     hook to also store raw values, or do a second pass — see note below),
-     call `plot_activation_histogram(...)`.
+  8. For histograms, run a **second pass** with a sampling hook that stores
+     every Nth element in a buffer (start with `N=10` to bound memory), then
+     call `plot_activation_histogram(...)` per site.
+  9. Call `plot_per_channel_std_heatmap(...)` for all `post_layernorm` and
+     `pre_gelu` stats entries that have a non-`None` `per_channel_std`.
+  10. Call `plot_attention_entropy_heatmap(...)` for all `post_softmax` stats
+      entries.
 
-> **Design decision needed:** The current hook spec says "reduce to scalars
-> immediately, no raw tensor storage." That's correct for stats, but histograms
-> need raw values. Options:
-> - **A:** Run two passes — one for stats, one for histogram sampling (simpler,
->   slower).
-> - **B:** Add an optional `sample_every_n: int` parameter to the hook that
->   stores every Nth activation value in a buffer (more complex, faster).
->
-> Start with option A. Optimize later if needed.
+> **Design note:** The hooks accumulate all final statistics in-hook (no raw
+> tensors stored). Histograms require a second dedicated pass with a lightweight
+> sampling hook that appends every Nth scalar to a `list[float]` buffer and
+> clears it after saving. Keep the two passes separate so the stats pass remains
+> deterministic and cheap.
 
 **Tests that will go green:** none directly, but you can now run
 `python run_phase1_profiling.py --num-images 128` and see real output.
 
 ---
 
-### Step 6: `src/plotting.py` — ~30 minutes
+### Step 6: `src/plotting.py` — ~45 minutes
 
-Four figure functions. Do this after Phase 1 runs so you have real data to test
+Six figure functions. Do this after Phase 1 runs so you have real data to test
 with.
 
-- `plot_activation_histogram(activations, layer_name, output_path, log_scale)` —
+- `plot_activation_histogram(activations, layer_name, site, output_path, log_scale)` —
   `plt.hist(activations.flatten(), bins=100, log=log_scale)`, add vertical
-  lines at ±3σ, save, close.
-- `plot_accuracy_vs_threshold(results, output_path)` — group by sigma, plot
-  line chart.
-- `plot_pct_zeroed_per_layer(results, sigma_k, output_path)` — bar chart.
+  lines at ±3σ and ±6σ, annotate the outlier fraction, save, close.
+- `plot_per_channel_std_heatmap(per_channel_stds, layer_names, output_path)` —
+  2-D heatmap with layers on the y-axis and channel index on the x-axis;
+  cell value is per-channel σ. Use a diverging colormap so outlier channels
+  (high σ) are visually distinct. Applies to `post_layernorm` and `pre_gelu`
+  sites.
+- `plot_attention_entropy_heatmap(entropies, layer_names, output_path)` —
+  2-D heatmap with layers on the y-axis and head index on the x-axis; cell
+  value is mean entropy in bits. Low-entropy cells flag attention sink heads.
+  Applies to the `post_softmax` site.
+- `plot_accuracy_vs_threshold(results, output_path)` — group by site and
+  sigma, plot one line per site.
+- `plot_pct_zeroed_per_layer(results, sigma_k, site, output_path)` — bar chart
+  showing zeroed fraction per layer for a given site and threshold.
 - `plot_lut_vs_fp32(lut, output_path)` — overlay FP32 GELU curve and LUT steps.
 
-**Tests that will go green:** `test_plotting.py` (2 tests)
+**Tests that will go green:** `test_plotting.py` (2 tests; add new smoke tests
+for the heatmap functions)
 
 ---
 
-### Step 7: `src/ablation.py` — ~45 minutes
+### Step 7: `src/ablation.py` — ~60 minutes
 
-Phase 2 — outlier zeroing.
+Phase 2 — outlier zeroing across multiple sites.
 
 - `compute_pct_zeroed(tensor, threshold)` — `(tensor.abs() > threshold).float().mean() * 100`.
-- `build_zeroing_hook(layer_name, threshold, stats)` — return a closure that
-  takes `(module, args)`, zeros elements of `args[0]` where
-  `|x| > threshold * stats.std`, returns modified tuple. Do NOT mutate in-place.
-- `patch_model_for_ablation(model, sigma_k, layer_stats)` — iterate GELU
-  modules, register pre-hooks, return handles.
-- `save_ablation_results(results, path)` — write CSV with `csv.DictWriter`.
+- `build_zeroing_hook(layer_name, site, threshold, stats)` — return a closure
+  that takes `(module, args)`, zeros elements of `args[0]` where
+  `|x| > threshold * stats[f"{layer_name}/{site}"].std`, returns modified
+  tuple. Do NOT mutate in-place. The `site` argument determines which
+  `LayerStats` entry provides the reference σ.
+- `patch_model_for_ablation(model, sigma_k, site, layer_stats)` — iterate
+  modules matching the given site (GELU for `pre_gelu`, MHA for `pre_softmax`,
+  second-block LN input for `residual_stream`), register the zeroing pre-hook
+  for each, return handles.
+- `compute_entropy_delta(stats_before, stats_after)` — given two
+  `dict[str, LayerStats]` collected from a `post_softmax` hook (one before
+  ablation, one after), return a per-head dict of entropy changes. This
+  quantifies whether zeroing pre-softmax outliers disrupts attention routing.
+- `save_ablation_results(results, path)` — write CSV with `csv.DictWriter`;
+  include a `site` column so results from all three ablation sweeps live in
+  one file.
 
-**Tests that will go green:** `test_ablation.py` (4 tests)
+**Tests that will go green:** `test_ablation.py` (4 tests; extend with tests
+for the `site` parameter and `compute_entropy_delta`)
 
 ---
 
-### Step 8: `src/exp2_ablation.py` — ~30 minutes
+### Step 8: `src/exp2_ablation.py` — ~45 minutes
 
-Wire Phase 2.
+Wire Phase 2. Run three independent ablation sweeps — one per site.
 
 - `run(config)` —
   1. Load model + transform.
   2. `load_stats(config.layer_stats_path)`.
-  3. For each `sigma_k` in `config.sigma_thresholds`:
-     - `patch_model_for_ablation(model, sigma_k, stats)`.
-     - `evaluate_accuracy(model, loader, device)`.
-     - For each layer: `compute_pct_zeroed(...)` (you'll need to collect
-       pre-GELU tensors during the eval pass — add a temporary hook).
-     - Unpatch model.
-     - Record `AblationResult` per layer.
-  4. `save_ablation_results(...)`.
-  5. Generate plots.
+  3. For each `site` in `("pre_gelu", "pre_softmax", "residual_stream")`:
+     a. For each `sigma_k` in `config.sigma_thresholds`:
+        - `patch_model_for_ablation(model, sigma_k, site, stats)`.
+        - Collect a `post_softmax` stats snapshot (temporary hook, one pass)
+          if `site == "pre_softmax"` so you can compute entropy delta.
+        - `evaluate_accuracy(model, loader, device)`.
+        - For each layer: `compute_pct_zeroed(...)` via a temporary hook
+          during the eval pass.
+        - Unpatch model.
+        - Record `AblationResult(site=site, ...)` per layer.
+     b. If `site == "pre_softmax"`: call `compute_entropy_delta(baseline_post_softmax_stats, ablated_post_softmax_stats)` and log it.
+  4. `save_ablation_results(...)` (single CSV, `site` column distinguishes sweeps).
+  5. Generate per-site accuracy-vs-threshold plots and per-layer zeroed-fraction bar charts.
 
 ---
 
@@ -204,16 +285,37 @@ specific step so you learn the theory right before you need it.
 
 - **Dosovitskiy et al. (2020) — An Image is Worth 16x16 Words (ViT)**
   https://arxiv.org/abs/2010.11929
-  > You are hooking into this architecture. Read Section 3.1 (the encoder block
-  > diagram) so you know exactly where GELU sits: after the first Linear in the
-  > MLP, before the second Linear. There are 2 GELU modules per block × 12
-  > blocks = 24 hooks to register.
+  > You are now hooking into five sites across this architecture, not just
+  > GELU. Read Section 3.1 (the encoder block diagram) carefully: note both
+  > MLP sub-blocks (where pre-GELU and hidden-state hooks go) and the
+  > attention sub-block (where pre/post-softmax hooks go). Residual stream
+  > hooks target the skip-connection accumulation points between sub-blocks.
 
 - **PyTorch Forward Hooks Tutorial**
   https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.register_forward_hook
-  > The official docs for `register_forward_hook`. Pay attention to the
-  > signature: `hook(module, input, output)` — `input` is a tuple, you want
-  > `input[0]`. Also read the warning about modifying inputs in-place (don't).
+  > The official docs for `register_forward_hook` and
+  > `register_forward_pre_hook`. Pay attention to the signature difference:
+  > pre-hooks receive `(module, args)` while post-hooks receive
+  > `(module, input, output)`. Several of your sites use pre-hooks (pre-GELU,
+  > pre-softmax, residual stream).
+
+- **Sun et al. (2023) — Massive Activations in Large Language Models**
+  https://arxiv.org/abs/2402.17762
+  > Describes "massive activation" outliers in attention and residual streams.
+  > Although focused on LLMs, the measurement methodology applies directly:
+  > they identify outliers per hidden-state dimension and track how they
+  > propagate through residual streams. Use their per-channel magnitude
+  > analysis as a template for your hidden-state dimension and residual-stream
+  > measurement sites.
+
+- **Zhai et al. (2023) — Stabilizing Transformer Training by Preventing
+  Attention Entropy Collapse**
+  https://arxiv.org/abs/2204.09548
+  > Provides a definition and measurement methodology for attention entropy and
+  > shows how near-zero entropy ("attention collapse") emerges during training.
+  > Read the entropy measurement formula (Section 2) before implementing the
+  > `post_softmax` hook — it is the exact quantity you will be computing and
+  > plotting in your per-head entropy heatmap.
 
 ### Before Step 7 (ablation)
 
