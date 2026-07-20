@@ -60,4 +60,44 @@ def build_val_loader(
         If ``data_dir`` does not exist on disk, or if the constructed dataset
         contains zero samples (empty directory).
     """
-    raise NotImplementedError
+    if not data_dir.exists():
+        raise DataDirectoryError(
+            f"Data directory does not exist: {data_dir}"
+        )
+
+    try:
+        dataset = datasets.ImageFolder(str(data_dir), transform=transform)
+    except FileNotFoundError as exc:
+        # ImageFolder raises FileNotFoundError when no class subdirectories exist.
+        raise DataDirectoryError(
+            f"Data directory exists but contains no class subdirectories: {data_dir}"
+        ) from exc
+
+    if len(dataset) == 0:
+        raise DataDirectoryError(
+            f"Data directory exists but contains no images: {data_dir}"
+        )
+
+    if num_images is not None:
+        if num_images > len(dataset):
+            logger.warning(
+                "num_images=%d exceeds dataset size=%d; using full dataset.",
+                num_images,
+                len(dataset),
+            )
+        else:
+            dataset = Subset(dataset, list(range(num_images)))
+
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=_NUM_WORKERS,
+        pin_memory=(device.type == "cuda"),
+    )
+    logger.info(
+        "Built DataLoader: %d images, batch_size=%d",
+        len(dataset),
+        batch_size,
+    )
+    return loader

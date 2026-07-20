@@ -36,3 +36,24 @@ class ShapeMismatchError(ValueError):
     Raised by any function that requires two tensors to have matching shapes
     (e.g. element-wise comparisons during ablation or LUT application).
     """
+
+
+class ProfilingError(RuntimeError):
+    """Raised when the nnsight profiling trace fails or produces unexpected results.
+
+    Examples
+    --------
+    Raised by ``profiler.profile_vit`` when the wrapped model lacks a
+    ``blocks`` attribute, or when the nnsight trace raises internally.
+    """
+
+
+class ProfilingError(RuntimeError):
+    """Raised when the nnsight profiling trace fails or produces unexpected results.
+
+    Examples
+    --------
+    Raised by ``profiler.profile_vit`` when the nnsight trace raises an
+    exception, when the model has no ``blocks`` attribute, or when zero
+    transformer blocks are found.
+    """

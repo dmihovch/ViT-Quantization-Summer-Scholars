@@ -26,7 +26,13 @@ def seed_everything(seed: int) -> None:
         Integer seed value.  The same seed value on the same hardware and
         software stack should reproduce identical results.
     """
-    raise NotImplementedError
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    logger.debug("Seeds set to %d", seed)
 
 
 def get_device() -> torch.device:
@@ -38,7 +44,9 @@ def get_device() -> torch.device:
         ``torch.device("cuda")`` if a CUDA-capable GPU is available,
         otherwise ``torch.device("cpu")``.
     """
-    raise NotImplementedError
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    logger.debug("Using device: %s", device)
+    return device
 
 
 def ensure_dir(path: Path) -> None:
@@ -52,4 +60,5 @@ def ensure_dir(path: Path) -> None:
     path:
         Directory path to create.
     """
-    raise NotImplementedError
+    path.mkdir(parents=True, exist_ok=True)
+    logger.debug("Ensured directory exists: %s", path)

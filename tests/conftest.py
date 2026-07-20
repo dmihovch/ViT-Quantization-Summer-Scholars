@@ -72,23 +72,30 @@ def tiny_layer_stats() -> dict[str, LayerStats]:
 
     Values are chosen to be easy to reason about in tests:
 
-    - ``std=2.0`` → a threshold of ``1.0 * std = 2.0``
-    - ``mean=0.1`` → effectively centred
-    - ``maximum=8.0``, ``minimum=-8.0`` → symmetric, four standard deviations
+    - ``std=2.0``, ``mean=0.1`` — effectively centred Gaussian-ish
+    - ``max=8.0``, ``min=-8.0`` — symmetric, four standard deviations out
+    - ``kurtosis=1.5`` — leptokurtic (heavy-tailed)
+    - ``outlier_frac`` — small but non-zero fractions for each threshold
 
-    Returns
-    -------
-    dict[str, LayerStats]
-        Mapping from layer name to :class:`~src.hooks.LayerStats`.
+    Keys use the ``"{layer_name}/{site}"`` format expected by the stats dict.
+
+    Returns:
+        Mapping from ``"{layer_name}/{site}"`` to :class:`~src.hooks.LayerStats`.
     """
     names = ["blocks.0.mlp.act", "blocks.6.mlp.act", "blocks.11.mlp.act"]
     return {
-        name: LayerStats(
+        f"{name}/pre_gelu": LayerStats(
+            site="pre_gelu",
             layer_name=name,
-            maximum=8.0,
-            minimum=-8.0,
-            std=2.0,
+            max=8.0,
+            min=-8.0,
             mean=0.1,
+            std=2.0,
+            kurtosis=1.5,
+            outlier_frac={"3": 0.0027, "4": 0.0001, "6": 0.0},
+            per_channel_std=None,
+            attn_entropy=None,
+            n_samples=1_000_000,
         )
         for name in names
     }

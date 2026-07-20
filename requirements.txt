@@ -1,6 +1,7 @@
 torch
 torchvision
 timm
+nnsight==0.2.21
 numpy
 pillow
 matplotlib

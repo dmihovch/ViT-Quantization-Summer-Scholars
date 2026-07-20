@@ -20,6 +20,25 @@ from torch.utils.data import DataLoader
 logger = logging.getLogger(__name__)
 
 
+def disable_fused_attn(model: VisionTransformer) -> None:
+    """Set ``fused_attn=False`` on every attention block.
+
+    Must be called before wrapping with NNsight.  With ``fused_attn=True``,
+    PyTorch dispatches to SDPA / FlashAttention, which never materialises the
+    QKᵀ attention-logit matrix as a Python tensor — it therefore cannot be
+    captured by any hook or trace.
+
+    Args:
+        model: A timm VisionTransformer instance whose ``blocks`` attribute
+            contains standard :class:`timm.models.vision_transformer.Block`
+            objects.
+    """
+    for i, block in enumerate(model.blocks):
+        block.attn.fused_attn = False
+        logger.debug("Disabled fused_attn on block %d", i)
+    logger.info("fused_attn disabled on all %d blocks", len(model.blocks))
+
+
 def load_vit(device: torch.device) -> tuple[VisionTransformer, Callable]:
     """Load the pretrained ``vit_base_patch16_224`` model and its transform.
 
@@ -46,7 +65,19 @@ def load_vit(device: torch.device) -> tuple[VisionTransformer, Callable]:
     RuntimeError
         If ``timm`` cannot locate the pretrained weights.
     """
-    raise NotImplementedError
+    logger.info("Loading vit_base_patch16_224 pretrained weights...")
+    model: VisionTransformer = timm.create_model(
+        "vit_base_patch16_224", pretrained=True
+    )
+    model.eval()
+    disable_fused_attn(model)
+    model.to(device)
+
+    data_config = timm.data.resolve_data_config({}, model=model)
+    transform: Callable = timm.data.create_transform(**data_config)
+
+    logger.info("Model loaded on %s", device)
+    return model, transform
 
 
 def evaluate_accuracy(
@@ -73,4 +104,31 @@ def evaluate_accuracy(
     tuple[float, float]
         ``(top1_pct, top5_pct)`` as percentages in the range ``[0, 100]``.
     """
-    raise NotImplementedError
+    correct_top1 = 0
+    correct_top5 = 0
+    total = 0
+
+    with torch.no_grad():
+        for images, labels in loader:
+            images = images.to(device)  # noqa: PLW2901
+            labels = labels.to(device)  # noqa: PLW2901
+
+            outputs = model(images)  # (B, num_classes)
+
+            # top-5 indices for each sample
+            top5_preds = outputs.topk(5, dim=1).indices  # (B, 5)
+            top1_preds = top5_preds[:, 0]  # (B,)
+
+            correct_top1 += (top1_preds == labels).sum().item()
+            correct_top5 += (
+                top5_preds == labels.unsqueeze(1)
+            ).any(dim=1).sum().item()
+            total += labels.size(0)
+
+    if total == 0:
+        raise RuntimeError("DataLoader yielded zero samples; cannot compute accuracy.")
+
+    top1_pct = 100.0 * correct_top1 / total
+    top5_pct = 100.0 * correct_top5 / total
+    logger.info("Top-1: %.2f%%  Top-5: %.2f%%  (n=%d)", top1_pct, top5_pct, total)
+    return top1_pct, top5_pct
