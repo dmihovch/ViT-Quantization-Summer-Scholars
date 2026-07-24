@@ -37,9 +37,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, TypeAlias
+
+from torch.utils.data import DataLoader
 
 import torch
 from nnsight import NNsight
@@ -94,7 +97,9 @@ class LayerStats:
     mean: float
     std: float
     kurtosis: float
+    m3: float = 0.0
     outlier_fractions: dict[str, float] = field(default_factory=dict)
+    n_samples: int = 0
 
 
 @dataclass
@@ -140,56 +145,74 @@ class _StatsSavers:
     site_identifier: SiteId
     mean: Any
     std: Any
+    m3: Any
     kurtosis: Any
     outlier_proxies: list[Any]
+    n_samples: int
 
 
-def _register_stat_saves(tensor_proxy: Any, site_id: SiteId) -> _StatsSavers:
+def _register_stat_saves(tensor_proxy: Any, site_id: SiteId, n_samples: int) -> _StatsSavers:
     """Register all statistics as .save() calls inside a nnsight trace context.
 
     Must be called from within a ``with wrapped_model.trace(...):`` block.
     All arithmetic is performed on nnsight proxy objects — no real tensors
     are materialised at this point.
 
-    Kurtosis uses the population formula: E[(x−μ)⁴]/σ⁴ − 3.
-    Outlier fractions use the per-tensor σ as the scale, computed fresh for
-    each threshold to avoid reusing a stale saved value.
+    All statistics use **population** conventions (ddof=0) throughout:
+    - std  = sqrt(E[(x−μ)²])
+    - M3   = Σ(x−μ)³  (third central moment sum, for exact cross-batch merge)
+    - kurtosis = E[(x−μ)⁴]/σ⁴ − 3  (excess, population)
+
+    Using population statistics is correct here because we are measuring a
+    fully-observed finite activation tensor, not estimating an unobserved
+    population parameter.  Bessel's correction (ddof=1) would introduce a
+    systematic negative bias of (n−1)/n with no statistical justification.
+
+    Outlier fractions use the population σ as threshold scale, recomputed
+    inline for each threshold to avoid reusing a stale saved proxy value.
 
     Args:
         tensor_proxy: An nnsight proxy pointing to an activation tensor.
             May have any shape; all stats are computed over all elements.
         site_id: Human-readable identifier stored verbatim in LayerStats.
+        n_samples: Number of scalar elements in this tensor (B*N*D etc.).
+            Must be passed explicitly because proxies do not expose .numel()
+            reliably before the trace executes.
 
     Returns:
         A :class:`_StatsSavers` holding the registered save proxies.
     """
-    # Flatten is not strictly needed since mean/std reduce over all dims by
-    # default, but it makes the fourth-moment expression unambiguous.
+    # Flatten so all reductions are unambiguously over every element.
     t = tensor_proxy.reshape(-1)
 
     mean_proxy = t.mean().save()
-    std_proxy = t.std().save()
+    # Population std: correction=0 → sqrt(mean((x-μ)²))
+    std_proxy = t.std(correction=0).save()
 
-    # Excess kurtosis — recompute mean and std inline to avoid using a
-    # "saved" value (which is no longer a proxy and cannot participate in
-    # further proxy arithmetic after the trace exits).
+    # Central moments — all recompute t.mean() inline because a .save()
+    # proxy value is frozen after the trace and cannot re-enter proxy graphs.
     centred = t - t.mean()
-    fourth_moment = (centred**4).mean()
-    variance = (centred**2).mean()
-    # variance ** 2 = σ⁴ (population variance, consistent with std()²)
-    kurtosis_proxy = (fourth_moment / (variance**2) - 3.0).save()
+    variance = (centred ** 2).mean()          # population variance = σ²
+    m3_proxy = (centred ** 3).sum().save()    # M3 = Σ(x−μ)³  (sum, not mean)
+    fourth_moment = (centred ** 4).mean()     # E[(x−μ)⁴] = μ₄
+    # Excess kurtosis: μ₄/σ⁴ − 3.  Guard divide-by-zero: if σ²=0 the
+    # distribution is a point mass; kurtosis is undefined, stored as 0.
+    kurtosis_proxy = (fourth_moment / (variance ** 2) - 3.0).save()
 
     outlier_proxies: list[Any] = []
     for sigma in OUTLIER_SIGMAS:
-        frac = (t.abs() > sigma * t.std()).float().mean().save()
+        # Recompute population std inline for each threshold.
+        frac = (t.abs() > sigma * t.std(correction=0)).float().mean().save()
         outlier_proxies.append(frac)
 
     return _StatsSavers(
         site_identifier=site_id,
         mean=mean_proxy,
         std=std_proxy,
+        m3=m3_proxy,
         kurtosis=kurtosis_proxy,
         outlier_proxies=outlier_proxies,
+        n_samples=n_samples,
     )
 
 
@@ -214,8 +237,10 @@ def _finalize_stats(savers: _StatsSavers) -> LayerStats:
         site_identifier=savers.site_identifier,
         mean=float(savers.mean.value.item()),
         std=float(savers.std.value.item()),
+        m3=float(savers.m3.value.item()),
         kurtosis=float(savers.kurtosis.value.item()),
         outlier_fractions=outlier_fractions,
+        n_samples=savers.n_samples,
     )
 
 
@@ -230,6 +255,7 @@ def _register_pre_softmax_saves(
     head_dim: int,
     scale: float,
     site_id: SiteId,
+    n_samples: int,
 ) -> _StatsSavers:
     """Reconstruct QKᵀ/√d inside a trace context and register stat saves.
 
@@ -243,6 +269,7 @@ def _register_pre_softmax_saves(
         head_dim: Dimension per head (D).
         scale: Attention scale factor (1/√D, pre-computed by timm).
         site_id: Site identifier string.
+        n_samples: Number of scalar elements in the logit tensor: B*H*N*N.
 
     Returns:
         A :class:`_StatsSavers` for the ``(B, H, N, N)`` logit tensor.
@@ -258,7 +285,7 @@ def _register_pre_softmax_saves(
     k = b_n_3hd[1]            # (B, H, N, D) — keys
     # (B, H, N, D) @ (B, H, D, N) → (B, H, N, N)
     logits = q @ k.transpose(-2, -1)
-    return _register_stat_saves(logits, site_id)
+    return _register_stat_saves(logits, site_id, n_samples)
 
 
 # ---------------------------------------------------------------------------
@@ -309,15 +336,33 @@ def profile_vit(
         )
 
     num_blocks: int = len(inner_model.blocks)
+    B: int = input_batch.shape[0]
     batch_shape: tuple[int, ...] = tuple(input_batch.shape)
+
+    # Derive token count N and MLP hidden dim D_mlp from model architecture.
+    # N = num_patches + 1 (CLS token).  For ViT-B/16 on 224×224: N = 197.
+    # Do NOT read from input_batch.shape[2] which is the image height (224),
+    # not the token sequence length.
+    N: int = inner_model.patch_embed.num_patches + 1
+    D: int = inner_model.embed_dim
+    attn0 = inner_model.blocks[0].attn
+    num_heads: int = attn0.num_heads
+    head_dim: int = attn0.head_dim
+    D_mlp: int = inner_model.blocks[0].mlp.fc1.out_features
+
+    # Pre-compute per-site element counts (scalars, const for all blocks).
+    n_residual: int = B * N * D              # residual_stream, post_layernorm_*
+    n_pre_gelu: int = B * N * D_mlp          # pre_gelu
+    n_attn: int = B * num_heads * N * N      # pre_softmax, post_softmax
 
     # Collect _StatsSavers inside the trace, finalize outside.
     all_savers: list[_StatsSavers] = []
 
     logger.info(
-        "Starting nnsight trace: %d blocks, input shape %s.",
+        "Starting nnsight trace: %d blocks, input shape %s, N=%d.",
         num_blocks,
         batch_shape,
+        N,
     )
 
     try:
@@ -333,20 +378,20 @@ def profile_vit(
                     else f"blocks.{i - 1}/residual_stream"
                 )
                 all_savers.append(
-                    _register_stat_saves(block.norm1.input[0][0], residual_label)
+                    _register_stat_saves(block.norm1.input[0][0], residual_label, n_residual)
                 )
 
                 # --- post_layernorm_1 (pre-attention LN output) ---
                 all_savers.append(
                     _register_stat_saves(
-                        block.norm1.output, f"blocks.{i}/{SITE_POST_LAYERNORM_1}"
+                        block.norm1.output, f"blocks.{i}/{SITE_POST_LAYERNORM_1}", n_residual
                     )
                 )
 
                 # --- post_layernorm_2 (pre-MLP LN output) ---
                 all_savers.append(
                     _register_stat_saves(
-                        block.norm2.output, f"blocks.{i}/{SITE_POST_LAYERNORM_2}"
+                        block.norm2.output, f"blocks.{i}/{SITE_POST_LAYERNORM_2}", n_residual
                     )
                 )
 
@@ -354,7 +399,7 @@ def profile_vit(
                 # mlp.act.input is ((tensor,), {}) — index [0][0].
                 all_savers.append(
                     _register_stat_saves(
-                        block.mlp.act.input[0][0], f"blocks.{i}/{SITE_PRE_GELU}"
+                        block.mlp.act.input[0][0], f"blocks.{i}/{SITE_PRE_GELU}", n_pre_gelu
                     )
                 )
 
@@ -369,6 +414,7 @@ def profile_vit(
                         head_dim=attn_module.head_dim,
                         scale=attn_module.scale,
                         site_id=f"blocks.{i}/{SITE_PRE_SOFTMAX}",
+                        n_samples=n_attn,
                     )
                 )
 
@@ -377,7 +423,7 @@ def profile_vit(
                 # attn_drop.input is ((tensor,), {}) with shape (B, H, N, N).
                 all_savers.append(
                     _register_stat_saves(
-                        attn.attn_drop.input[0][0], f"blocks.{i}/{SITE_POST_SOFTMAX}"
+                        attn.attn_drop.input[0][0], f"blocks.{i}/{SITE_POST_SOFTMAX}", n_attn
                     )
                 )
 

@@ -2,17 +2,16 @@
 
 ## Current State
 
-**Steps 1–4 are complete.  The profiling framework has been fully refactored
-to use nnsight.  48/48 fast tests pass; 13 slow tests (nnsight trace + full
-ViT forward) are gated behind `@pytest.mark.slow` for Linux / GPU runs.**
+**Steps 1–4 are complete. `src/profiler.py` has been partially updated in Step 4b-i (existing functions fixed). 48/48 fast tests pass; 2 slow tests updated. Step 4b-ii (new Welford classes and dataset-pass function) is still pending.**
 
 | Module | Status | Fast tests | Slow tests |
 |--------|--------|-----------|------------|
 | `src/utils.py` | ✅ Done | `test_utils.py` 3/3 | — |
 | `src/model.py` | ✅ Done | — (weights required) | — |
 | `src/data_loader.py` | ✅ Done | `test_data_loader.py` 2/2 | — |
-| `src/hooks.py` | ✅ Kept (legacy Welford pipeline) | `test_hooks.py` 26/26 | — |
-| `src/profiler.py` | ✅ Done (nnsight, all 5 sites) | `test_profiler.py` 11/11 | 13 slow tests |
+| `src/hooks.py` | ✅ Kept (legacy, 3-site) | `test_hooks.py` 26/26 | — |
+| `src/profiler.py` — single-pass API | ✅ Done + updated | `test_profiler.py` 11/11 | 13 slow (2 updated) |
+| `src/profiler.py` — Welford multi-batch extension | 🔲 Step 4b-ii pending | — | — |
 | `src/exp1_profiling.py` | 🔲 Stub | — | — |
 | `src/plotting.py` | 🔲 Stub | — | — |
 | `src/ablation.py` | 🔲 Stub | — | — |
@@ -41,33 +40,55 @@ macOS.  They pass on Linux (verified by smoke-testing outside pytest).
 
 ---
 
-## Architecture: the two profiling modules
+## Architecture: profiling modules
 
-The project now has two profiling modules that serve different purposes:
-
-### `src/hooks.py` — legacy Welford accumulator pipeline
+### `src/hooks.py` — Welford accumulator pipeline (legacy, 3-site)
 
 Registers raw PyTorch forward hooks on `nn.GELU` and `nn.LayerNorm` modules.
-Accumulates stats online across an **arbitrary number of batches without
-storing any raw tensor data**.  Terminates at 3 of 5 sites (`pre_gelu`,
-`post_layernorm`, `residual_stream`).
+Covers 3 of 5 sites: `pre_gelu`, `post_layernorm_1/2`, and `residual_stream`.
+**Cannot** capture `pre_softmax` or `post_softmax` — those logits are computed
+inline inside Attention.forward() with no `nn.Module` boundary to intercept.
 
-**Use this when:** running a full dataset pass where memory is the constraint
-(e.g. profiling all 50 000 ImageNet validation images).
+This module is **retained for reference and for its existing tests** but is
+**not used in Phase 1** following the Option C decision below.
 
-### `src/profiler.py` — nnsight single-pass pipeline ✨ **Primary**
+### `src/profiler.py` — nnsight pipeline ✨ **Primary for all phases**
 
-Wraps a timm ViT with `nnsight.NNsight` and collects statistics at **all 5
-sites** in a single forward pass, with no raw tensors retained.  Captures
-both attention sites (`pre_softmax`, `post_softmax`) by:
-- Reconstructing QKᵀ/√d from `attn.qkv.output` inside the trace (pre-softmax).
-- Reading `attn.attn_drop.input` (post-softmax attention weights).
+Wraps a timm ViT with `nnsight.NNsight` and captures all 5 sites per block,
+including both attention sites, by intercepting intermediate proxy tensors
+inside the trace context.
 
-**Use this when:** running a single batch for profiling or the exp1 pipeline.
+**Step 4b-i (done):** `_register_stat_saves`, `_StatsSavers`, `LayerStats`, `_register_pre_softmax_saves`, and `profile_vit` have been updated:
+- All std/variance computations use population convention (`correction=0`, ddof=0).
+- `LayerStats` gains `m3: float = 0.0` and `n_samples: int = 0`.
+- `_register_stat_saves` now takes `n_samples: int` as a required argument and saves M3 = Σ(x−μ)³ as a proxy for exact cross-batch kurtosis merging.
+- `profile_vit` derives N correctly as `patch_embed.num_patches + 1` (not image height), extracts architecture constants (`N, D, num_heads, D_mlp`) once before the block loop, and passes `n_samples` to every call site.
+- `import math` and `from torch.utils.data import DataLoader` added.
 
-The nnsight approach replaces the raw-hook workarounds entirely.  `hooks.py`
-is retained for the multi-batch accumulation use case; `profiler.py` is the
-canonical implementation going forward.
+**Step 4b-ii (pending):** add `WelfordAccumulator`, `merge_batch_stats`, `finalize_accumulator`, `_site_n`, and `run_profiling_dataset_pass` to `profiler.py`. Full specification is in `docs/EXP1-IMPL.md`.
+
+---
+
+### Architecture decision: Option C (resolved)
+
+Three options were considered for collecting dataset-wide statistics across
+all 5 measurement sites:
+
+| Option | Correctness | Coverage | Complexity |
+|--------|------------|----------|------------|
+| (a) Average per-batch `profile_vit` scalars | ❌ incorrect std / kurtosis | all 5 sites | low |
+| (b) `hooks.py` for dataset pass, `profiler.py` for spot-checks | ✅ exact mean/std/outlier fracs; approx kurtosis | 3 sites only | low |
+| (c) Welford parallel-merge inside `profiler.py` | ✅ same correctness as (b) | **all 5 sites** | medium |
+
+**Decision: Option C.**  The pre-softmax logit distribution is the most
+quantization-hostile site in the network and cannot be omitted from the
+Phase 1 summary table without a conspicuous methodological gap.  Option B's
+3-site coverage is inadequate.  Option C extends `profiler.py` with a
+Welford accumulator that receives per-batch stats from `profile_vit` and
+merges them using Chan et al. (1983) parallel formula — the same approach
+already used in `hooks.py`, now applied to all 5 sites via nnsight.
+
+**Kurtosis is exact** via Pébay (2008) M3/M4 parallel merge. The earlier approximation (per-batch fourth moment centred at batch means) has been superseded. No approximation caveat is needed.
 
 ---
 
@@ -109,7 +130,13 @@ canonical implementation going forward.
 
 ---
 
-### Step 4: `src/profiler.py` — ✅ DONE (replaces raw-hook approach)
+### Step 4: `src/profiler.py` — ✅ DONE (single-pass API)
+
+See Step 4b below for the dataset-wide extension.
+
+---
+
+### Step 4b: `src/profiler.py` extension — 🔲 NEXT (Welford multi-batch API)
 
 nnsight-based profiler.  Collects stats at **five sites per block** in a
 single forward pass.
@@ -171,13 +198,37 @@ save_profiling_result(result, output_dir / "profiling_result.json")
   Use `.save()` to retain values after the context closes; access via
   `.value` attribute after the context exits.
 
-**Tests:**
+**Tests (existing — must keep passing):**
 - Fast (no trace): `test_profiler.py -m "not slow"` → 11/11 pass
 - Slow (full trace): `test_profiler.py -m slow` → 13 tests; run on Linux
 
+#### Step 4b-ii: Welford multi-batch extension (pending)
+
+Refer to `docs/EXP1-IMPL.md` Sections 2–4 for the complete, authoritative specification. Summary:
+
+**New classes/functions to add to `profiler.py`:**
+- `WelfordAccumulator` — carries `n, mean, M2, M3, M4, outlier_counts` across batches. Uses `M3` and `M4` for **exact** kurtosis via Pébay (2008) parallel formula (not an approximation).
+- `_site_n(site_id, B, N, D, D_mlp, num_heads) -> int` — top-level function (not a closure) returning element count for a site/batch. Derives N from `patch_embed.num_patches + 1`.
+- `merge_batch_stats(acc, batch_stats, batch_n)` — exact Pébay (2008) parallel merge for M2, M3, M4.
+- `finalize_accumulator(acc) -> LayerStats` — produces exact global mean, std, kurtosis, outlier_fractions, n_samples.
+- `run_profiling_dataset_pass(wrapped_model, loader, device) -> dict[SiteId, LayerStats]` — iterates loader, calls `profile_vit` per batch, merges via `merge_batch_stats`, finalizes.
+
+**Statistical conventions (non-negotiable):**
+- Population variance (ddof=0) throughout — we are measuring a fully-observed finite tensor, not estimating an unobserved population.
+- Kurtosis is **exact** via Pébay (2008) M3/M4 parallel merge. No approximation. No label required.
+
+**New tests to add** (`test_profiler.py`):
+- `test_welford_accumulator_construction` — fast
+- `test_merge_batch_stats_single_batch` — fast
+- `test_finalize_accumulator_two_equal_batches` — fast
+- `test_slow_run_profiling_dataset_pass_site_coverage` — slow; uses `TensorDataset(images, labels)` with explicit labels to avoid unpack error
+- `test_slow_run_profiling_dataset_pass_exact_n_samples` — slow; verifies `n_samples` equals total elements
+
+**Reference:** Pébay (2008) *Formulas for Robust, One-Pass Parallel Computation of Covariances and Arbitrary-Order Statistical Moments*, Sandia SAND2008-6212.
+
 ---
 
-### Step 5: `src/exp1_profiling.py` — 🔲 NEXT
+### Step 5: `src/exp1_profiling.py` — 🔲 NEXT (after Step 4b)
 
 Wire everything together for Phase 1.
 
@@ -185,36 +236,33 @@ Wire everything together for Phase 1.
 def run(config: ProfilingConfig) -> None:
 ```
 
+#### Architecture decision: Option C (resolved — see Architecture section above)
+
+`exp1_profiling.run()` uses `profiler.run_profiling_dataset_pass` (Step 4b)
+to collect exact global statistics across all **5 sites** per block.  Do not
+use `hooks.py` or call `profile_vit` directly in the dataset loop.
+
+#### Workflow
+
 1. `model, transform = load_vit(config.device)`.
-2. `loader = build_val_loader(config.data_dir, transform, config.batch_size,
+2. `wrapped = NNsight(model)`.
+3. `loader = build_val_loader(config.data_dir, transform, config.batch_size,
    config.num_images, config.device)`.
-3. `wrapped = NNsight(model)` — model already has `fused_attn=False`.
-4. For each batch in loader:
-   - Call `profile_vit(wrapped, images.to(config.device))`.
-   - Accumulate stats by merging each batch's `ProfilingResult` into a
-     running aggregate (or collect per-batch and average at the end).
+4. `stats = run_profiling_dataset_pass(wrapped, loader, config.device)`
+   inside `torch.no_grad()` (the function handles the loop internally).
 5. `ensure_dir(config.output_dir)`.
-6. `save_profiling_result(aggregate_result, config.output_dir / "profiling_result.json")`.
+6. `save_profiling_result(ProfilingResult(stats, num_blocks, batch_shape),
+   config.output_dir / "profiling_result.json")`.
 7. Generate histograms and heatmaps by calling `plotting.*` functions.
 
-> **Design decision needed:** `profile_vit` runs one forward pass and
-> returns single-pass stats.  For a full dataset run you need either:
-> (a) Run `profile_vit` per batch and average the returned scalars — simple
->     but loses distributional accuracy (means of means ≠ global mean for
->     kurtosis).
-> (b) Keep `hooks.py` accumulator pipeline for the multi-batch dataset pass,
->     and use `profiler.py` only for single-batch previews.
-> (c) Extend `profiler.py` with a multi-batch accumulation loop that calls
->     `profile_vit` per batch and merges accumulators via Welford's
->     parallel-groups formula.
->
-> **Recommendation:** Option (b) is cleanest for Phase 1.  Use `hooks.py`
-> for the dataset pass (it was built for this), derive the histogram data
-> from a separate lightweight sampling hook, and use `profiler.py` for any
-> single-batch spot-checks.
+**When complete:** `python run_phase1_profiling.py --num-images 1024` should
+produce `outputs/phase1-profiling/profiling_result.json` with entries for
+all 5 sites across all 12 blocks.
 
-**When complete:** `python run_phase1_profiling.py --num-images 128` should
-produce `outputs/phase1-profiling/profiling_result.json`.
+> **Output filename change:** Phase 1 now writes `profiling_result.json`
+> (via `profiler.save_profiling_result`) instead of `layer_stats.json`
+> (via `hooks.save_stats`).  Update `AblationConfig.layer_stats_path` default
+> in `config.py` and the Phase 2 workflow accordingly.
 
 ---
 
@@ -253,6 +301,31 @@ Wire Phase 2.  Run three ablation sweeps (one per site: `pre_gelu`,
 `pre_softmax`, `residual_stream`).  For `pre_softmax`, also collect
 `compute_entropy_delta` across the sweep.
 
+#### Attention-site σ source (updated for Option C)
+
+Phase 1 now produces dataset-wide `pre_softmax` std via
+`run_profiling_dataset_pass`.  Load `profiling_result.json` and read
+`pre_softmax` std directly — no single-batch estimation needed.
+The `attn_profile_num_images` and `attn_profile_seed` fields of
+`AblationConfig` are **deprecated** and should be ignored; they remain in
+the dataclass for backwards compatibility but log a deprecation warning if
+non-default values are passed.
+
+#### Workflow
+
+1. Load model (`load_vit`) and Phase 1 stats
+   (`profiler.load_profiling_result(config.layer_stats_path)`).
+2. All 5 sites' σ values are available directly from the loaded result.
+3. For each site in `{pre_gelu, pre_softmax, residual_stream}`:
+   - For each `k` in `config.sigma_thresholds`:
+     a. `handles = patch_model_for_ablation(model, k, site, layer_stats)`
+     b. Evaluate top-1 / top-5 accuracy over the full val loader.
+     c. Record `AblationResult` per layer (pct_zeroed, top1, top5).
+     d. `remove_hooks(handles)` before the next iteration.
+   - For `pre_softmax` only: also record `compute_entropy_delta` across k.
+4. `save_ablation_results(results, config.output_dir / "ablation_results.csv")`.
+5. Generate plots via `plotting.*`.
+
 ---
 
 ### Step 9: `src/integer_gelu.py` — 🔲
@@ -277,12 +350,16 @@ Wire Phase 3.
 
 Read these **as you implement**, not all upfront.
 
-### Before Step 5 (exp1 + profiling)
+### Before Step 4b and Step 5 (Welford extension + exp1)
+
+- **Pébay (2008) — Formulas for Robust, One-Pass Parallel Computation of Covariances and Arbitrary-Order Statistical Moments**
+  Sandia Technical Report SAND2008-6212
+  > The exact parallel higher-moments formula (Eq. 3.1–3.4) used in `merge_batch_stats` for M2, M3, and M4. Required reading before implementing Step 4b-ii. The Chan et al. (1983) formula for M2 is a special case of this.
 
 - **Dosovitskiy et al. (2020) — An Image is Worth 16x16 Words (ViT)**
   https://arxiv.org/abs/2010.11929
-  > Read Section 3.1 (the encoder block diagram).  You are now hooking at
-  > five sites; this gives you the ground truth for what each site measures.
+  > Read Section 3.1 (the encoder block diagram).  You are hooking at five
+  > sites; this gives you the ground truth for what each site measures.
 
 - **nnsight documentation** — https://nnsight.net/documentation/
   > Read the trace context manager and `.save()` / `.value` sections before

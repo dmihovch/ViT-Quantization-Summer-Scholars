@@ -1,6 +1,4 @@
 {
-  "venvPath": "/Users/danmihovch/miniconda3/envs",
-  "venv": "vitquant",
 
   // This project's own code is fully type-annotated and is still checked
   // strictly (type mismatches, undefined names, bad returns, etc. all error).

@@ -61,6 +61,17 @@ class AblationConfig:
         inside the frozen dataclass.
     layer_stats_path:
         Path to the JSON file produced by Phase 1 (``hooks.save_stats``).
+        Provides exact global σ for ``pre_gelu`` and ``residual_stream``
+        sites.
+    attn_profile_num_images:
+        Number of images in the single representative batch used to estimate
+        per-layer ``pre_softmax`` σ via ``profiler.profile_vit``.  Must be
+        ≥ 32 for a stable estimate.  Default: 64.
+    attn_profile_seed:
+        Random seed used when sampling the attention-profiling batch.
+        Must be fixed and reported alongside any result that uses the
+        pre-softmax zeroing threshold, since the σ estimate is
+        batch-dependent.
     """
 
     data_dir: Path
@@ -70,6 +81,8 @@ class AblationConfig:
     device: torch.device
     sigma_thresholds: tuple[float, ...]
     layer_stats_path: Path
+    attn_profile_num_images: int = 64
+    attn_profile_seed: int = 42
 
 
 @dataclass(frozen=True)

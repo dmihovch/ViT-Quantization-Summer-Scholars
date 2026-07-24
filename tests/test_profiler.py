@@ -79,24 +79,28 @@ def _canned_result() -> ProfilingResult:
         ):
             key = f"blocks.{i}/{site}"
             stats[key] = LayerStats(
-                site_identifier=key,
-                mean=float(i) * 0.01,
-                std=1.0 + float(i) * 0.05,
-                kurtosis=0.5,
-                outlier_fractions={f"{s}_sigma": 0.001 for s in OUTLIER_SIGMAS},
+                    site_identifier=key,
+                    mean=float(i) * 0.01,
+                    std=1.0 + float(i) * 0.05,
+                    kurtosis=0.5,
+                    m3=0.0,
+                    outlier_fractions={f"{s}_sigma": 0.001 for s in OUTLIER_SIGMAS},
+                    n_samples=0,
+                )
+            res_key = (
+                "patch_embed/residual_stream"
+                if i == 0
+                else f"blocks.{i - 1}/residual_stream"
             )
-        res_key = (
-            "patch_embed/residual_stream"
-            if i == 0
-            else f"blocks.{i - 1}/residual_stream"
-        )
-        stats[res_key] = LayerStats(
-            site_identifier=res_key,
-            mean=0.0,
-            std=0.5,
-            kurtosis=0.1,
-            outlier_fractions={f"{s}_sigma": 0.002 for s in OUTLIER_SIGMAS},
-        )
+            stats[res_key] = LayerStats(
+                site_identifier=res_key,
+                mean=0.0,
+                std=0.5,
+                kurtosis=0.1,
+                m3=0.0,
+                outlier_fractions={f"{s}_sigma": 0.002 for s in OUTLIER_SIGMAS},
+                n_samples=0,
+            )
     return ProfilingResult(
         stats=stats,
         num_blocks=_NUM_BLOCKS,
@@ -371,12 +375,15 @@ def test_slow_register_saves_finalize_layernorm() -> None:
     torch.manual_seed(0)
     wrapped = NNsight(nn.LayerNorm(16))
     x = torch.randn(4, 32, 16)
+    n_samples = 4 * 32 * 16  # B * seq * D
     with wrapped.trace(x):
-        savers = _register_stat_saves(wrapped.output, "test/ln")
+        savers = _register_stat_saves(wrapped.output, "test/ln", n_samples)
     stats = _finalize_stats(savers)
 
+    assert stats.n_samples == n_samples
     assert math.isfinite(stats.mean)
     assert abs(stats.mean) < 0.05, f"LN mean={stats.mean:.6f} expected ~0"
+    # Population std of a LayerNorm output should be close to 1.
     assert 0.8 <= stats.std <= 1.2, f"LN std={stats.std:.4f} expected ~1"
     assert stats.std >= 0.0
     expected_keys = {f"{s}_sigma" for s in OUTLIER_SIGMAS}
@@ -393,7 +400,9 @@ def test_slow_kurtosis_gaussian() -> None:
     torch.manual_seed(42)
     wrapped = NNsight(nn.Identity())
     t = torch.randn(1, 1, 10000)
+    n_samples = 1 * 1 * 10000
     with wrapped.trace(t):
-        savers = _register_stat_saves(wrapped.output, "test/gauss")
+        savers = _register_stat_saves(wrapped.output, "test/gauss", n_samples)
     stats = _finalize_stats(savers)
     assert abs(stats.kurtosis) < 0.5, f"kurtosis={stats.kurtosis:.4f} expected ~0"
+    assert stats.n_samples == n_samples
