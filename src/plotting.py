@@ -43,7 +43,76 @@ def plot_activation_histogram(
         If ``True``, the y-axis is rendered on a log scale to reveal the
         tails of the distribution (default behaviour for Phase 1 analysis).
     """
-    raise NotImplementedError
+    fig, ax = plt.subplots(figsize=(7, 4))
+    flat = activations.ravel()
+
+    ax.hist(flat, bins=200, color="steelblue", alpha=0.8, density=False)
+
+    if log_scale:
+        ax.set_yscale("log")
+
+    # Annotate mean ± 3σ and ± 6σ boundaries.
+    mu = float(np.mean(flat))
+    sigma = float(np.std(flat))
+    ylim = ax.get_ylim()
+    ax.axvline(mu, color="black", linestyle="-", linewidth=0.8, label=f"μ = {mu:.3f}")
+    for k, style, lbl in [
+        (3, "--", f"±3σ = [{mu - 3 * sigma:.3f}, {mu + 3 * sigma:.3f}]"),
+        (6, ":", f"±6σ = [{mu - 6 * sigma:.3f}, {mu + 6 * sigma:.3f}]"),
+    ]:
+        ax.axvline(mu - k * sigma, color="red", linestyle=style, linewidth=0.8)
+        ax.axvline(mu + k * sigma, color="red", linestyle=style, linewidth=0.8, label=lbl)
+
+    ax.set_ylim(ylim)  # restore after vline additions
+    ax.set_title(layer_name, fontsize=10)
+    ax.set_xlabel("Activation value")
+    ax.set_ylabel("Count" + (" (log scale)" if log_scale else ""))
+    ax.legend(fontsize=7, loc="upper right")
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    logger.debug("Saved histogram to %s", output_path)
+
+
+def plot_per_channel_std_heatmap(
+    per_channel_stds: dict[str, list[float]],
+    output_path: Path,
+) -> None:
+    """Save a heatmap of per-channel standard deviations across layers.
+
+    Parameters
+    ----------
+    per_channel_stds:
+        Mapping from layer name (e.g. ``"blocks.3/pre_gelu"``) to a list of
+        per-channel population standard deviations.  All lists must have the
+        same length (the channel dimension D or D_mlp).
+    output_path:
+        File path where the PNG is written.  Parent directories must exist.
+    """
+    if not per_channel_stds:
+        logger.warning("Empty per_channel_stds dict; skipping heatmap.")
+        return
+
+    # Sort keys for deterministic layer ordering.
+    sorted_keys = sorted(per_channel_stds.keys())
+    data = np.array([per_channel_stds[k] for k in sorted_keys])  # (L, D)
+
+    fig, ax = plt.subplots(figsize=(12, max(4, len(sorted_keys) * 0.4)))
+    im = ax.imshow(data, aspect="auto", cmap="viridis", interpolation="nearest")
+
+    ax.set_yticks(range(len(sorted_keys)))
+    ax.set_yticklabels(sorted_keys, fontsize=7)
+    ax.set_xlabel("Channel index")
+    ax.set_title("Per-channel population σ (layers × channels)")
+
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("σ (population)")
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    logger.debug("Saved per-channel σ heatmap to %s", output_path)
 
 
 def plot_accuracy_vs_threshold(

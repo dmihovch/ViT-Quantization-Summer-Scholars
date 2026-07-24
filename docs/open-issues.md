@@ -196,12 +196,14 @@ explicitly on all `LayerStats` constructions.
 All items below are **specified** in `EXP1-IMPL.md` but not yet written into
 production code. They must be completed before `exp1_profiling.py` can run.
 
-### 5.1 — `WelfordAccumulator`, `merge_batch_stats`, `finalize_accumulator`, `_site_n`, `run_profiling_dataset_pass` — 🔲 NOT YET IMPLEMENTED
+### 5.1 — `WelfordAccumulator`, `merge_batch_stats`, `finalize_accumulator`, `_site_n`, `run_profiling_dataset_pass` — ✅ DONE
 
-**What's needed:** Five new additions to `src/profiler.py`. Full pseudocode
-and docstrings are in `EXP1-IMPL.md` Sections 3.1–3.5.
+**Implemented in `src/profiler.py`.** Five additions plus per-channel std support
+(Step 4b-iii). 9 new fast tests + 4 new slow tests in `test_profiler.py`. All
+fast tests pass. Slow tests require PyTorch 2.2.x + nnsight 0.2.21 (known
+incompatibility with PyTorch 2.12).
 
-**Key design constraints to preserve:**
+**Key design constraints preserved:**
 - `WelfordAccumulator` tracks `M3` and `M4` for exact kurtosis.
 - `merge_batch_stats` implements the Pébay (2008) Eq. 3.1–3.4.
 - `_site_n` is a top-level function; N comes from `patch_embed.num_patches + 1`.
@@ -209,37 +211,21 @@ and docstrings are in `EXP1-IMPL.md` Sections 3.1–3.5.
 - `run_profiling_dataset_pass` handles the empty-loader edge case with a
   `RuntimeError`.
 
-**Tests to add:** 3 fast + 2 slow. Spec in `EXP1-IMPL.md` Section 4.
-
 ---
 
-### 5.2 — `per_channel_std` in `profiler.LayerStats` — 🔲 NOT YET SPECIFIED FULLY
+### 5.2 — `per_channel_std` in `profiler.LayerStats` — ✅ DONE
 
-**Issue:** The spec deliverable "per-channel σ heatmaps" requires per-channel
-standard deviations for `pre_gelu` (shape `[D_mlp]`) and `post_layernorm_1/2`
-(shape `[D]`). The current `profiler.LayerStats` has no `per_channel_std`
-field. `hooks.LayerStats` does — this is a gap introduced when `profiler.py`
-replaced `hooks.py` as the primary pipeline.
+**Implemented.** `LayerStats` gains `per_channel_std`, `per_channel_sum`,
+`per_channel_sum_sq` fields. `_register_stat_saves` accepts
+`track_per_channel=True` and saves per-channel sum and sum-of-squares proxies.
+`_finalize_stats` computes `per_channel_std` from the sums. `profile_vit` passes
+`track_per_channel=True` for `pre_gelu`, `post_layernorm_1`, `post_layernorm_2`.
+`WelfordAccumulator` stores `per_channel_sum` and `per_channel_sum_sq` for exact
+cross-batch merging. `merge_batch_stats` accumulates them directly (no merge
+formula needed — sums are additive). `finalize_accumulator` computes
+`per_channel_std` from the accumulated sums.
 
-**What needs to happen (Step 4b-iii):**
-1. Add `per_channel_std: list[float] | None = None` to `profiler.LayerStats`.
-2. Add `track_per_channel: bool = False` argument to `_register_stat_saves`.
-   When True, compute `t_bn_d.std(dim=0, correction=0)` and save as an
-   additional proxy (shape `[D]`).
-3. Update `_StatsSavers` with a `per_channel_std: Any = None` field.
-4. Update `_finalize_stats` to extract `.tolist()` from the proxy when present.
-5. In `profile_vit`, pass `track_per_channel=True` for `pre_gelu` and both
-   `post_layernorm_*` sites.
-6. Add `per_channel_M2: list[float]` and `per_channel_n: int` to
-   `WelfordAccumulator` for sites that track channels.
-7. Extend `merge_batch_stats` to merge per-channel M2 using the scalar
-   Welford formula applied per-channel.
-8. Extend `finalize_accumulator` to compute
-   `per_channel_std = [sqrt(m2/n) for m2 in acc.per_channel_M2]`.
-
-**Blocker for:** `plot_per_channel_std_heatmap` and the heatmap deliverable.
-`_plot_per_channel_heatmap` in `exp1_profiling.py` will log a warning and
-return early until this is implemented.
+**Unblocks:** `plot_per_channel_std_heatmap` and the heatmap deliverable.
 
 ---
 
@@ -333,12 +319,12 @@ codebase is shared.
 | 2.1 | Wrong N: image height vs token count | ✅ Resolved | — |
 | 2.2 | `_site_n` closure bug | ✅ Resolved | — |
 | 2.3 | Architecture constants re-accessed per batch | ✅ Resolved | — |
-| 3.1 | `batch_shape` hardcoded (last batch smaller) | ⚠️ Spec'd, not coded | Step 5 |
+| 3.1 | `batch_shape` hardcoded (last batch smaller) | ✅ Done | — |
 | 4.1 | TensorDataset label unpack bug in slow tests | ✅ Resolved | — |
 | 4.2 | Slow tests broken by new `n_samples` arg | ✅ Resolved | — |
 | 4.3 | `_canned_result()` stale field construction | ✅ Resolved | — |
-| 5.1 | Welford classes not yet written | 🔲 Pending | Step 5, Phase 2 |
-| 5.2 | `per_channel_std` gap in `profiler.LayerStats` | 🔲 Partially spec'd | Heatmap plot |
+| 5.1 | Welford classes not yet written | ✅ Done | — |
+| 5.2 | `per_channel_std` gap in `profiler.LayerStats` | ✅ Done | — |
 | 6.1 | Reconstructed Gaussian histograms mask tails | ⚠️ Known limitation | Publication |
 | 6.2 | `--spot-batch` real-activation histograms | 🔲 Partially spec'd | Histogram deliverable |
 | 7.1 | `AblationConfig` filename + deprecated fields | ⚠️ Spec'd, not coded | Step 8 |

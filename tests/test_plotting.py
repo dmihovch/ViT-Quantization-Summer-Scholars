@@ -13,7 +13,11 @@ import numpy as np
 import pytest
 
 from src.integer_gelu import GELULut, build_lut
-from src.plotting import plot_activation_histogram, plot_lut_vs_fp32
+from src.plotting import (
+    plot_activation_histogram,
+    plot_lut_vs_fp32,
+    plot_per_channel_std_heatmap,
+)
 
 _SCALE_IN: float = 0.05
 _SCALE_OUT: float = 0.05
@@ -51,3 +55,15 @@ def test_plot_lut_vs_fp32_creates_file(tmp_path: Path) -> None:
 
     assert output_path.exists(), "Expected LUT vs FP32 PNG was not created."
     assert output_path.stat().st_size > 0, "LUT vs FP32 PNG is empty."
+
+
+def test_plot_per_channel_std_heatmap_creates_file(tmp_path: Path) -> None:
+    """plot_per_channel_std_heatmap must write a PNG file to the given path."""
+    rng = np.random.default_rng(seed=2)
+    stds: dict[str, list[float]] = {
+        f"blocks.{i}/pre_gelu": rng.random(16).tolist() for i in range(3)
+    }
+    output_path = tmp_path / "heatmap.png"
+    plot_per_channel_std_heatmap(stds, output_path)
+    assert output_path.exists(), "Expected heatmap PNG was not created."
+    assert output_path.stat().st_size > 0, "Heatmap PNG is empty."

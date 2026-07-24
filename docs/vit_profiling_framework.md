@@ -43,7 +43,7 @@ Establish the unquantized ground truth of activation distributions across **five
 For **every** measurement site, compute and record the following statistics over the full collection pass:
 
 *   **Per-tensor scalars:** `max`, `min`, `mean`, `std` ($\sigma$)
-*   **Kurtosis (excess):** $\kappa = \mathbb{E}[(x - \mu)^4] / \sigma^4 - 3$ — values $> 0$ confirm heavier tails than a Gaussian; values $\gg 0$ indicate quantization-hostile distributions.  **Computed as an approximation** via Welford's online accumulator (Chan et al., 1983): each batch contributes $(x - \bar{x}_{\text{batch}})^4$ using the local batch mean as a proxy for the global mean.  Error is negligible for batch size $\geq 32$ and near-zero-centred activations but kurtosis values should be labelled approximate in any publication
+*   **Kurtosis (excess):** $\kappa = \mathbb{E}[(x - \mu)^4] / \sigma^4 - 3$ — values $> 0$ confirm heavier tails than a Gaussian; values $\gg 0$ indicate quantization-hostile distributions.  **Computed exactly** via the Pébay (2008) parallel higher-moments merge formula (M3 and M4 tracked across batches).  No approximation caveat is needed.
 *   **Outlier fraction:** percentage of elements with $|x| > k\sigma$ (strict inequality) for $k \in \{3, 4, 6\}$.  These are the **primary quantization-sensitivity metrics** and are computed exactly via Welford's parallel merge
 *   **Per-channel $\sigma$ map** (Post-LayerNorm and Hidden-State sites only): a vector of per-channel standard deviations of shape `[D]` or `[D_mlp]`, saved alongside the scalar stats; this is what makes per-channel quantization granularity decisions later
 *   **Attention entropy** (Post-Softmax site only): $H = -\sum_j p_j \log p_j$ per head per token, averaged across the batch; near-zero entropy signals a sink token absorbing all probability mass
@@ -73,7 +73,7 @@ The residual stream accumulates contributions from both the attention sub-block 
 *   **Mechanism — `profiler.py` Welford multi-batch pipeline (Option C):**
     *   `profiler.py` wraps the model with `nnsight.NNsight` and captures all **five sites** per block inside each forward pass via `profile_vit`.
     *   A `WelfordAccumulator` per site aggregates per-batch statistics across the full dataset using the Chan et al. (1983) parallel-groups merge formula.  This gives exact global mean, std, and outlier fractions for all five sites.
-    *   Kurtosis is approximate: each batch contributes `(x − batch_mean)⁴` using the local batch mean as a proxy for the global mean.  Error is negligible for batch size ≥ 32 and near-zero-centred activations; kurtosis values must be labelled approximate in any publication.
+    *   Kurtosis is exact via Pébay (2008) M3/M4 parallel merge. No approximation.
     *   `hooks.py` is **not** used in Phase 1.  It is retained for reference.
 *   **Dataset:** Same validation subset used across all phases for comparability.
 *   **Storage:** Reduce each batch to scalar statistics inside `profile_vit` (no raw tensors stored); merge into accumulators via `merge_batch_stats`; save the complete `ProfilingResult` to `profiling_result.json` via `profiler.save_profiling_result`.

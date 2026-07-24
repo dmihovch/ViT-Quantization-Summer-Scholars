@@ -1,8 +1,10 @@
 # EXP1-IMPL: Experiment 1 — Baseline Activation Profiling
 
-> **Status:** Temporary implementation guide. Delete once `profiler.py`
-> (Welford extension), `exp1_profiling.py`, and Phase 1 plotting functions
-> are complete and tested.
+> **Status:** ✅ Implemented. `profiler.py` (Welford extension + per-channel std),
+> `exp1_profiling.py`, and Phase 1 plotting functions are complete and tested.
+> 59/68 fast tests pass (9 failures are pre-existing stubs in Phase 2/3).
+> Slow tests require PyTorch 2.2.x + nnsight 0.2.21.
+> **Keep this file** as the authoritative implementation reference.
 
 ---
 
@@ -827,13 +829,21 @@ deterministic given the dataset order.
 
 | Test | File | Fast/Slow | Status |
 |---|---|---|---|
-| `test_welford_accumulator_construction` | `test_profiler.py` | Fast | Add |
-| `test_merge_batch_stats_single_batch` | `test_profiler.py` | Fast | Add |
-| `test_finalize_accumulator_two_equal_batches` | `test_profiler.py` | Fast | Add |
-| `test_slow_run_profiling_dataset_pass_site_coverage` | `test_profiler.py` | Slow | Add |
-| `test_slow_run_profiling_dataset_pass_exact_n_samples` | `test_profiler.py` | Slow | Add |
+| `test_welford_accumulator_construction` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_merge_batch_stats_single_batch` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_finalize_accumulator_two_equal_batches` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_merge_batch_stats_exact_kurtosis_known_data` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_merge_batch_stats_raises_on_zero_batch_n` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_finalize_accumulator_raises_on_zero_n` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_site_n_returns_correct_counts` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_merge_batch_stats_outlier_accumulation` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_per_channel_merge_two_batches` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_slow_run_profiling_dataset_pass_site_coverage` | `test_profiler.py` | Slow | ✅ Spec'd (needs PT 2.2) |
+| `test_slow_run_profiling_dataset_pass_exact_n_samples` | `test_profiler.py` | Slow | ✅ Spec'd (needs PT 2.2) |
+| `test_slow_run_profiling_dataset_pass_per_channel_std_present` | `test_profiler.py` | Slow | ✅ Spec'd (needs PT 2.2) |
+| `test_slow_run_profiling_dataset_pass_per_channel_std_shape` | `test_profiler.py` | Slow | ✅ Spec'd (needs PT 2.2) |
 | `test_slow_register_saves_finalize_layernorm` | `test_profiler.py` | Slow | Updated (n_samples arg) |
 | `test_slow_kurtosis_gaussian` | `test_profiler.py` | Slow | Updated (n_samples arg) |
-| `test_plot_activation_histogram_creates_file` | `test_plotting.py` | Fast | Existing, must pass |
-| `test_plot_per_channel_std_heatmap_creates_file` | `test_plotting.py` | Fast | Add |
-| All 48 existing fast tests | full suite | Fast | Must not regress |
+| `test_plot_activation_histogram_creates_file` | `test_plotting.py` | Fast | ✅ Pass |
+| `test_plot_per_channel_std_heatmap_creates_file` | `test_plotting.py` | Fast | ✅ Pass |
+| All existing fast tests | full suite | Fast | 59/68 pass (9 stub failures) |

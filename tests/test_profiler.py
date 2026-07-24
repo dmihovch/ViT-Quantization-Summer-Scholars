@@ -406,3 +406,409 @@ def test_slow_kurtosis_gaussian() -> None:
     stats = _finalize_stats(savers)
     assert abs(stats.kurtosis) < 0.5, f"kurtosis={stats.kurtosis:.4f} expected ~0"
     assert stats.n_samples == n_samples
+
+
+# ---------------------------------------------------------------------------
+# WelfordAccumulator — fast tests (no trace)
+# ---------------------------------------------------------------------------
+
+
+def test_welford_accumulator_construction() -> None:
+    """WelfordAccumulator initialises with zero-state defaults."""
+    from src.profiler import WelfordAccumulator
+
+    acc = WelfordAccumulator(site_identifier="blocks.0/pre_gelu")
+    assert acc.n == 0
+    assert acc.mean == 0.0
+    assert acc.M2 == 0.0
+    assert acc.M3 == 0.0
+    assert acc.M4 == 0.0
+    assert set(acc.outlier_counts.keys()) == {f"{k}_sigma" for k in OUTLIER_SIGMAS}
+    assert all(v == 0 for v in acc.outlier_counts.values())
+    # per_channel fields default to None/0
+    assert acc.per_channel_sum is None
+    assert acc.per_channel_sum_sq is None
+    assert acc.per_channel_n == 0
+
+
+def test_merge_batch_stats_single_batch() -> None:
+    """After one merge, accumulator mean and population std must match batch."""
+    from src.profiler import WelfordAccumulator, merge_batch_stats
+
+    acc = WelfordAccumulator(site_identifier="test/site")
+    batch_stats = LayerStats(
+        site_identifier="test/site",
+        mean=2.0,
+        std=3.0,
+        kurtosis=0.0,
+        m3=0.0,
+        outlier_fractions={f"{k}_sigma": 0.01 for k in OUTLIER_SIGMAS},
+        n_samples=1000,
+    )
+    merge_batch_stats(acc, batch_stats, 1000)
+
+    assert acc.n == 1000
+    assert math.isclose(acc.mean, 2.0)
+    # Population variance = std² = 9.0;  M2 = 9.0 * 1000 = 9000.
+    assert math.isclose(acc.M2, 9000.0, rel_tol=1e-6)
+
+
+def test_finalize_accumulator_two_equal_batches() -> None:
+    """Two identical batches: global mean and std must match the batch values exactly."""
+    from src.profiler import (
+        WelfordAccumulator,
+        finalize_accumulator,
+        merge_batch_stats,
+    )
+
+    acc = WelfordAccumulator(site_identifier="test/site")
+    for _ in range(2):
+        bs = LayerStats(
+            site_identifier="test/site",
+            mean=4.0,
+            std=2.0,
+            kurtosis=0.0,
+            m3=0.0,
+            outlier_fractions={f"{k}_sigma": 0.0 for k in OUTLIER_SIGMAS},
+            n_samples=100,
+        )
+        merge_batch_stats(acc, bs, 100)
+
+    result = finalize_accumulator(acc)
+    assert math.isclose(result.mean, 4.0, rel_tol=1e-6)
+    assert math.isclose(result.std, 2.0, rel_tol=1e-6)
+    assert result.n_samples == 200
+
+
+def test_merge_batch_stats_exact_kurtosis_known_data() -> None:
+    """Pébay M3/M4 merge must produce correct kurtosis for known-distribution data.
+
+    Two batches drawn from N(0, 1) with known sample moments.  The merged
+    excess kurtosis should be close to 0 (Gaussian).
+    """
+    from src.profiler import (
+        WelfordAccumulator,
+        finalize_accumulator,
+        merge_batch_stats,
+    )
+
+    torch.manual_seed(0)
+    # Generate two batches, compute their exact per-batch stats.
+    b1 = torch.randn(5000)
+    b2 = torch.randn(5000)
+
+    def _batch_layer_stats(t: torch.Tensor, site_id: str) -> LayerStats:
+        x = t.float()
+        n = x.numel()
+        mean = x.mean().item()
+        std = x.std(correction=0).item()
+        centred = x - mean
+        m3 = (centred**3).sum().item()
+        m4 = (centred**4).sum().item()
+        kurt = m4 / (n * std**4) - 3.0 if std > 0 else 0.0
+        return LayerStats(
+            site_identifier=site_id,
+            mean=mean,
+            std=std,
+            kurtosis=kurt,
+            m3=m3,
+            outlier_fractions={f"{k}_sigma": 0.0 for k in OUTLIER_SIGMAS},
+            n_samples=n,
+        )
+
+    acc = WelfordAccumulator(site_identifier="test/gauss")
+    merge_batch_stats(acc, _batch_layer_stats(b1, "test/gauss"), 5000)
+    merge_batch_stats(acc, _batch_layer_stats(b2, "test/gauss"), 5000)
+    result = finalize_accumulator(acc)
+
+    # Full 10k-sample mean and std should be close to 0 and 1.
+    full = torch.cat([b1, b2])
+    assert math.isclose(result.mean, full.mean().item(), rel_tol=1e-4)
+    assert math.isclose(result.std, full.std(correction=0).item(), rel_tol=1e-4)
+    # Excess kurtosis of Gaussian should be near 0.
+    assert abs(result.kurtosis) < 0.5, f"kurtosis={result.kurtosis:.4f} expected ~0"
+    assert result.n_samples == 10000
+
+
+def test_merge_batch_stats_raises_on_zero_batch_n() -> None:
+    """merge_batch_stats must raise ValueError when batch_n <= 0."""
+    from src.profiler import WelfordAccumulator, merge_batch_stats
+
+    acc = WelfordAccumulator(site_identifier="test/site")
+    bs = LayerStats(
+        site_identifier="test/site",
+        mean=0.0,
+        std=1.0,
+        kurtosis=0.0,
+        m3=0.0,
+        outlier_fractions={},
+        n_samples=0,
+    )
+    with pytest.raises(ValueError, match="batch_n must be positive"):
+        merge_batch_stats(acc, bs, 0)
+    with pytest.raises(ValueError, match="batch_n must be positive"):
+        merge_batch_stats(acc, bs, -1)
+
+
+def test_finalize_accumulator_raises_on_zero_n() -> None:
+    """finalize_accumulator must raise ValueError when acc.n == 0."""
+    from src.profiler import WelfordAccumulator, finalize_accumulator
+
+    acc = WelfordAccumulator(site_identifier="test/empty")
+    with pytest.raises(ValueError, match="zero elements"):
+        finalize_accumulator(acc)
+
+
+def test_site_n_returns_correct_counts() -> None:
+    """_site_n must return correct element counts for each site type."""
+    from src.profiler import (
+        SITE_PRE_GELU,
+        SITE_PRE_SOFTMAX,
+        SITE_POST_SOFTMAX,
+        SITE_POST_LAYERNORM_1,
+        SITE_RESIDUAL_STREAM,
+        _site_n,
+    )
+
+    B, N, D, D_mlp, H = 4, 197, 768, 3072, 12
+
+    # pre_gelu: B * N * D_mlp
+    assert _site_n(f"blocks.0/{SITE_PRE_GELU}", B, N, D, D_mlp, H) == 4 * 197 * 3072
+    # pre_softmax: B * H * N * N
+    assert (
+        _site_n(f"blocks.0/{SITE_PRE_SOFTMAX}", B, N, D, D_mlp, H)
+        == 4 * 12 * 197 * 197
+    )
+    # post_softmax: same as pre_softmax
+    assert (
+        _site_n(f"blocks.0/{SITE_POST_SOFTMAX}", B, N, D, D_mlp, H)
+        == 4 * 12 * 197 * 197
+    )
+    # residual_stream / post_layernorm: B * N * D
+    assert (
+        _site_n(f"blocks.0/{SITE_POST_LAYERNORM_1}", B, N, D, D_mlp, H)
+        == 4 * 197 * 768
+    )
+    assert (
+        _site_n(f"blocks.0/{SITE_RESIDUAL_STREAM}", B, N, D, D_mlp, H)
+        == 4 * 197 * 768
+    )
+
+
+def test_merge_batch_stats_outlier_accumulation() -> None:
+    """Outlier counts must accumulate correctly across batches."""
+    from src.profiler import (
+        WelfordAccumulator,
+        finalize_accumulator,
+        merge_batch_stats,
+    )
+
+    acc = WelfordAccumulator(site_identifier="test/site")
+    # Batch with 10% outliers at 3σ, 5% at 5σ, 0% at 8σ
+    bs = LayerStats(
+        site_identifier="test/site",
+        mean=0.0,
+        std=1.0,
+        kurtosis=0.0,
+        m3=0.0,
+        outlier_fractions={"3.0_sigma": 0.10, "5.0_sigma": 0.05, "8.0_sigma": 0.0},
+        n_samples=1000,
+    )
+    merge_batch_stats(acc, bs, 1000)
+    merge_batch_stats(acc, bs, 1000)
+
+    result = finalize_accumulator(acc)
+    # 0.10 * 1000 = 100 per batch, two batches → 200 / 2000 = 0.10
+    assert math.isclose(result.outlier_fractions["3.0_sigma"], 0.10, rel_tol=1e-6)
+    assert math.isclose(result.outlier_fractions["5.0_sigma"], 0.05, rel_tol=1e-6)
+    assert math.isclose(result.outlier_fractions["8.0_sigma"], 0.0)
+    assert result.n_samples == 2000
+
+
+def test_per_channel_merge_two_batches() -> None:
+    """Per-channel M2 merge must produce correct per-channel std."""
+    from src.profiler import (
+        WelfordAccumulator,
+        finalize_accumulator,
+        merge_batch_stats,
+    )
+
+    torch.manual_seed(1)
+    # Two batches of shape (2, 4, 8): B=2, N=4, D=8
+    b1 = torch.randn(2, 4, 8)
+    b2 = torch.randn(2, 4, 8)
+    full = torch.cat([b1, b2], dim=0)  # (4, 4, 8)
+
+    def _batch_stats(t: torch.Tensor) -> LayerStats:
+        x = t.float()
+        flat = x.reshape(-1, x.shape[-1])  # (B*N, D)
+        n = x.numel()
+        mean = x.mean().item()
+        std = x.std(correction=0).item()
+        centred = x.flatten() - mean
+        m3 = (centred**3).sum().item()
+        m4 = (centred**4).sum().item()
+        kurt = m4 / (n * std**4) - 3.0 if std > 0 else 0.0
+        per_ch = flat.std(dim=0, correction=0).tolist()
+        per_ch_sum = flat.sum(dim=0).tolist()
+        per_ch_sum_sq = (flat**2).sum(dim=0).tolist()
+        return LayerStats(
+            site_identifier="test/site",
+            mean=mean,
+            std=std,
+            kurtosis=kurt,
+            m3=m3,
+            outlier_fractions={f"{k}_sigma": 0.0 for k in OUTLIER_SIGMAS},
+            n_samples=n,
+            per_channel_std=per_ch,
+            per_channel_sum=per_ch_sum,
+            per_channel_sum_sq=per_ch_sum_sq,
+        )
+
+    acc = WelfordAccumulator(site_identifier="test/site")
+    merge_batch_stats(acc, _batch_stats(b1), b1.numel())
+    merge_batch_stats(acc, _batch_stats(b2), b2.numel())
+    result = finalize_accumulator(acc)
+
+    # Per-channel std from merge should match full-dataset per-channel std.
+    full_flat = full.reshape(-1, 8)
+    expected_per_ch = full_flat.std(dim=0, correction=0).tolist()
+    assert result.per_channel_std is not None
+    assert len(result.per_channel_std) == 8
+    for i, (got, exp) in enumerate(zip(result.per_channel_std, expected_per_ch)):
+        assert math.isclose(got, exp, rel_tol=1e-4), (
+            f"Channel {i}: got {got}, expected {exp}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Slow tests — Welford multi-batch pipeline
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_slow_run_profiling_dataset_pass_site_coverage(_vit_wrapped) -> None:
+    """run_profiling_dataset_pass must return all 5 sites for every block."""
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from src.profiler import (
+        SITE_POST_SOFTMAX,
+        SITE_PRE_SOFTMAX,
+        run_profiling_dataset_pass,
+    )
+
+    images = torch.randn(4, 3, 224, 224)
+    labels = torch.zeros(4, dtype=torch.long)
+    dataset = TensorDataset(images, labels)
+    loader = DataLoader(dataset, batch_size=2)
+    device = torch.device("cpu")
+
+    with torch.no_grad():
+        stats = run_profiling_dataset_pass(_vit_wrapped, loader, device)
+
+    keys = set(stats.keys())
+    assert "patch_embed/residual_stream" in keys
+    for i in range(12):
+        assert f"blocks.{i}/{SITE_PRE_SOFTMAX}" in keys
+        assert f"blocks.{i}/{SITE_POST_SOFTMAX}" in keys
+
+
+@pytest.mark.slow
+def test_slow_run_profiling_dataset_pass_exact_n_samples(_vit_wrapped) -> None:
+    """n_samples in finalized LayerStats must equal total elements processed."""
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from src.profiler import SITE_PRE_GELU, run_profiling_dataset_pass
+
+    # 4 images, batch_size=2 → 2 batches of B=2.
+    # For pre_gelu at ViT-B/16: N=197, D_mlp=3072, so n per batch = 2*197*3072.
+    images = torch.randn(4, 3, 224, 224)
+    labels = torch.zeros(4, dtype=torch.long)
+    dataset = TensorDataset(images, labels)
+    loader = DataLoader(dataset, batch_size=2)
+    device = torch.device("cpu")
+
+    with torch.no_grad():
+        stats = run_profiling_dataset_pass(_vit_wrapped, loader, device)
+
+    key = "blocks.0/pre_gelu"
+    expected_n = 4 * 197 * 3072  # total images × N × D_mlp
+    assert stats[key].n_samples == expected_n, (
+        f"n_samples={stats[key].n_samples}, expected {expected_n}"
+    )
+
+
+@pytest.mark.slow
+def test_slow_run_profiling_dataset_pass_per_channel_std_present(
+    _vit_wrapped,
+) -> None:
+    """per_channel_std must be populated for pre_gelu and post_layernorm sites."""
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from src.profiler import (
+        SITE_POST_LAYERNORM_1,
+        SITE_POST_LAYERNORM_2,
+        SITE_PRE_GELU,
+        run_profiling_dataset_pass,
+    )
+
+    images = torch.randn(2, 3, 224, 224)
+    labels = torch.zeros(2, dtype=torch.long)
+    dataset = TensorDataset(images, labels)
+    loader = DataLoader(dataset, batch_size=2)
+    device = torch.device("cpu")
+
+    with torch.no_grad():
+        stats = run_profiling_dataset_pass(_vit_wrapped, loader, device)
+
+    for i in range(12):
+        for site in (SITE_PRE_GELU, SITE_POST_LAYERNORM_1, SITE_POST_LAYERNORM_2):
+            key = f"blocks.{i}/{site}"
+            assert key in stats, f"Missing key: {key}"
+            s = stats[key]
+            assert s.per_channel_std is not None, (
+                f"per_channel_std is None for {key}"
+            )
+            assert len(s.per_channel_std) > 0, (
+                f"per_channel_std is empty for {key}"
+            )
+            assert all(v >= 0.0 for v in s.per_channel_std), (
+                f"Negative per_channel_std value in {key}"
+            )
+
+
+@pytest.mark.slow
+def test_slow_run_profiling_dataset_pass_per_channel_std_shape(
+    _vit_wrapped,
+) -> None:
+    """per_channel_std must have correct dimensionality for each site type."""
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from src.profiler import (
+        SITE_POST_LAYERNORM_1,
+        SITE_PRE_GELU,
+        run_profiling_dataset_pass,
+    )
+
+    images = torch.randn(2, 3, 224, 224)
+    labels = torch.zeros(2, dtype=torch.long)
+    dataset = TensorDataset(images, labels)
+    loader = DataLoader(dataset, batch_size=2)
+    device = torch.device("cpu")
+
+    with torch.no_grad():
+        stats = run_profiling_dataset_pass(_vit_wrapped, loader, device)
+
+    # pre_gelu: D_mlp = 3072 for ViT-B/16
+    pg = stats["blocks.0/pre_gelu"]
+    assert pg.per_channel_std is not None
+    assert len(pg.per_channel_std) == 3072, (
+        f"pre_gelu per_channel_std has {len(pg.per_channel_std)} channels, expected 3072"
+    )
+
+    # post_layernorm: D = 768
+    ln = stats[f"blocks.0/{SITE_POST_LAYERNORM_1}"]
+    assert ln.per_channel_std is not None
+    assert len(ln.per_channel_std) == 768, (
+        f"post_layernorm per_channel_std has {len(ln.per_channel_std)} channels, expected 768"
+    )

@@ -100,6 +100,9 @@ class LayerStats:
     m3: float = 0.0
     outlier_fractions: dict[str, float] = field(default_factory=dict)
     n_samples: int = 0
+    per_channel_std: list[float] | None = None
+    per_channel_sum: list[float] | None = None
+    per_channel_sum_sq: list[float] | None = None
 
 
 @dataclass
@@ -115,6 +118,299 @@ class ProfilingResult:
     stats: dict[SiteId, LayerStats]
     num_blocks: int
     batch_shape: tuple[int, ...]
+
+
+# ---------------------------------------------------------------------------
+# Welford multi-batch accumulator (Pébay 2008 exact parallel merge)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class WelfordAccumulator:
+    """Online running state for one measurement site across all batches.
+
+    Implements exact global statistics via the Pébay (2008) parallel
+    higher-moments formula for M2, M3, and M4, enabling exact kurtosis
+    without any per-batch centring approximation.
+
+    All Mk values are **sums** (not means): ``Mk = Σ(x_i − μ)^k``.
+
+    Attributes:
+        site_identifier: Site key, e.g. ``"blocks.3/pre_softmax"``.
+        n: Total scalar elements accumulated across all batches.
+        mean: Running global mean (exact, Welford parallel merge).
+        M2: Running ``Σ(x − μ)²``.
+        M3: Running ``Σ(x − μ)³``.
+        M4: Running ``Σ(x − μ)⁴``.
+        outlier_counts: Raw element counts where ``|x| > k·σ`` per key
+            ``"{k}_sigma"``.  σ used is the per-batch population std.
+        per_channel_M2: Per-channel running ``Σ(x_c − μ_c)²``; ``None`` if
+            this site does not track per-channel statistics.  Shape ``[D]``.
+        per_channel_n: Total samples per channel (B·N accumulated).
+    """
+
+    site_identifier: SiteId
+    n: int = 0
+    mean: float = 0.0
+    M2: float = 0.0
+    M3: float = 0.0
+    M4: float = 0.0
+    outlier_counts: dict[str, int] = field(
+        default_factory=lambda: {f"{k}_sigma": 0 for k in OUTLIER_SIGMAS}
+    )
+    per_channel_sum: list[float] | None = None
+    per_channel_sum_sq: list[float] | None = None
+    per_channel_n: int = 0
+
+
+def _site_n(
+    site_id: SiteId,
+    B: int,
+    N: int,
+    D: int,
+    D_mlp: int,
+    num_heads: int,
+) -> int:
+    """Return the number of scalar elements for one batch at a given site.
+
+    Args:
+        site_id: Site identifier string (e.g. ``"blocks.3/pre_gelu"``).
+        B: Batch size (number of images).
+        N: Token sequence length including CLS token (e.g. 197 for ViT-B/16).
+        D: Model embedding dimension (e.g. 768).
+        D_mlp: MLP hidden dimension (e.g. 3072 for ViT-B/16).
+        num_heads: Number of attention heads (e.g. 12).
+
+    Returns:
+        Total number of scalar float elements in the activation tensor
+        for this site and batch.
+
+    Note:
+        N must be derived as ``patch_embed.num_patches + 1``, not from
+        ``input_batch.shape[2]`` (which is the image height, not token count).
+    """
+    if SITE_PRE_SOFTMAX in site_id or SITE_POST_SOFTMAX in site_id:
+        return B * num_heads * N * N
+    if SITE_PRE_GELU in site_id:
+        return B * N * D_mlp
+    # residual_stream, post_layernorm_1, post_layernorm_2
+    return B * N * D
+
+
+def merge_batch_stats(
+    acc: WelfordAccumulator,
+    batch_stats: LayerStats,
+    batch_n: int,
+) -> None:
+    """Update a WelfordAccumulator with statistics from one batch.
+
+    Implements the Pébay (2008) parallel higher-moments merge for exact
+    global M2, M3, M4 — and therefore exact std and kurtosis.
+
+    All batch statistics must use population conventions (ddof=0), as
+    produced by the updated ``_register_stat_saves`` in ``profiler.py``.
+
+    Args:
+        acc: Accumulator to update in-place.
+        batch_stats: Finalized LayerStats from one call to profile_vit.
+            Must have been produced by the updated _register_stat_saves
+            (i.e. LayerStats.std is population std, LayerStats.m3 is
+            Σ(x−μ)³, LayerStats.kurtosis is exact population excess kurtosis).
+        batch_n: Number of scalar elements in this batch for this site.
+            Use _site_n() to compute this correctly.
+
+    Raises:
+        ValueError: If batch_n <= 0.
+    """
+    if batch_n <= 0:
+        raise ValueError(f"batch_n must be positive, got {batch_n}")
+
+    b_mean = batch_stats.mean
+    b_std = batch_stats.std  # population std (ddof=0), guaranteed by profiler
+    b_var = b_std**2  # population variance
+
+    # Recover batch central moment sums from batch_stats.
+    # M2_b = population variance * n  = b_var * batch_n
+    # M3_b = stored directly as Σ(x−μ)³
+    # M4_b = (kurtosis + 3) * σ⁴ * n  (from definition of excess kurtosis)
+    M2_b: float = b_var * batch_n
+    M3_b: float = batch_stats.m3  # already a sum (not mean)
+    M4_b: float = (batch_stats.kurtosis + 3.0) * (b_var**2) * batch_n
+
+    n_a: int = acc.n
+    n_b: int = batch_n
+    n_ab: int = n_a + n_b
+
+    if n_a == 0:
+        # First batch: no merge needed, just copy.
+        acc.n = n_b
+        acc.mean = b_mean
+        acc.M2 = M2_b
+        acc.M3 = M3_b
+        acc.M4 = M4_b
+    else:
+        delta: float = b_mean - acc.mean
+
+        # --- Pébay (2008) parallel merge, Eq. (3.1)-(3.4) ---
+        # M2
+        new_M2 = acc.M2 + M2_b + delta**2 * n_a * n_b / n_ab
+        # M3
+        new_M3 = (
+            acc.M3
+            + M3_b
+            + delta**3 * n_a * n_b * (n_a - n_b) / n_ab**2
+            + 3.0 * delta * (n_a * M2_b - n_b * acc.M2) / n_ab
+        )
+        # M4
+        new_M4 = (
+            acc.M4
+            + M4_b
+            + delta**4 * n_a * n_b * (n_a**2 - n_a * n_b + n_b**2) / n_ab**3
+            + 6.0 * delta**2 * (n_a**2 * M2_b + n_b**2 * acc.M2) / n_ab**2
+            + 4.0 * delta * (n_a * M3_b - n_b * acc.M3) / n_ab
+        )
+        acc.mean = acc.mean + delta * n_b / n_ab
+        acc.M2 = new_M2
+        acc.M3 = new_M3
+        acc.M4 = new_M4
+        acc.n = n_ab
+
+    # --- Outlier counts: fractions → raw counts, accumulate ---
+    for key in acc.outlier_counts:
+        frac = batch_stats.outlier_fractions.get(key, 0.0)
+        acc.outlier_counts[key] += round(frac * batch_n)
+
+    # --- Per-channel sum accumulation (exact via sum/sum_sq) ---
+    if batch_stats.per_channel_sum is not None and batch_stats.per_channel_sum_sq is not None:
+        b_per_ch_sum = batch_stats.per_channel_sum
+        b_per_ch_sum_sq = batch_stats.per_channel_sum_sq
+        D_ch = len(b_per_ch_sum)
+        b_per_ch_n = batch_n // D_ch if D_ch > 0 else 0
+
+        if b_per_ch_n > 0:
+            if acc.per_channel_sum is None:
+                acc.per_channel_sum = list(b_per_ch_sum)
+                acc.per_channel_sum_sq = list(b_per_ch_sum_sq)
+                acc.per_channel_n = b_per_ch_n
+            else:
+                for c in range(D_ch):
+                    acc.per_channel_sum[c] += b_per_ch_sum[c]
+                    acc.per_channel_sum_sq[c] += b_per_ch_sum_sq[c]
+                acc.per_channel_n += b_per_ch_n
+
+
+def finalize_accumulator(acc: WelfordAccumulator) -> LayerStats:
+    """Convert a WelfordAccumulator to a final LayerStats.
+
+    All statistics are exact (population conventions, Pébay parallel merge).
+    Kurtosis is exact, not approximate.
+
+    Args:
+        acc: Fully-populated accumulator (acc.n > 0).
+
+    Returns:
+        LayerStats with exact global mean, std, kurtosis, and outlier
+        fractions.
+
+    Raises:
+        ValueError: If acc.n == 0 (no data was accumulated).
+    """
+    if acc.n == 0:
+        raise ValueError(f"Accumulator '{acc.site_identifier}' has zero elements.")
+
+    global_var: float = acc.M2 / acc.n  # population variance
+    global_std: float = math.sqrt(global_var) if global_var > 0.0 else 0.0
+
+    # Exact excess kurtosis: M4/(n·σ⁴) - 3
+    global_var_sq = global_var**2
+    kurtosis: float = (
+        acc.M4 / (acc.n * global_var_sq) - 3.0 if global_var_sq > 0.0 else 0.0
+    )
+
+    outlier_fractions: dict[str, float] = {
+        key: count / acc.n for key, count in acc.outlier_counts.items()
+    }
+
+    per_channel_std: list[float] | None = None
+    if acc.per_channel_sum is not None and acc.per_channel_sum_sq is not None and acc.per_channel_n > 0:
+        per_channel_std = [
+            math.sqrt(max(0.0, sum_sq / acc.per_channel_n - (s / acc.per_channel_n) ** 2))
+            for s, sum_sq in zip(acc.per_channel_sum, acc.per_channel_sum_sq)
+        ]
+
+    return LayerStats(
+        site_identifier=acc.site_identifier,
+        mean=acc.mean,
+        std=global_std,
+        kurtosis=kurtosis,
+        m3=acc.M3,
+        outlier_fractions=outlier_fractions,
+        n_samples=acc.n,
+        per_channel_std=per_channel_std,
+    )
+
+
+def run_profiling_dataset_pass(
+    wrapped_model: NNsight,
+    loader: DataLoader,
+    device: torch.device,
+) -> dict[SiteId, LayerStats]:
+    """Collect dataset-wide activation statistics at all 5 sites via exact merge.
+
+    Iterates over all batches in loader, calls profile_vit for each, and
+    merges per-batch LayerStats into WelfordAccumulators using the exact
+    Pébay (2008) parallel higher-moments formula.
+
+    All five measurement sites (residual_stream, post_layernorm_1/2,
+    pre_gelu, pre_softmax, post_softmax) are covered for every encoder block.
+
+    Must be called inside torch.no_grad() — the caller is responsible.
+
+    Args:
+        wrapped_model: NNsight-wrapped VisionTransformer with fused_attn=False.
+        loader: DataLoader yielding (images, labels) batches.
+        device: Compute device; images are moved here per batch.
+
+    Returns:
+        Mapping from site_identifier to finalized global LayerStats.
+
+    Raises:
+        ProfilingError: Propagated from profile_vit.
+        RuntimeError: If loader yields zero batches.
+    """
+    inner_model = wrapped_model._model
+
+    # Extract model architecture constants once before the loop.
+    # N = num_patches + 1 (CLS token). For ViT-B/16 on 224×224: N = 197.
+    # Do NOT derive N from input_batch.shape[2] (that is image height = 224).
+    N: int = inner_model.patch_embed.num_patches + 1
+    D: int = inner_model.embed_dim
+    num_heads: int = inner_model.blocks[0].attn.num_heads
+    D_mlp: int = inner_model.blocks[0].mlp.fc1.out_features
+
+    accumulators: dict[SiteId, WelfordAccumulator] = {}
+    num_batches: int = 0
+
+    for batch_idx, (images, _) in enumerate(loader):
+        images = images.to(device)
+        B: int = images.shape[0]  # actual batch size (last batch may be smaller)
+        batch_result = profile_vit(wrapped_model, images)
+
+        for site_id, layer_stats in batch_result.stats.items():
+            batch_n = _site_n(site_id, B, N, D, D_mlp, num_heads)
+            if site_id not in accumulators:
+                accumulators[site_id] = WelfordAccumulator(site_identifier=site_id)
+            merge_batch_stats(accumulators[site_id], layer_stats, batch_n)
+
+        num_batches += 1
+        if num_batches % 10 == 0:
+            logger.info("Profiled %d batches...", num_batches)
+
+    if num_batches == 0:
+        raise RuntimeError("DataLoader yielded zero batches; cannot produce stats.")
+
+    logger.info("Finalizing accumulators for %d sites.", len(accumulators))
+    return {sid: finalize_accumulator(acc) for sid, acc in accumulators.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -149,9 +445,14 @@ class _StatsSavers:
     kurtosis: Any
     outlier_proxies: list[Any]
     n_samples: int
+    per_channel_sum: Any = None
+    per_channel_sum_sq: Any = None
 
 
-def _register_stat_saves(tensor_proxy: Any, site_id: SiteId, n_samples: int) -> _StatsSavers:
+def _register_stat_saves(
+    tensor_proxy: Any, site_id: SiteId, n_samples: int,
+    track_per_channel: bool = False,
+) -> _StatsSavers:
     """Register all statistics as .save() calls inside a nnsight trace context.
 
     Must be called from within a ``with wrapped_model.trace(...):`` block.
@@ -178,6 +479,10 @@ def _register_stat_saves(tensor_proxy: Any, site_id: SiteId, n_samples: int) -> 
         n_samples: Number of scalar elements in this tensor (B*N*D etc.).
             Must be passed explicitly because proxies do not expose .numel()
             reliably before the trace executes.
+        track_per_channel: If True, also compute and save per-channel
+            population std across batch and token dims (shape ``[D]``).
+            Only valid when the tensor has a channel dimension as its last
+            axis (e.g. ``(B, N, D)`` or ``(B, N, D_mlp)``).
 
     Returns:
         A :class:`_StatsSavers` holding the registered save proxies.
@@ -205,6 +510,15 @@ def _register_stat_saves(tensor_proxy: Any, site_id: SiteId, n_samples: int) -> 
         frac = (t.abs() > sigma * t.std(correction=0)).float().mean().save()
         outlier_proxies.append(frac)
 
+    # Per-channel population std: reduce over batch and token dims.
+    per_channel_sum_proxy: Any = None
+    per_channel_sum_sq_proxy: Any = None
+    if track_per_channel:
+        # tensor_proxy shape: (B, N, D) — flatten B and N, keep D.
+        t_bn_d = tensor_proxy.reshape(-1, tensor_proxy.shape[-1])
+        per_channel_sum_proxy = t_bn_d.sum(dim=0).save()       # shape (D,)
+        per_channel_sum_sq_proxy = (t_bn_d**2).sum(dim=0).save()  # shape (D,)
+
     return _StatsSavers(
         site_identifier=site_id,
         mean=mean_proxy,
@@ -213,6 +527,8 @@ def _register_stat_saves(tensor_proxy: Any, site_id: SiteId, n_samples: int) -> 
         kurtosis=kurtosis_proxy,
         outlier_proxies=outlier_proxies,
         n_samples=n_samples,
+        per_channel_sum=per_channel_sum_proxy,
+        per_channel_sum_sq=per_channel_sum_sq_proxy,
     )
 
 
@@ -233,6 +549,23 @@ def _finalize_stats(savers: _StatsSavers) -> LayerStats:
         f"{sigma}_sigma": float(proxy.value.item())
         for sigma, proxy in zip(OUTLIER_SIGMAS, savers.outlier_proxies)
     }
+    per_channel_std: list[float] | None = None
+    per_channel_sum: list[float] | None = None
+    per_channel_sum_sq: list[float] | None = None
+    if savers.per_channel_sum is not None and savers.per_channel_sum_sq is not None:
+        sum_ch = savers.per_channel_sum.value  # shape (D,)
+        sum_sq_ch = savers.per_channel_sum_sq.value  # shape (D,)
+        # Per-channel n = B * N (batch size × tokens).
+        # Recover from the sum tensor: n = total_elements / D.
+        D_ch = sum_ch.shape[0]
+        per_ch_n = savers.n_samples // D_ch
+        per_channel_sum = sum_ch.tolist()
+        per_channel_sum_sq = sum_sq_ch.tolist()
+        if per_ch_n > 0:
+            mean_ch = sum_ch / per_ch_n
+            var_ch = sum_sq_ch / per_ch_n - mean_ch**2
+            std_ch = var_ch.clamp(min=0.0).sqrt()
+            per_channel_std = std_ch.tolist()
     return LayerStats(
         site_identifier=savers.site_identifier,
         mean=float(savers.mean.value.item()),
@@ -241,6 +574,9 @@ def _finalize_stats(savers: _StatsSavers) -> LayerStats:
         kurtosis=float(savers.kurtosis.value.item()),
         outlier_fractions=outlier_fractions,
         n_samples=savers.n_samples,
+        per_channel_std=per_channel_std,
+        per_channel_sum=per_channel_sum,
+        per_channel_sum_sq=per_channel_sum_sq,
     )
 
 
@@ -384,14 +720,16 @@ def profile_vit(
                 # --- post_layernorm_1 (pre-attention LN output) ---
                 all_savers.append(
                     _register_stat_saves(
-                        block.norm1.output, f"blocks.{i}/{SITE_POST_LAYERNORM_1}", n_residual
+                        block.norm1.output, f"blocks.{i}/{SITE_POST_LAYERNORM_1}", n_residual,
+                        track_per_channel=True,
                     )
                 )
 
                 # --- post_layernorm_2 (pre-MLP LN output) ---
                 all_savers.append(
                     _register_stat_saves(
-                        block.norm2.output, f"blocks.{i}/{SITE_POST_LAYERNORM_2}", n_residual
+                        block.norm2.output, f"blocks.{i}/{SITE_POST_LAYERNORM_2}", n_residual,
+                        track_per_channel=True,
                     )
                 )
 
@@ -399,7 +737,8 @@ def profile_vit(
                 # mlp.act.input is ((tensor,), {}) — index [0][0].
                 all_savers.append(
                     _register_stat_saves(
-                        block.mlp.act.input[0][0], f"blocks.{i}/{SITE_PRE_GELU}", n_pre_gelu
+                        block.mlp.act.input[0][0], f"blocks.{i}/{SITE_PRE_GELU}", n_pre_gelu,
+                        track_per_channel=True,
                     )
                 )
 
