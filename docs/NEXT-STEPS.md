@@ -2,16 +2,19 @@
 
 ## Current State
 
-**Steps 1–5 are complete. Phase 1 (profiling) is fully implemented. 59/68 fast tests pass (9 failures are pre-existing stubs in Phase 2/3 modules). Slow tests require PyTorch 2.2.x + nnsight 0.2.21 (known incompatibility with PyTorch 2.12).**
+**Steps 1–6b are complete. Phase 1 is fully implemented.** 82/91 fast tests pass
+(9 failures are pre-existing stubs in Phase 2/3 modules). 22 slow tests require
+nnsight trace context. Tested with PyTorch 2.12.1, nnsight 0.7.0, NVIDIA RTX 3070.
 
 | Module | Status | Fast tests | Slow tests |
 |--------|--------|-----------|------------|
 | `src/utils.py` | ✅ Done | `test_utils.py` 3/3 | — |
 | `src/model.py` | ✅ Done | — (weights required) | — |
 | `src/data_loader.py` | ✅ Done | `test_data_loader.py` 2/2 | — |
-| `src/hooks.py` | ✅ Kept (legacy, 3-site) | `test_hooks.py` 26/26 | — |
-| `src/profiler.py` — single-pass API | ✅ Done + updated | `test_profiler.py` 11/11 | 13 slow (2 updated) |
-| `src/profiler.py` — Welford multi-batch extension | ✅ Done (Step 4b-ii + 4b-iii) | `test_profiler.py` 9/9 new | 4 new slow |
+| `src/hooks.py` | ✅ Kept (legacy) | `test_hooks.py` 26/26 | — |
+| `src/profiler.py` — single-pass API | ✅ Done | `test_profiler.py` 11/11 | 13 slow |
+| `src/profiler.py` — Welford multi-batch | ✅ Done | `test_profiler.py` 21 fast | 7 slow |
+| `src/profiler.py` — `histogram_profile_vit` | ✅ Done (Step 6b) | 2 fast | 2 slow |
 | `src/exp1_profiling.py` | ✅ Done | — | — |
 | `src/plotting.py` — Phase 1 functions | ✅ Done | `test_plotting.py` 2/2 | — |
 | `src/ablation.py` | 🔲 Stub | — | — |
@@ -43,18 +46,17 @@ This module is **retained for reference and for its existing tests** but is
 
 ### `src/profiler.py` — nnsight pipeline  **Primary for all phases**
 
-Wraps a timm ViT with `nnsight.NNsight` and captures all 5 sites per block,
+Wraps a timm ViT with `nnsight.NNsight` and captures all **6** sites per block,
 including both attention sites, by intercepting intermediate proxy tensors
 inside the trace context.
 
-**Step 4b-i (done):** `_register_stat_saves`, `_StatsSavers`, `LayerStats`, `_register_pre_softmax_saves`, and `profile_vit` have been updated:
-- All std/variance computations use population convention (`correction=0`, ddof=0).
-- `LayerStats` gains `m3: float = 0.0` and `n_samples: int = 0`.
-- `_register_stat_saves` now takes `n_samples: int` as a required argument and saves M3 = Σ(x−μ)³ as a proxy for exact cross-batch kurtosis merging.
-- `profile_vit` derives N correctly as `patch_embed.num_patches + 1` (not image height), extracts architecture constants (`N, D, num_heads, D_mlp`) once before the block loop, and passes `n_samples` to every call site.
-- `import math` and `from torch.utils.data import DataLoader` added.
+All single-pass and Welford multi-batch APIs are implemented:
+- Population std (ddof=0) throughout, M3/M4 tracked for exact kurtosis.
+- `LayerStats` has `m3`, `n_samples`, `per_channel_std`, `per_channel_sum`, `per_channel_sum_sq`.
+- `WelfordAccumulator`, `merge_batch_stats`, `finalize_accumulator`, `_site_n`, `run_profiling_dataset_pass` all implemented.
+- `histogram_profile_vit` is the one remaining addition (Step 6b).
 
-**Step 4b-ii (pending):** add `WelfordAccumulator`, `merge_batch_stats`, `finalize_accumulator`, `_site_n`, and `run_profiling_dataset_pass` to `profiler.py`. Full specification is in `docs/EXP1-IMPL.md`.
+Full specification: `docs/EXP1-IMPL.md`.
 
 ---
 
@@ -67,7 +69,7 @@ all 5 measurement sites:
 |--------|------------|----------|------------|
 | (a) Average per-batch `profile_vit` scalars | ❌ incorrect std / kurtosis | all 5 sites | low |
 | (b) `hooks.py` for dataset pass, `profiler.py` for spot-checks | ✅ exact mean/std/outlier fracs; approx kurtosis | 3 sites only | low |
-| (c) Welford parallel-merge inside `profiler.py` | ✅ same correctness as (b) | **all 5 sites** | medium |
+| (c) Welford parallel-merge inside `profiler.py` | ✅ same correctness as (b) | **all 6 sites** | medium |
 
 **Decision: Option C.**  The pre-softmax logit distribution is the most
 quantization-hostile site in the network and cannot be omitted from the
@@ -75,7 +77,7 @@ Phase 1 summary table without a conspicuous methodological gap.  Option B's
 3-site coverage is inadequate.  Option C extends `profiler.py` with a
 Welford accumulator that receives per-batch stats from `profile_vit` and
 merges them using Chan et al. (1983) parallel formula — the same approach
-already used in `hooks.py`, now applied to all 5 sites via nnsight.
+already used in `hooks.py`, now applied to all 6 sites via nnsight.
 
 **Kurtosis is exact** via Pébay (2008) M3/M4 parallel merge. No approximation. No caveat label needed.
 
@@ -112,12 +114,10 @@ already used in `hooks.py`, now applied to all 5 sites via nnsight.
 
 ### Step 3: `src/data_loader.py` — ✅ DONE
 
-- `build_val_loader(data_dir, transform, batch_size, num_images, device)`.
-
-> **Implementation note:** `ImageFolder` raises a bare `FileNotFoundError`
-> (not our `DataDirectoryError`) when the directory has no class
-> subdirectories.  The implementation wraps and re-raises as
-> `DataDirectoryError`.
+- `build_val_loader(data_dir, transform, batch_size, num_images, device, shuffle=None)`.
+  Auto-shuffles subsets for class diversity; full datasets use deterministic order.
+  Randomly samples indices via `torch.randperm` when shuffling a subset, enabling
+  cross-seed variance.
 
 **Tests:** `test_data_loader.py` (2/2 pass)
 
@@ -131,7 +131,7 @@ See Step 4b below for the dataset-wide extension.
 
 ### Step 4b: `src/profiler.py` extension — ✅ DONE (Welford multi-batch API + per-channel std)
 
-nnsight-based profiler.  Collects stats at **five sites per block** in a
+nnsight-based profiler.  Collects stats at **six sites per block** in a
 single forward pass.
 
 #### Measurement sites
@@ -154,16 +154,24 @@ class LayerStats:
     site_identifier: str          # e.g. "blocks.3/pre_gelu"
     mean: float
     std: float
-    kurtosis: float               # excess kurtosis: E[(x−μ)⁴]/σ⁴ − 3
+    kurtosis: float               # excess kurtosis: E[(x−μ)⁴]/σ⁴ − 3 (exact, Pébay 2008)
+    m3: float = 0.0               # Σ(x−μ)³ for cross-batch merge
     outlier_fractions: dict[str, float]
     # keys: "3.0_sigma", "5.0_sigma", "8.0_sigma"
+    n_samples: int = 0            # total scalar elements
+    per_channel_std: list[float] | None = None  # per-channel population σ
+    per_channel_sum: list[float] | None = None   # per-channel sum for merge
+    per_channel_sum_sq: list[float] | None = None  # per-channel sum-of-squares for merge
 ```
 
 #### Statistics computed
 
-- **mean, std** — global over all tensor elements.
-- **kurtosis** — excess kurtosis; Gaussian ≈ 0, heavy-tailed > 0.
+- **mean, std** — global over all tensor elements (population, ddof=0).
+- **kurtosis** — excess kurtosis; Gaussian ≈ 0, heavy-tailed > 0. Exact via Pébay (2008) M3/M4 parallel merge.
+- **m3** — third central moment sum Σ(x−μ)³; used internally for cross-batch kurtosis merge.
 - **outlier_fractions** — fraction of |x| > k·σ for k ∈ {3.0, 5.0, 8.0}.
+- **per_channel_std** — per-channel population σ (pre_gelu, post_layernorm_1/2 only).
+- **n_samples** — total scalar elements processed.
 
 #### Workflow
 
@@ -181,19 +189,16 @@ save_profiling_result(result, output_dir / "profiling_result.json")
 
 #### nnsight compatibility
 
-- Version pinned to `nnsight==0.2.21` (`requirements.txt` / `environment.yml`).
-- nnsight pulls `transformers 5.x` as a dependency; that package emits a
-  warning about PyTorch < 2.4 but it is benign — nnsight itself works fine
-  with PyTorch 2.2.x for non-HuggingFace models.
-- `nnsight.NNsight(module)` wraps any `nn.Module`.  Access sub-module
-  proxies by the same dotted path: `wrapped.blocks[3].norm1.output`.
-- Proxies are only available **inside** a `with wrapped.trace(x):` block.
-  Use `.save()` to retain values after the context closes; access via
-  `.value` attribute after the context exits.
+- Version: nnsight ≥0.7.0 (tested with 0.7.0).  PyTorch ≥2.5 required.
+- Three API changes from nnsight 0.2.x are documented in `EXP1-IMPL.md` §A:
+  `.input` returns tensor directly, forward-pass dependency ordering, and
+  `.save()` returns concrete tensor.
+- `_finalize_stats` uses a `_val()` helper that is compatible with both
+  nnsight <0.3 (proxy objects with `.value`) and ≥0.3 (concrete tensors).
 
-**Tests (existing — must keep passing):**
-- Fast (no trace): `test_profiler.py -m "not slow"` → 11/11 pass
-- Slow (full trace): `test_profiler.py -m slow` → 13 tests; run on Linux
+**Tests:**
+- Fast: `test_profiler.py -m "not slow"` → 82/82 pass (excluding Phase 2/3 stubs)
+- Slow: `test_profiler.py -m slow` → 22 tests; require nnsight trace context
 
 #### Step 4b-ii + 4b-iii: Welford multi-batch extension + per-channel std — ✅ DONE
 
@@ -224,7 +229,7 @@ def run(config: ProfilingConfig) -> None:
 #### Architecture decision: Option C (resolved — see Architecture section above)
 
 `exp1_profiling.run()` uses `profiler.run_profiling_dataset_pass` (Step 4b)
-to collect exact global statistics across all **5 sites** per block.  Do not
+to collect exact global statistics across all **6 sites** per block.  Do not
 use `hooks.py` or call `profile_vit` directly in the dataset loop.
 
 #### Workflow
@@ -242,7 +247,7 @@ use `hooks.py` or call `profile_vit` directly in the dataset loop.
 
 **When complete:** `python run_phase1_profiling.py --num-images 1024` should
 produce `outputs/phase1-profiling/profiling_result.json` with entries for
-all 5 sites across all 12 blocks.
+all 6 sites across all 12 blocks.
 
 **Status:** ✅ Implemented. `run()` loads the model, builds the loader, calls
 `run_profiling_dataset_pass`, saves `profiling_result.json`, and generates
@@ -268,6 +273,35 @@ Six figure functions.  Do this after Phase 1 runs so you have real data.
 - `plot_lut_vs_fp32(lut, output_path)`.
 
 **Tests:** `test_plotting.py` (add smoke tests per function)
+
+---
+
+### Step 6b: `histogram_profile_vit` + histogram pipeline rewrite — ✅ DONE
+
+Implemented in `profiler.py`:
+- `histogram_profile_vit(wrapped_model, input_batch, block_indices)` — runs
+  one nnsight trace, saves full activation tensors at all 6 sites for the
+  specified blocks.  Per-block `num_heads`, `head_dim`, and `scale` (not
+  block 0's).  Returns CPU tensors.
+- `_plot_histograms(wrapped, transform, config, output_dir)` — builds a
+  shuffled loader sampling from the full dataset, calls
+  `histogram_profile_vit`, and saves 18 PNGs (6 sites × 3 blocks).
+- `build_val_loader` auto-shuffle: `shuffle=None` auto-selects based on
+  whether `num_images` is a subset.
+
+**Tests:**
+- Fast: `test_histogram_profile_vit_raises_on_non_4d_input`,
+  `test_histogram_profile_vit_raises_on_model_without_blocks`
+- Slow: `test_slow_histogram_profile_vit_shapes`,
+  `test_slow_pre_softmax_reconstruction_matches_manual`
+
+---
+
+### Step 6c: Documentation fixes — ✅ DONE
+
+- `WelfordAccumulator.outlier_counts` and `finalize_accumulator` docstrings
+  document the per-batch σ convention.
+- Duplicate `ProfilingError` removed from `src/exceptions.py`.
 
 ---
 
@@ -305,7 +339,7 @@ non-default values are passed.
 
 1. Load model (`load_vit`) and Phase 1 stats
    (`profiler.load_profiling_result(config.layer_stats_path)`).
-2. All 5 sites' σ values are available directly from the loaded result.
+2. All 6 sites' σ values are available directly from the loaded result.
 3. For each site in `{pre_gelu, pre_softmax, residual_stream}`:
    - For each `k` in `config.sigma_thresholds`:
      a. `handles = patch_model_for_ablation(model, k, site, layer_stats)`

@@ -2,7 +2,7 @@
 
 This module replaces the legacy raw-hook approach in the original ``hooks.py``.
 It wraps a ``timm`` ``VisionTransformer`` with ``nnsight.NNsight`` and collects
-activation statistics at five sites across every encoder block in a single
+activation statistics at six sites across every encoder block in a single
 forward pass, without retaining any full activation tensors in memory.
 
 Measurement sites per block
@@ -143,7 +143,11 @@ class WelfordAccumulator:
         M3: Running ``Σ(x − μ)³``.
         M4: Running ``Σ(x − μ)⁴``.
         outlier_counts: Raw element counts where ``|x| > k·σ`` per key
-            ``"{k}_sigma"``.  σ used is the per-batch population std.
+            ``"{k}_sigma"``.  σ is the **per-batch** population std, not the
+            global std.  Counts are accumulated across batches so the final
+            outlier fraction from ``finalize_accumulator`` is a weighted
+            average of per-batch outlier rates — not the fraction of elements
+            exceeding k·σ_global.
         per_channel_M2: Per-channel running ``Σ(x_c − μ_c)²``; ``None`` if
             this site does not track per-channel statistics.  Shape ``[D]``.
         per_channel_n: Total samples per channel (B·N accumulated).
@@ -310,7 +314,10 @@ def finalize_accumulator(acc: WelfordAccumulator) -> LayerStats:
 
     Returns:
         LayerStats with exact global mean, std, kurtosis, and outlier
-        fractions.
+        fractions.  Note: ``outlier_fractions`` values are weighted averages
+        of per-batch outlier rates (threshold = k·σ_batch), **not** fractions
+        relative to global σ.  This is a well-defined statistic but differs
+        from the fraction of elements exceeding k·σ_global.
 
     Raises:
         ValueError: If acc.n == 0 (no data was accumulated).
@@ -355,13 +362,13 @@ def run_profiling_dataset_pass(
     loader: DataLoader,
     device: torch.device,
 ) -> dict[SiteId, LayerStats]:
-    """Collect dataset-wide activation statistics at all 5 sites via exact merge.
+    """Collect dataset-wide activation statistics at all 6 sites via exact merge.
 
     Iterates over all batches in loader, calls profile_vit for each, and
     merges per-batch LayerStats into WelfordAccumulators using the exact
     Pébay (2008) parallel higher-moments formula.
 
-    All five measurement sites (residual_stream, post_layernorm_1/2,
+    All six measurement sites (residual_stream, post_layernorm_1, post_layernorm_2,
     pre_gelu, pre_softmax, post_softmax) are covered for every encoder block.
 
     Must be called inside torch.no_grad() — the caller is responsible.
@@ -536,8 +543,10 @@ def _finalize_stats(savers: _StatsSavers) -> LayerStats:
     """Convert saved proxy values to a concrete :class:`LayerStats`.
 
     Must be called *after* the nnsight trace context exits, at which point
-    all ``.save()`` proxy objects have a populated ``.value`` attribute
-    holding the concrete ``torch.Tensor`` or scalar.
+    all ``.save()`` proxy objects hold concrete values.
+
+    Compatible with both nnsight <0.3 (proxy objects with ``.value``
+    attribute) and nnsight ≥0.3 (``.save()`` returns concrete tensors).
 
     Args:
         savers: Populated :class:`_StatsSavers` from a completed trace.
@@ -545,16 +554,31 @@ def _finalize_stats(savers: _StatsSavers) -> LayerStats:
     Returns:
         A fully populated :class:`LayerStats` instance.
     """
+    def _val(proxy: Any) -> torch.Tensor:
+        """Extract concrete tensor from nnsight proxy or raw tensor.
+
+        nnsight <0.3: .save() returns a proxy object whose .value attribute
+        holds the concrete tensor after the trace exits.
+        nnsight ≥0.3: .save() returns a concrete torch.Tensor directly.
+        """
+        if isinstance(proxy, torch.Tensor):
+            return proxy
+        if hasattr(proxy, "value") and isinstance(proxy.value, torch.Tensor):
+            return proxy.value
+        raise TypeError(
+            f"Expected torch.Tensor or nnsight proxy with .value, got {type(proxy)}"
+        )
+
     outlier_fractions: dict[str, float] = {
-        f"{sigma}_sigma": float(proxy.value.item())
+        f"{sigma}_sigma": float(_val(proxy).item())
         for sigma, proxy in zip(OUTLIER_SIGMAS, savers.outlier_proxies)
     }
     per_channel_std: list[float] | None = None
     per_channel_sum: list[float] | None = None
     per_channel_sum_sq: list[float] | None = None
     if savers.per_channel_sum is not None and savers.per_channel_sum_sq is not None:
-        sum_ch = savers.per_channel_sum.value  # shape (D,)
-        sum_sq_ch = savers.per_channel_sum_sq.value  # shape (D,)
+        sum_ch = _val(savers.per_channel_sum)  # shape (D,)
+        sum_sq_ch = _val(savers.per_channel_sum_sq)  # shape (D,)
         # Per-channel n = B * N (batch size × tokens).
         # Recover from the sum tensor: n = total_elements / D.
         D_ch = sum_ch.shape[0]
@@ -568,10 +592,10 @@ def _finalize_stats(savers: _StatsSavers) -> LayerStats:
             per_channel_std = std_ch.tolist()
     return LayerStats(
         site_identifier=savers.site_identifier,
-        mean=float(savers.mean.value.item()),
-        std=float(savers.std.value.item()),
-        m3=float(savers.m3.value.item()),
-        kurtosis=float(savers.kurtosis.value.item()),
+        mean=float(_val(savers.mean).item()),
+        std=float(_val(savers.std).item()),
+        m3=float(_val(savers.m3).item()),
+        kurtosis=float(_val(savers.kurtosis).item()),
         outlier_fractions=outlier_fractions,
         n_samples=savers.n_samples,
         per_channel_std=per_channel_std,
@@ -707,14 +731,17 @@ def profile_vit(
                 block = wrapped_model.blocks[i]
                 attn = block.attn
 
+                # Accesses must follow forward-pass dependency order.
+                # nnsight ≥0.3 returns .input as the tensor directly
+                # (not a (args, kwargs) tuple), so no [0][0] indexing.
+
                 # --- residual_stream ---
-                # norm1.input is ((tensor,), {}) — index [0][0] for the tensor.
                 residual_label: SiteId = (
                     "patch_embed/residual_stream" if i == 0
                     else f"blocks.{i - 1}/residual_stream"
                 )
                 all_savers.append(
-                    _register_stat_saves(block.norm1.input[0][0], residual_label, n_residual)
+                    _register_stat_saves(block.norm1.input, residual_label, n_residual)
                 )
 
                 # --- post_layernorm_1 (pre-attention LN output) ---
@@ -725,26 +752,10 @@ def profile_vit(
                     )
                 )
 
-                # --- post_layernorm_2 (pre-MLP LN output) ---
-                all_savers.append(
-                    _register_stat_saves(
-                        block.norm2.output, f"blocks.{i}/{SITE_POST_LAYERNORM_2}", n_residual,
-                        track_per_channel=True,
-                    )
-                )
-
-                # --- pre_gelu ---
-                # mlp.act.input is ((tensor,), {}) — index [0][0].
-                all_savers.append(
-                    _register_stat_saves(
-                        block.mlp.act.input[0][0], f"blocks.{i}/{SITE_PRE_GELU}", n_pre_gelu,
-                        track_per_channel=True,
-                    )
-                )
-
                 # --- pre_softmax ---
                 # Reconstruct QKᵀ/√d from qkv.output since timm computes
                 # this inline (no module boundary to intercept directly).
+                # Must access qkv.output BEFORE attn_drop.input (dependency order).
                 attn_module = inner_model.blocks[i].attn
                 all_savers.append(
                     _register_pre_softmax_saves(
@@ -759,10 +770,25 @@ def profile_vit(
 
                 # --- post_softmax ---
                 # attn_drop receives the post-softmax attention weights.
-                # attn_drop.input is ((tensor,), {}) with shape (B, H, N, N).
                 all_savers.append(
                     _register_stat_saves(
-                        attn.attn_drop.input[0][0], f"blocks.{i}/{SITE_POST_SOFTMAX}", n_attn
+                        attn.attn_drop.input, f"blocks.{i}/{SITE_POST_SOFTMAX}", n_attn
+                    )
+                )
+
+                # --- post_layernorm_2 (pre-MLP LN output) ---
+                all_savers.append(
+                    _register_stat_saves(
+                        block.norm2.output, f"blocks.{i}/{SITE_POST_LAYERNORM_2}", n_residual,
+                        track_per_channel=True,
+                    )
+                )
+
+                # --- pre_gelu ---
+                all_savers.append(
+                    _register_stat_saves(
+                        block.mlp.act.input, f"blocks.{i}/{SITE_PRE_GELU}", n_pre_gelu,
+                        track_per_channel=True,
                     )
                 )
 
@@ -785,6 +811,113 @@ def profile_vit(
         num_blocks=num_blocks,
         batch_shape=batch_shape,
     )
+
+
+# ---------------------------------------------------------------------------
+# Histogram profiling — full tensor capture for one batch
+# ---------------------------------------------------------------------------
+
+
+def histogram_profile_vit(
+    wrapped_model: NNsight,
+    input_batch: torch.Tensor,
+    block_indices: tuple[int, ...] = (0, 5, 11),
+) -> dict[SiteId, torch.Tensor]:
+    """Run one forward pass and save full activation tensors for selected blocks.
+
+    Collects real activation tensors at all six measurement sites for the
+    specified encoder blocks.  Used to generate histograms showing the true
+    heavy-tailed distribution.
+
+    Intentionally separate from ``profile_vit`` so the Welford pipeline
+    never retains raw tensors.
+
+    Args:
+        wrapped_model: NNsight-wrapped VisionTransformer with fused_attn=False.
+        input_batch: Float tensor of shape ``(B, C, H, W)`` on the model device.
+        block_indices: Encoder blocks to collect. Default (0, 5, 11) covers
+            entry, midpoint, and exit of ViT-B/16.
+
+    Returns:
+        Mapping from site_identifier to a CPU float32 tensor of full activations.
+        Shapes: ``(B, N, D)`` for residual/layernorm sites, ``(B, N, D_mlp)``
+        for pre_gelu, ``(B, H, N, N)`` for pre/post_softmax.
+
+    Raises:
+        ProfilingError: If the nnsight trace fails.
+        ValueError: If ``input_batch`` is not 4-D.
+    """
+    if input_batch.ndim != 4:  # noqa: PLR2004
+        raise ValueError(
+            f"input_batch must be 4-D (B, C, H, W), got shape {tuple(input_batch.shape)}"
+        )
+
+    inner_model = wrapped_model._model
+    if not hasattr(inner_model, "blocks"):
+        raise ProfilingError(
+            f"Wrapped model {type(inner_model).__name__} has no 'blocks' attribute. "
+            "histogram_profile_vit expects a timm VisionTransformer."
+        )
+
+    N: int = inner_model.patch_embed.num_patches + 1
+    D: int = inner_model.embed_dim
+    D_mlp: int = inner_model.blocks[0].mlp.fc1.out_features
+
+    raw: dict[SiteId, Any] = {}
+
+    try:
+        with wrapped_model.trace(input_batch):
+            for i in block_indices:
+                block = wrapped_model.blocks[i]
+                attn = block.attn
+                # Per-block architecture constants — not block 0's.
+                # In standard ViT all blocks share the same values, but
+                # variants (e.g. heterogeneous attention) may differ.
+                block_attn = inner_model.blocks[i].attn
+                block_num_heads: int = block_attn.num_heads
+                block_head_dim: int = block_attn.head_dim
+                block_scale: float = block_attn.scale
+
+                # Accesses must follow forward-pass dependency order.
+                # nnsight ≥0.3 returns .input as the tensor directly.
+
+                # --- residual_stream ---
+                residual_label: SiteId = (
+                    "patch_embed/residual_stream" if i == 0
+                    else f"blocks.{i - 1}/residual_stream"
+                )
+                raw[residual_label] = block.norm1.input.save()
+
+                # --- post_layernorm_1 ---
+                raw[f"blocks.{i}/{SITE_POST_LAYERNORM_1}"] = block.norm1.output.save()
+
+                # --- pre_softmax: reconstruct QKᵀ/√d from qkv.output ---
+                # Must access qkv.output BEFORE attn_drop.input (dependency order).
+                qkv = attn.qkv.output
+                b_n_3hd = qkv.reshape(
+                    qkv.shape[0], qkv.shape[1], 3, block_num_heads, block_head_dim
+                )
+                b_n_3hd = b_n_3hd.permute(2, 0, 3, 1, 4)
+                q = b_n_3hd[0] * block_scale
+                k = b_n_3hd[1]
+                logits = q @ k.transpose(-2, -1)
+                raw[f"blocks.{i}/{SITE_PRE_SOFTMAX}"] = logits.save()
+
+                # --- post_softmax ---
+                raw[f"blocks.{i}/{SITE_POST_SOFTMAX}"] = attn.attn_drop.input.save()
+
+                # --- post_layernorm_2 ---
+                raw[f"blocks.{i}/{SITE_POST_LAYERNORM_2}"] = block.norm2.output.save()
+
+                # --- pre_gelu ---
+                raw[f"blocks.{i}/{SITE_PRE_GELU}"] = block.mlp.act.input.save()
+
+    except Exception as exc:
+        raise ProfilingError(
+            f"nnsight trace failed for {type(inner_model).__name__}: {exc}"
+        ) from exc
+
+    return {k: v.cpu() for k, v in raw.items()}
 
 
 # ---------------------------------------------------------------------------

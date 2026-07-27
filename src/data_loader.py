@@ -27,6 +27,7 @@ def build_val_loader(
     batch_size: int,
     num_images: int | None,
     device: torch.device,  # noqa: ARG001 — kept for API symmetry; pin_memory depends on CUDA
+    shuffle: bool | None = None,
 ) -> DataLoader:
     """Build a DataLoader over the ImageNet validation split.
 
@@ -47,12 +48,17 @@ def build_val_loader(
     device:
         Compute device; used only to decide whether ``pin_memory`` should be
         enabled (i.e. when CUDA is the target device).
+    shuffle:
+        Whether to shuffle the dataset at each epoch.  When ``None``
+        (default), auto-selects: ``True`` when ``num_images`` is a subset
+        (to ensure class diversity), ``False`` when using the full dataset
+        (all classes already covered).  Pass an explicit ``bool`` to
+        override.
 
     Returns
     -------
     DataLoader
-        Configured with ``shuffle=False``, ``pin_memory=True`` (for CUDA),
-        and ``num_workers=4``.
+        Configured with ``pin_memory=True`` (for CUDA) and ``num_workers=4``.
 
     Raises
     ------
@@ -78,26 +84,43 @@ def build_val_loader(
             f"Data directory exists but contains no images: {data_dir}"
         )
 
+    full_size: int = len(dataset)
+    is_subset: bool = num_images is not None and num_images < full_size
+
+    # Resolve effective shuffle before subsetting so the auto-selected
+    # value controls both random sampling and DataLoader shuffling.
+    if shuffle is None:
+        shuffle = is_subset
+
     if num_images is not None:
-        if num_images > len(dataset):
+        if num_images > full_size:
             logger.warning(
                 "num_images=%d exceeds dataset size=%d; using full dataset.",
                 num_images,
-                len(dataset),
+                full_size,
             )
         else:
-            dataset = Subset(dataset, list(range(num_images)))
+            # When shuffling, randomly sample indices so that different
+            # seeds select different images (enables cross-seed variance).
+            # When not shuffling, take the first N deterministically
+            # (useful for debugging and reproducibility).
+            if shuffle:
+                indices = torch.randperm(full_size)[:num_images].tolist()
+            else:
+                indices = list(range(num_images))
+            dataset = Subset(dataset, indices)
 
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=shuffle,
         num_workers=_NUM_WORKERS,
         pin_memory=(device.type == "cuda"),
     )
     logger.info(
-        "Built DataLoader: %d images, batch_size=%d",
+        "Built DataLoader: %d images, batch_size=%d, shuffle=%s",
         len(dataset),
         batch_size,
+        shuffle,
     )
     return loader

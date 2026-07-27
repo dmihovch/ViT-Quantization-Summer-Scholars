@@ -62,3 +62,27 @@ def ensure_dir(path: Path) -> None:
     """
     path.mkdir(parents=True, exist_ok=True)
     logger.debug("Ensured directory exists: %s", path)
+
+
+def log_system_info() -> None:
+    """Log hardware and software versions for reproducibility.
+
+    Records PyTorch version, CUDA availability, GPU name, and nnsight
+    version at INFO level.  Call once at the start of any experiment script.
+    """
+    import sys
+
+    logger.info("Python %s", sys.version.split()[0])
+    logger.info("PyTorch %s", torch.__version__)
+    if torch.cuda.is_available():
+        logger.info("CUDA available: %s (%.1f GB)",
+                     torch.cuda.get_device_name(0),
+                     torch.cuda.get_device_properties(0).total_memory / 1e9)
+    else:
+        logger.info("CUDA not available; using CPU")
+    try:
+        import nnsight
+        ver = getattr(nnsight, "__version__", "unknown")
+        logger.info("nnsight %s", ver)
+    except ImportError:
+        logger.info("nnsight not installed")

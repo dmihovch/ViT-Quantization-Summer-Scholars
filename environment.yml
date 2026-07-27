@@ -1,21 +1,23 @@
-name: vitquant
+name: vit-quant
 channels:
+  - pytorch
   - conda-forge
   - defaults
 dependencies:
   - python=3.12
-  - nomkl
-  - numpy=1.26
-  - pillow
-  - matplotlib
-  - pytest
   - pip
+  - numpy>=1.24
+  - matplotlib>=3.7
+  - pytest>=7.4
   - pip:
-      - torch
-      - torchvision
-      - timm
-      - nnsight==0.2.21
-      - seaborn
-      - pandas
-      - huggingface_hub
-      - datasets
+      - torch>=2.5.0
+      - torchvision>=0.20.0
+      - timm>=1.0.0
+      - nnsight>=0.7.0
+      - transformers>=4.40.0
+      - accelerate>=0.30.0
+      - diffusers>=0.28.0
+      - einops>=0.8.0
+      - sentencepiece>=0.2.0
+      - tokenizers>=0.19.0
+      - safetensors>=0.4.0

@@ -26,17 +26,27 @@ class ProfilingConfig:
     num_images:
         Number of validation images to pass through the model.  Using a
         subset keeps wall-clock time manageable during development.
+        Pass ``None`` to use the entire split.
     batch_size:
         Mini-batch size for the DataLoader.
     device:
         Compute device (CPU or CUDA) used for the forward passes.
+    seed:
+        Base random seed for reproducibility.  When ``num_seeds > 1``,
+        seeds ``seed``, ``seed+1``, ..., ``seed+num_seeds-1`` are used.
+    num_seeds:
+        Number of independent runs with different seeds.  Results are
+        saved to ``output_dir/seed_{s}/`` for each seed ``s``.  Default 1
+        produces a single run written directly to ``output_dir/``.
     """
 
     data_dir: Path
     output_dir: Path
-    num_images: int
+    num_images: int | None
     batch_size: int
     device: torch.device
+    seed: int = 42
+    num_seeds: int = 1
 
 
 @dataclass(frozen=True)

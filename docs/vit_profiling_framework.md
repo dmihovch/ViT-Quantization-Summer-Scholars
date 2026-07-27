@@ -22,11 +22,11 @@ Focus exclusively on literature that supports the defined boundaries. Avoid over
 
 ## 3. Experimental Design
 
-**Target Model:** `google/vit-base-patch16-224` (Encoder-only)
+**Target Model:** `vit_base_patch16_224.augreg2_in21k_ft_in1k` (ViT-B/16, encoder-only, via timm)
 
 ### Phase 1: Baseline Activation Profiling
 
-Establish the unquantized ground truth of activation distributions across **five measurement sites** within each encoder block. For each site, register a forward hook and collect statistics over the same validation subset.
+Establish the unquantized ground truth of activation distributions across **six measurement sites** within each encoder block. For each site, register a forward hook and collect statistics over the same validation subset.
 
 #### Measurement Sites
 
@@ -71,9 +71,8 @@ The residual stream accumulates contributions from both the attention sub-block 
 #### Data Collection
 
 *   **Mechanism — `profiler.py` Welford multi-batch pipeline (Option C):**
-    *   `profiler.py` wraps the model with `nnsight.NNsight` and captures all **five sites** per block inside each forward pass via `profile_vit`.
-    *   A `WelfordAccumulator` per site aggregates per-batch statistics across the full dataset using the Chan et al. (1983) parallel-groups merge formula.  This gives exact global mean, std, and outlier fractions for all five sites.
-    *   Kurtosis is exact via Pébay (2008) M3/M4 parallel merge. No approximation.
+    *   `profiler.py` wraps the model with `nnsight.NNsight` and captures all **six sites** per block inside each forward pass via `profile_vit`.
+    *   A `WelfordAccumulator` per site aggregates per-batch statistics across the full dataset using the Pébay (2008) parallel higher-moments merge formula for M2, M3, and M4.  This gives exact global mean, std, kurtosis, and outlier fractions for all six sites.
     *   `hooks.py` is **not** used in Phase 1.  It is retained for reference.
 *   **Dataset:** Same validation subset used across all phases for comparability.
 *   **Storage:** Reduce each batch to scalar statistics inside `profile_vit` (no raw tensors stored); merge into accumulators via `merge_batch_stats`; save the complete `ProfilingResult` to `profiling_result.json` via `profiler.save_profiling_result`.
@@ -94,7 +93,7 @@ Test the structural reliance on massive activations by forcing them to zero. Abl
     *   Pre-GELU hidden-state activations (original Phase 2 target).
     *   Pre-Softmax attention logits — ablating large logits tests whether attention sink tokens are load-bearing.
     *   Residual update stream — ablating large residual deltas tests whether specific MLP blocks dominate the stream.
-*   **Thresholding:** Define $\tau$ dynamically using a scalar multiple of the layer's standard deviation: $\tau = k\sigma$ for $k \in \{3, 4, 6\}$.  The source of $\sigma$ for all sites is the exact global std from Phase 1 (`profiler.py` Welford multi-batch pass, `profiling_result.json`).  All five sites — including `pre_softmax` — are now covered dataset-wide, so no single-batch sigma estimation is required in Phase 2.
+*   **Thresholding:** Define $\tau$ dynamically using a scalar multiple of the layer's standard deviation: $\tau = k\sigma$ for $k \in \{3, 4, 6\}$.  The source of $\sigma$ for all sites is the exact global std from Phase 1 (`profiler.py` Welford multi-batch pass, `profiling_result.json`).  All six sites — including `pre_softmax` — are now covered dataset-wide, so no single-batch sigma estimation is required in Phase 2.
 *   **Metrics:**
     *   Percentage of zeroed elements per layer and per site.
     *   Top-1 validation accuracy at each threshold step.

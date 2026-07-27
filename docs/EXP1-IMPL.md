@@ -1,87 +1,98 @@
 # EXP1-IMPL: Experiment 1 — Baseline Activation Profiling
 
-> **Status:** ✅ Implemented. `profiler.py` (Welford extension + per-channel std),
-> `exp1_profiling.py`, and Phase 1 plotting functions are complete and tested.
-> 59/68 fast tests pass (9 failures are pre-existing stubs in Phase 2/3).
-> Slow tests require PyTorch 2.2.x + nnsight 0.2.21.
-> **Keep this file** as the authoritative implementation reference.
+> **Status:** Phase 1 complete. All steps implemented and tested.
+> 82/91 fast tests pass (9 failures are pre-existing stubs in Phase 2/3).
+> 22 slow tests (marked `@pytest.mark.slow`) require nnsight trace context.
+> Tested with PyTorch 2.12.1, nnsight 0.7.0, CUDA 13.0, NVIDIA RTX 3070 (8 GB).
 
 ---
 
 ## 0. What "done" looks like
 
 ```bash
+# Single run with 1024 images (auto-shuffled for class diversity)
 python run_phase1_profiling.py --num-images 1024
+
+# Multi-seed run for variance estimation
+python run_phase1_profiling.py --num-images 1024 --num-seeds 3 --seed 42
+
+# Full dataset (50k images, no shuffle needed)
+python run_phase1_profiling.py --all
 ```
 
-must produce:
+produces (single seed):
 
 ```
 outputs/phase1-profiling/
-├── profiling_result.json      # all 5 sites × 12 blocks (+ patch_embed)
+├── profiling_result.json          # all 6 sites × 12 blocks (+ patch_embed)
 ├── histograms/
-│   ├── blocks.0_pre_gelu.png          # reconstructed N(μ,σ²) — labelled as such
+│   ├── blocks.0_pre_gelu.png      # real activations — blocks 0, 5, 11 only
 │   ├── blocks.0_pre_softmax.png
-│   └── ...                            # one PNG per (block, site)
-└── per_channel_std_heatmap.png        # requires per_channel_std in LayerStats
-
-# With --spot-batch (optional):
-outputs/phase1-profiling/
-└── spot_batch_histograms/
-    └── blocks.0_pre_gelu.png          # real activation values, shows true tails
+│   ├── blocks.5_pre_gelu.png
+│   ├── blocks.5_pre_softmax.png
+│   ├── blocks.11_pre_gelu.png
+│   ├── blocks.11_pre_softmax.png
+│   └── ...                        # one PNG per (selected block, site) — 18 total
+├── per_channel_std_heatmap_d768.png   # layernorm sites (D=768)
+└── per_channel_std_heatmap_d3072.png  # pre_gelu sites (D=3072)
 ```
 
-All fast tests (`pytest -m "not slow"`) must continue to pass. All new Welford
-fast tests (Section 3.1) must pass. The two updated slow tests must still pass
-on Linux.
+With `--num-seeds 3`, output is organised as:
+
+```
+outputs/phase1-profiling/
+├── seed_42/
+│   ├── profiling_result.json
+│   ├── histograms/ ...
+│   ├── per_channel_std_heatmap_d768.png
+│   └── per_channel_std_heatmap_d3072.png
+├── seed_43/ ...
+└── seed_44/ ...
+```
+
+All fast tests (`pytest -m "not slow"`) pass with no regressions.
 
 ---
 
-## 1. Files to implement (in order)
+## 1. Files and their status
 
-| Step | File | Change |
+| Step | File | Status |
 |------|------|--------|
-| **4b-i** | `src/profiler.py` | ✅ ALREADY DONE: `_register_stat_saves` updated (ddof=0, M3, n_samples) |
-| **4b-ii** | `src/profiler.py` | Add `WelfordAccumulator`, `merge_batch_stats`, `finalize_accumulator`, `_site_n`, `run_profiling_dataset_pass` |
-| **4b-ii** | `tests/test_profiler.py` | Add 3 fast + 2 slow Welford tests |
-| **5** | `src/plotting.py` | Implement `plot_activation_histogram`; add `plot_per_channel_std_heatmap` |
-| **5** | `src/exp1_profiling.py` | Implement `run(config)` |
-| **5** | `tests/test_plotting.py` | Add `test_plot_per_channel_std_heatmap_creates_file` |
-| **5** | `run_phase1_profiling.py` | Add `--spot-batch` flag |
+| 4b-i | `src/profiler.py` | ✅ Done — `_register_stat_saves` (ddof=0, M3, n_samples) |
+| 4b-ii | `src/profiler.py` | ✅ Done — `WelfordAccumulator`, `merge_batch_stats`, `finalize_accumulator`, `_site_n`, `run_profiling_dataset_pass` |
+| 4b-ii | `tests/test_profiler.py` | ✅ Done — 21 fast + 7 slow Welford tests |
+| 4b-iii | `src/profiler.py` | ✅ Done — `per_channel_std` in `LayerStats`, `WelfordAccumulator`, merge pipeline |
+| 5 | `src/plotting.py` | ✅ Done — `plot_activation_histogram`, `plot_per_channel_std_heatmap` |
+| 5 | `src/exp1_profiling.py` | ✅ Done — `run(config)`, `_plot_per_channel_heatmap` (grouped by channel dim) |
+| 5 | `tests/test_plotting.py` | ✅ Done — smoke tests pass |
+| 6b | `src/data_loader.py` | ✅ Done — `shuffle: bool \| None = None` with auto-select |
+| 6b | `src/profiler.py` | ✅ Done — `histogram_profile_vit` (nnsight 0.7.0 compatible) |
+| 6b | `src/exp1_profiling.py` | ✅ Done — `_plot_histograms(wrapped, transform, config, output_dir)` |
+| 6b | `tests/test_profiler.py` | ✅ Done — `test_slow_histogram_profile_vit_shapes` |
+| 7 | `src/config.py` | ✅ Done — `seed`, `num_seeds` fields |
+| 7 | `src/utils.py` | ✅ Done — `log_system_info()` |
+| 7 | `run_phase1_profiling.py` | ✅ Done — `--num-seeds`, `--seed` CLI args, system logging |
+| 7 | `environment.yml` | ✅ Done — conda environment specification |
 
 ---
 
-## 2. Statistical conventions (resolved, non-negotiable)
+## 2. Statistical conventions (non-negotiable)
 
-### 2.1 Population variance throughout (ddof=0)
+### 2.1 Population std throughout (ddof=0)
 
-We are profiling a **fully-observed finite set** of activation values — we are
-not estimating an unobserved population parameter from a sample. The correct
-statistic is the **population** mean and variance. Bessel's correction (ddof=1)
-would introduce a systematic negative bias of `(n-1)/n` with no statistical
-justification.
+We are profiling a fully-observed finite set of activation values, not
+estimating an unobserved population. Use `ddof=0` / `correction=0` everywhere.
+`merge_batch_stats` uses `b_var = b_std ** 2` where `b_std` is the population
+std already stored in `batch_stats.std`.
 
-**Rule:** every std and variance computation uses `ddof=0` / `correction=0`.
-This is already applied in the updated `_register_stat_saves` in `profiler.py`.
-The `merge_batch_stats` function must also use `b_var = b_std ** 2` where
-`b_std` is the population std from `batch_stats.std` (already ddof=0).
+### 2.2 Exact kurtosis via Pébay (2008)
 
-### 2.2 Exact kurtosis via Pébay (2008) parallel formula
+Use the exact parallel formula from Pébay (2008), *Formulas for Robust,
+One-Pass Parallel Computation of Covariances and Arbitrary-Order Statistical
+Moments*, Sandia SAND2008-6212.
 
-Approximate kurtosis (accumulating per-batch fourth central moments centred at
-*batch* means) has no bounded error when batch means vary, and would need a
-published error bound before appearing in any table. We use the **exact**
-parallel formula from Pébay (2008), *Formulas for Robust, One-Pass Parallel
-Computation of Covariances and Arbitrary-Order Statistical Moments*, Sandia
-Technical Report SAND2008-6212.
-
-This requires tracking M3 (third central moment sum) and M4 (fourth central
-moment sum) across batches. `_register_stat_saves` now saves both M3 and
-kurtosis per batch. `merge_batch_stats` uses exact Pébay merges for M3 and M4.
-
-**The Pébay parallel merge formulas** (for combining group A and group B):
-
-Let `n = n_A + n_B`, `δ = μ_B - μ_A`.
+Track M3 and M4 as running sums across batches. Merge formulas (groups A and B,
+`n = n_A + n_B`, `δ = μ_B - μ_A`):
 
 ```
 M2 = M2_A + M2_B + δ² · n_A·n_B / n
@@ -96,27 +107,32 @@ M4 = M4_A + M4_B
    + 4δ  · (n_A·M3_B - n_B·M3_A) / n
 ```
 
-Where M2, M3, M4 are **sums** (not means): `M_k = Σ(x_i - μ)^k`.
+M2, M3, M4 are **sums** (not means): `M_k = Σ(x_i - μ)^k`.
 
 Excess kurtosis at finalisation: `κ = M4 / (n · (M2/n)²) - 3`.
 
-The `merge_batch_stats` function must recover `M3_batch` and `M4_batch` from
-the per-batch `LayerStats`:
+Recover batch moment sums from `LayerStats`:
 
 ```
-M3_batch = batch_stats.m3                 # stored directly as Σ(x-μ)³
+M3_batch = batch_stats.m3
 M4_batch = (batch_stats.kurtosis + 3) * (batch_stats.std ** 4) * batch_n
 ```
 
+### 2.3 Outlier fraction convention
+
+`outlier_fractions` in `LayerStats` are fractions relative to **per-batch σ**,
+accumulated across batches. The final reported value is a weighted average of
+per-batch outlier rates — not the fraction of elements exceeding k·σ_global.
+This is documented in the `WelfordAccumulator.outlier_counts` and
+`finalize_accumulator` docstrings in `src/profiler.py`.
+
 ---
 
-## 3. Step 4b-ii — add to `src/profiler.py`
+## 3. `src/profiler.py` — Welford multi-batch API (Step 4b-ii) ✅ Done
 
-The following additions go **after** the existing `ProfilingResult` dataclass.
-Do not modify any existing function signatures (they are already updated in
-`profiler.py`).
+The following are already implemented. Shown here as the authoritative reference.
 
-### 3.1 `_site_n` — top-level helper (not a closure)
+### 3.1 `_site_n`
 
 ```python
 def _site_n(
@@ -133,17 +149,14 @@ def _site_n(
         site_id: Site identifier string (e.g. ``"blocks.3/pre_gelu"``).
         B: Batch size (number of images).
         N: Token sequence length including CLS token (e.g. 197 for ViT-B/16).
+            Must be derived as ``patch_embed.num_patches + 1``, not from
+            ``input_batch.shape[2]`` (which is the image height, not token count).
         D: Model embedding dimension (e.g. 768).
         D_mlp: MLP hidden dimension (e.g. 3072 for ViT-B/16).
         num_heads: Number of attention heads (e.g. 12).
 
     Returns:
-        Total number of scalar float elements in the activation tensor
-        for this site and batch.
-
-    Note:
-        N must be derived as ``patch_embed.num_patches + 1``, not from
-        ``input_batch.shape[2]`` (which is the image height, not token count).
+        Total number of scalar float elements in the activation tensor.
     """
     if SITE_PRE_SOFTMAX in site_id or SITE_POST_SOFTMAX in site_id:
         return B * num_heads * N * N
@@ -153,7 +166,7 @@ def _site_n(
     return B * N * D
 ```
 
-### 3.2 `WelfordAccumulator` dataclass
+### 3.2 `WelfordAccumulator`
 
 ```python
 @dataclass
@@ -174,7 +187,10 @@ class WelfordAccumulator:
         M3: Running Σ(x − μ)³.
         M4: Running Σ(x − μ)⁴.
         outlier_counts: Raw element counts where |x| > k·σ per key
-            ``"{k}_sigma"``.  σ used is the per-batch population std.
+            ``"{k}_sigma"``.  σ is the per-batch population std; see §2.3.
+        per_channel_sum: Per-channel running sum; None if not tracked.
+        per_channel_sum_sq: Per-channel running sum of squares; None if not tracked.
+        per_channel_n: Total per-channel sample count (B·N accumulated).
     """
 
     site_identifier: SiteId
@@ -186,6 +202,9 @@ class WelfordAccumulator:
     outlier_counts: dict[str, int] = field(
         default_factory=lambda: {f"{k}_sigma": 0 for k in OUTLIER_SIGMAS}
     )
+    per_channel_sum: list[float] | None = None
+    per_channel_sum_sq: list[float] | None = None
+    per_channel_n: int = 0
 ```
 
 ### 3.3 `merge_batch_stats`
@@ -201,15 +220,10 @@ def merge_batch_stats(
     Implements the Pébay (2008) parallel higher-moments merge for exact
     global M2, M3, M4 — and therefore exact std and kurtosis.
 
-    All batch statistics must use population conventions (ddof=0), as
-    produced by the updated ``_register_stat_saves`` in ``profiler.py``.
-
     Args:
         acc: Accumulator to update in-place.
         batch_stats: Finalized LayerStats from one call to profile_vit.
-            Must have been produced by the updated _register_stat_saves
-            (i.e. LayerStats.std is population std, LayerStats.m3 is
-            Σ(x−μ)³, LayerStats.kurtosis is exact population excess kurtosis).
+            std is population std (ddof=0), m3 is Σ(x−μ)³.
         batch_n: Number of scalar elements in this batch for this site.
             Use _site_n() to compute this correctly.
 
@@ -220,41 +234,27 @@ def merge_batch_stats(
         raise ValueError(f"batch_n must be positive, got {batch_n}")
 
     b_mean = batch_stats.mean
-    b_std  = batch_stats.std   # population std (ddof=0), guaranteed by profiler
-    b_var  = b_std ** 2        # population variance
+    b_std  = batch_stats.std   # population std (ddof=0)
+    b_var  = b_std ** 2
 
-    # Recover batch central moment sums from batch_stats.
-    # M2_b = population variance * n  = b_var * batch_n
-    # M3_b = stored directly as Σ(x−μ)³
-    # M4_b = (kurtosis + 3) * σ⁴ * n  (from definition of excess kurtosis)
     M2_b: float = b_var * batch_n
-    M3_b: float = batch_stats.m3               # already a sum (not mean)
+    M3_b: float = batch_stats.m3
     M4_b: float = (batch_stats.kurtosis + 3.0) * (b_var ** 2) * batch_n
 
-    n_a: int   = acc.n
-    n_b: int   = batch_n
-    n_ab: int  = n_a + n_b
+    n_a, n_b = acc.n, batch_n
+    n_ab = n_a + n_b
 
     if n_a == 0:
-        # First batch: no merge needed, just copy.
-        acc.n    = n_b
-        acc.mean = b_mean
-        acc.M2   = M2_b
-        acc.M3   = M3_b
-        acc.M4   = M4_b
+        acc.n = n_b; acc.mean = b_mean
+        acc.M2 = M2_b; acc.M3 = M3_b; acc.M4 = M4_b
     else:
-        delta: float = b_mean - acc.mean
-
-        # --- Pébay (2008) parallel merge, Eq. (3.1)-(3.4) ---
-        # M2
+        delta = b_mean - acc.mean
         new_M2 = acc.M2 + M2_b + delta**2 * n_a * n_b / n_ab
-        # M3
         new_M3 = (
             acc.M3 + M3_b
             + delta**3 * n_a * n_b * (n_a - n_b) / n_ab**2
             + 3.0 * delta * (n_a * M2_b - n_b * acc.M2) / n_ab
         )
-        # M4
         new_M4 = (
             acc.M4 + M4_b
             + delta**4 * n_a * n_b * (n_a**2 - n_a * n_b + n_b**2) / n_ab**3
@@ -262,15 +262,26 @@ def merge_batch_stats(
             + 4.0 * delta * (n_a * M3_b - n_b * acc.M3) / n_ab
         )
         acc.mean = acc.mean + delta * n_b / n_ab
-        acc.M2   = new_M2
-        acc.M3   = new_M3
-        acc.M4   = new_M4
-        acc.n    = n_ab
+        acc.M2 = new_M2; acc.M3 = new_M3; acc.M4 = new_M4; acc.n = n_ab
 
-    # --- Outlier counts: fractions → raw counts, accumulate ---
     for key in acc.outlier_counts:
         frac = batch_stats.outlier_fractions.get(key, 0.0)
         acc.outlier_counts[key] += round(frac * batch_n)
+
+    # Per-channel accumulation (additive sums, no merge formula needed).
+    if batch_stats.per_channel_sum is not None and batch_stats.per_channel_sum_sq is not None:
+        D_ch = len(batch_stats.per_channel_sum)
+        b_per_ch_n = batch_n // D_ch if D_ch > 0 else 0
+        if b_per_ch_n > 0:
+            if acc.per_channel_sum is None:
+                acc.per_channel_sum = list(batch_stats.per_channel_sum)
+                acc.per_channel_sum_sq = list(batch_stats.per_channel_sum_sq)
+                acc.per_channel_n = b_per_ch_n
+            else:
+                for c in range(D_ch):
+                    acc.per_channel_sum[c] += batch_stats.per_channel_sum[c]
+                    acc.per_channel_sum_sq[c] += batch_stats.per_channel_sum_sq[c]
+                acc.per_channel_n += b_per_ch_n
 ```
 
 ### 3.4 `finalize_accumulator`
@@ -279,36 +290,33 @@ def merge_batch_stats(
 def finalize_accumulator(acc: WelfordAccumulator) -> LayerStats:
     """Convert a WelfordAccumulator to a final LayerStats.
 
-    All statistics are exact (population conventions, Pébay parallel merge).
-    Kurtosis is exact, not approximate.
-
     Args:
         acc: Fully-populated accumulator (acc.n > 0).
 
     Returns:
         LayerStats with exact global mean, std, kurtosis, and outlier
-        fractions.
+        fractions. outlier_fractions values are weighted averages of
+        per-batch outlier rates (threshold = k·σ_batch), not fractions
+        relative to global σ.
 
     Raises:
-        ValueError: If acc.n == 0 (no data was accumulated).
+        ValueError: If acc.n == 0.
     """
     if acc.n == 0:
         raise ValueError(f"Accumulator '{acc.site_identifier}' has zero elements.")
 
-    global_var: float = acc.M2 / acc.n            # population variance
-    global_std: float = math.sqrt(global_var)
-
-    # Exact excess kurtosis: M4/(n·σ⁴) - 3
+    global_var = acc.M2 / acc.n
+    global_std = math.sqrt(global_var) if global_var > 0.0 else 0.0
     global_var_sq = global_var ** 2
-    kurtosis: float = (
-        acc.M4 / (acc.n * global_var_sq) - 3.0
-        if global_var_sq > 0.0 else 0.0
-    )
+    kurtosis = acc.M4 / (acc.n * global_var_sq) - 3.0 if global_var_sq > 0.0 else 0.0
+    outlier_fractions = {key: count / acc.n for key, count in acc.outlier_counts.items()}
 
-    outlier_fractions: dict[str, float] = {
-        key: count / acc.n
-        for key, count in acc.outlier_counts.items()
-    }
+    per_channel_std = None
+    if acc.per_channel_sum is not None and acc.per_channel_sum_sq is not None and acc.per_channel_n > 0:
+        per_channel_std = [
+            math.sqrt(max(0.0, sq / acc.per_channel_n - (s / acc.per_channel_n) ** 2))
+            for s, sq in zip(acc.per_channel_sum, acc.per_channel_sum_sq)
+        ]
 
     return LayerStats(
         site_identifier=acc.site_identifier,
@@ -318,6 +326,7 @@ def finalize_accumulator(acc: WelfordAccumulator) -> LayerStats:
         m3=acc.M3,
         outlier_fractions=outlier_fractions,
         n_samples=acc.n,
+        per_channel_std=per_channel_std,
     )
 ```
 
@@ -329,13 +338,13 @@ def run_profiling_dataset_pass(
     loader: DataLoader,
     device: torch.device,
 ) -> dict[SiteId, LayerStats]:
-    """Collect dataset-wide activation statistics at all 5 sites via exact merge.
+    """Collect dataset-wide activation statistics at all 6 sites via exact merge.
 
     Iterates over all batches in loader, calls profile_vit for each, and
     merges per-batch LayerStats into WelfordAccumulators using the exact
     Pébay (2008) parallel higher-moments formula.
 
-    All five measurement sites (residual_stream, post_layernorm_1/2,
+    All six measurement sites (residual_stream, post_layernorm_1, post_layernorm_2,
     pre_gelu, pre_softmax, post_softmax) are covered for every encoder block.
 
     Must be called inside torch.no_grad() — the caller is responsible.
@@ -353,29 +362,24 @@ def run_profiling_dataset_pass(
         RuntimeError: If loader yields zero batches.
     """
     inner_model = wrapped_model._model
-
-    # Extract model architecture constants once before the loop.
     # N = num_patches + 1 (CLS token). For ViT-B/16 on 224×224: N = 197.
-    # Do NOT derive N from input_batch.shape[2] (that is image height = 224).
-    N: int          = inner_model.patch_embed.num_patches + 1
-    D: int          = inner_model.embed_dim
-    num_heads: int  = inner_model.blocks[0].attn.num_heads
-    D_mlp: int      = inner_model.blocks[0].mlp.fc1.out_features
+    N         = inner_model.patch_embed.num_patches + 1
+    D         = inner_model.embed_dim
+    num_heads = inner_model.blocks[0].attn.num_heads
+    D_mlp     = inner_model.blocks[0].mlp.fc1.out_features
 
     accumulators: dict[SiteId, WelfordAccumulator] = {}
-    num_batches: int = 0
+    num_batches = 0
 
-    for batch_idx, (images, _) in enumerate(loader):
+    for _, (images, _) in enumerate(loader):
         images = images.to(device)
-        B: int = images.shape[0]  # actual batch size (last batch may be smaller)
+        B = images.shape[0]
         batch_result = profile_vit(wrapped_model, images)
-
         for site_id, layer_stats in batch_result.stats.items():
             batch_n = _site_n(site_id, B, N, D, D_mlp, num_heads)
             if site_id not in accumulators:
                 accumulators[site_id] = WelfordAccumulator(site_identifier=site_id)
             merge_batch_stats(accumulators[site_id], layer_stats, batch_n)
-
         num_batches += 1
         if num_batches % 10 == 0:
             logger.info("Profiled %d batches...", num_batches)
@@ -383,32 +387,27 @@ def run_profiling_dataset_pass(
     if num_batches == 0:
         raise RuntimeError("DataLoader yielded zero batches; cannot produce stats.")
 
-    logger.info("Finalizing accumulators for %d sites.", len(accumulators))
     return {sid: finalize_accumulator(acc) for sid, acc in accumulators.items()}
 ```
 
 ---
 
-## 4. New tests for `tests/test_profiler.py`
+## 4. `tests/test_profiler.py` — Welford tests (Step 4b-ii) ✅ Done
 
-### 4.1 Fast tests (no trace)
+### 4.1 Fast tests
 
 ```python
 def test_welford_accumulator_construction() -> None:
-    """WelfordAccumulator initialises with zero-state defaults."""
     from src.profiler import WelfordAccumulator, OUTLIER_SIGMAS
     acc = WelfordAccumulator(site_identifier="blocks.0/pre_gelu")
     assert acc.n == 0
     assert acc.mean == 0.0
-    assert acc.M2 == 0.0
-    assert acc.M3 == 0.0
-    assert acc.M4 == 0.0
+    assert acc.M2 == acc.M3 == acc.M4 == 0.0
     assert set(acc.outlier_counts.keys()) == {f"{k}_sigma" for k in OUTLIER_SIGMAS}
     assert all(v == 0 for v in acc.outlier_counts.values())
 
 
 def test_merge_batch_stats_single_batch() -> None:
-    """After one merge, accumulator mean and population std must match batch."""
     from src.profiler import WelfordAccumulator, LayerStats, OUTLIER_SIGMAS, merge_batch_stats
     acc = WelfordAccumulator(site_identifier="test/site")
     batch_stats = LayerStats(
@@ -418,15 +417,12 @@ def test_merge_batch_stats_single_batch() -> None:
         n_samples=1000,
     )
     merge_batch_stats(acc, batch_stats, 1000)
-
     assert acc.n == 1000
     assert math.isclose(acc.mean, 2.0)
-    # Population variance = std² = 9.0;  M2 = 9.0 * 1000 = 9000.
-    assert math.isclose(acc.M2, 9000.0, rel_tol=1e-6)
+    assert math.isclose(acc.M2, 9000.0, rel_tol=1e-6)  # 3²×1000
 
 
 def test_finalize_accumulator_two_equal_batches() -> None:
-    """Two identical batches: global mean and std must match the batch values exactly."""
     from src.profiler import WelfordAccumulator, LayerStats, OUTLIER_SIGMAS
     from src.profiler import merge_batch_stats, finalize_accumulator
     acc = WelfordAccumulator(site_identifier="test/site")
@@ -438,7 +434,6 @@ def test_finalize_accumulator_two_equal_batches() -> None:
             n_samples=100,
         )
         merge_batch_stats(acc, bs, 100)
-
     result = finalize_accumulator(acc)
     assert math.isclose(result.mean, 4.0, rel_tol=1e-6)
     assert math.isclose(result.std,  2.0, rel_tol=1e-6)
@@ -450,19 +445,17 @@ def test_finalize_accumulator_two_equal_batches() -> None:
 ```python
 @pytest.mark.slow
 def test_slow_run_profiling_dataset_pass_site_coverage(_vit_wrapped) -> None:
-    """run_profiling_dataset_pass must return all 5 sites for every block."""
+    """run_profiling_dataset_pass must return all 6 sites for every block."""
     from torch.utils.data import DataLoader, TensorDataset
     from src.profiler import run_profiling_dataset_pass, SITE_PRE_SOFTMAX, SITE_POST_SOFTMAX
 
-    # Provide labels so (images, labels) unpacking works correctly.
     images  = torch.randn(4, 3, 224, 224)
     labels  = torch.zeros(4, dtype=torch.long)
     dataset = TensorDataset(images, labels)
     loader  = DataLoader(dataset, batch_size=2)
-    device  = torch.device("cpu")
 
     with torch.no_grad():
-        stats = run_profiling_dataset_pass(_vit_wrapped, loader, device)
+        stats = run_profiling_dataset_pass(_vit_wrapped, loader, torch.device("cpu"))
 
     keys = set(stats.keys())
     assert "patch_embed/residual_stream" in keys
@@ -473,74 +466,42 @@ def test_slow_run_profiling_dataset_pass_site_coverage(_vit_wrapped) -> None:
 
 @pytest.mark.slow
 def test_slow_run_profiling_dataset_pass_exact_n_samples(_vit_wrapped) -> None:
-    """n_samples in finalized LayerStats must equal total elements processed."""
+    """n_samples must equal total elements processed."""
     from torch.utils.data import DataLoader, TensorDataset
     from src.profiler import run_profiling_dataset_pass, SITE_PRE_GELU
 
-    # 4 images, batch_size=2 → 2 batches of B=2.
-    # For pre_gelu at ViT-B/16: N=197, D_mlp=3072, so n per batch = 2*197*3072.
     images  = torch.randn(4, 3, 224, 224)
     labels  = torch.zeros(4, dtype=torch.long)
     dataset = TensorDataset(images, labels)
     loader  = DataLoader(dataset, batch_size=2)
-    device  = torch.device("cpu")
 
     with torch.no_grad():
-        stats = run_profiling_dataset_pass(_vit_wrapped, loader, device)
+        stats = run_profiling_dataset_pass(_vit_wrapped, loader, torch.device("cpu"))
 
-    key = "blocks.0/pre_gelu"
     expected_n = 4 * 197 * 3072  # total images × N × D_mlp
-    assert stats[key].n_samples == expected_n, (
-        f"n_samples={stats[key].n_samples}, expected {expected_n}"
-    )
+    assert stats["blocks.0/pre_gelu"].n_samples == expected_n
 ```
 
 ---
 
-## 5. `src/profiler.py` — `LayerStats` note on `m3` for single-pass use
+## 5. `src/plotting.py` — Phase 1 functions (Step 5) ✅ Done
 
-The existing `profile_vit` single-pass API now populates `m3` and `n_samples`
-in `LayerStats`. This is **backward-incompatible** for callers that construct
-`LayerStats` by keyword argument and do not pass `m3` or `n_samples`. Both
-fields have default values (`m3=0.0`, `n_samples=0`) so existing code that
-constructs `LayerStats` without them will still work — but the values will be
-wrong. The `_canned_result()` helper in `test_profiler.py` must be updated to
-pass `m3=0.0` and `n_samples=0` explicitly so tests remain readable.
+### 5.1 `plot_activation_histogram`
 
-Update `_canned_result()`:
-```python
-stats[key] = LayerStats(
-    site_identifier=key,
-    mean=float(i) * 0.01,
-    std=1.0 + float(i) * 0.05,
-    kurtosis=0.5,
-    m3=0.0,
-    outlier_fractions={f"{s}_sigma": 0.001 for s in OUTLIER_SIGMAS},
-    n_samples=0,
-)
-```
-
----
-
-## 6. Step 5 — `src/plotting.py`
-
-### 6.1 `plot_activation_histogram`
-
-Signature unchanged. Implementation:
 1. `fig, ax = plt.subplots(figsize=(7, 4))`.
 2. `ax.hist(activations.ravel(), bins=200, color="steelblue", alpha=0.8)`.
 3. If `log_scale`: `ax.set_yscale("log")`.
-4. Vertical lines at `mean ± 3σ` (dashed, red) and `mean ± 6σ` (dotted, red),
-   computing `mean` and `std` from the input array via `np.mean` / `np.std`.
-5. `ax.set_title(layer_name)`, labels, legend, save, `plt.close(fig)`.
+4. Vertical lines at `mean ± 3σ` (dashed red) and `mean ± 6σ` (dotted red),
+   computing mean and std from the input array via `np.mean` / `np.std`.
+5. Title, axis labels, legend, save to `output_path`, `plt.close(fig)`.
 
-### 6.2 `plot_per_channel_std_heatmap`
+### 5.2 `plot_per_channel_std_heatmap`
 
-**Now unblocked** because `profiler.LayerStats` gains `per_channel_std` in
-Step 4b-iii (Section 7 below). Stack values into `(num_layers, D)` array,
-render with `imshow(..., cmap="viridis")`, colorbar, y-tick layer names, save.
+Stack per-channel std values into `(num_layers, D)` array, render with
+`imshow(..., cmap="viridis")`, colorbar, y-tick layer names, save.
 
-Add smoke test in `tests/test_plotting.py`:
+Smoke test:
+
 ```python
 def test_plot_per_channel_std_heatmap_creates_file(tmp_path: Path) -> None:
     from src.plotting import plot_per_channel_std_heatmap
@@ -552,153 +513,148 @@ def test_plot_per_channel_std_heatmap_creates_file(tmp_path: Path) -> None:
 
 ---
 
-## 7. Step 4b-iii — `per_channel_std` in `profiler.LayerStats`
+## 6. `src/profiler.py` — `per_channel_std` (Step 4b-iii) ✅ Done
 
-### The gap explained
+`LayerStats` has `per_channel_std: list[float] | None`, `per_channel_sum`,
+and `per_channel_sum_sq` fields. `_register_stat_saves` accepts
+`track_per_channel: bool = False`. When True, saves per-channel sum and
+sum-of-squares proxies (shape `[D]`) for cross-batch merging.
 
-The spec deliverable "per-channel σ heatmaps (layers × channels)" requires
-knowing, for every encoder block, the standard deviation of each individual
-output channel of the pre-GELU linear layer — not just the scalar std over all
-elements. The current `profiler.LayerStats` has no such field.
+Sites with `track_per_channel=True`: `pre_gelu`, `post_layernorm_1`, `post_layernorm_2`.
 
-`hooks.LayerStats` has `per_channel_std: list[float] | None` because
-`_update_per_channel` in `hooks.py` maintains running per-channel sums and
-sums-of-squares. We need the same for `profiler.LayerStats`.
-
-### What to add
-
-**To `_StatsSavers`:** add `per_channel_std: Any = None` (a nnsight proxy or
-`None` if the site doesn't track channels).
-
-**To `LayerStats`:** add `per_channel_std: list[float] | None = None`.
-
-**To `_register_stat_saves`:** add a `track_per_channel: bool = False` arg.
-When True, compute per-channel population std:
-```python
-# tensor_proxy shape: (B, N, D) after reshape from the raw activation tensor.
-# We want σ across B and N dims, leaving D.
-# Flatten batch and token dims: shape (B*N, D).
-t_bn_d = tensor_proxy.reshape(-1, tensor_proxy.shape[-1])
-per_channel_std_proxy = t_bn_d.std(dim=0, correction=0).save()  # shape (D,)
-```
-This produces a proxy of shape `[D]` whose `.value` after the trace is a
-1-D tensor of per-channel population stds.
-
-**Sites that need it:** `pre_gelu` (shape `[B, N, D_mlp]`) and
-`post_layernorm_1/2` (shape `[B, N, D]`). Pass `track_per_channel=True` for
-these sites in `profile_vit`.
-
-**In `_finalize_stats`:** if `savers.per_channel_std is not None`, extract
-`per_channel_std=savers.per_channel_std.value.tolist()`.
-
-**In `WelfordAccumulator`:** for sites with `track_per_channel=True`, maintain
-`per_channel_M2: list[float]` and `per_channel_n: int`. The per-channel
-merge uses the scalar Welford formula applied independently per channel. Add
-helper `merge_per_channel_stats(acc, batch_per_channel_std, batch_n)`.
-
-**In `finalize_accumulator`:** compute `per_channel_std = [sqrt(m2/n) for m2
-in acc.per_channel_M2]`.
-
-> **Scope note:** this is the most complex addition in Step 4b. It requires
-> touching `_StatsSavers`, `LayerStats`, `_register_stat_saves`, `profile_vit`
-> (call sites for `pre_gelu` and `post_layernorm_*`), `_finalize_stats`,
-> `WelfordAccumulator`, `merge_batch_stats`, and `finalize_accumulator`.
-> Implement and test it before `exp1_profiling.py` calls `_plot_per_channel_heatmap`.
+`WelfordAccumulator` carries `per_channel_sum` and `per_channel_sum_sq` (additive
+across batches — no merge formula needed, sums are additive). `finalize_accumulator`
+computes `per_channel_std` from accumulated sums.
 
 ---
 
-## 8. Step 5 — `src/exp1_profiling.py`
+## 7. `src/exp1_profiling.py` — `run(config)` (Step 5) ✅ Done
 
-### 8.1 Imports
+### 7.1 Imports
 
 ```python
+from __future__ import annotations
+
+import logging
+from typing import Callable
+
+import numpy as np
 import torch
 from nnsight import NNsight
 
 from src.config import ProfilingConfig
 from src.data_loader import build_val_loader
 from src.model import load_vit
+from src.plotting import plot_activation_histogram, plot_per_channel_std_heatmap
 from src.profiler import (
+    LayerStats,
     ProfilingResult,
     SiteId,
-    LayerStats,
+    histogram_profile_vit,
     run_profiling_dataset_pass,
     save_profiling_result,
 )
-from src.plotting import plot_activation_histogram, plot_per_channel_std_heatmap
 from src.utils import ensure_dir
-import numpy as np
+
+logger = logging.getLogger(__name__)
 ```
 
-### 8.2 `run(config)` body
+### 7.2 `run(config)`
 
 ```python
 def run(config: ProfilingConfig) -> None:
-    # 1. Load model and wrap
+    # 1. Load model and wrap with NNsight.
     model, transform = load_vit(config.device)
     wrapped = NNsight(model)
 
-    # 2. Build loader
+    # 2. Build the validation DataLoader (shuffle=False for reproducible order).
     loader = build_val_loader(
         config.data_dir, transform, config.batch_size,
         config.num_images, config.device,
     )
 
-    # 3. Dataset-wide profiling pass (all 5 sites, exact statistics)
+    # 3. Dataset-wide profiling pass (all 6 sites, exact statistics).
     logger.info("Starting profiling pass over %d images...", config.num_images)
     with torch.no_grad():
         stats: dict[SiteId, LayerStats] = run_profiling_dataset_pass(
             wrapped, loader, config.device,
         )
 
-    # 4. Save
+    # 4. Save profiling result.
     ensure_dir(config.output_dir)
+    first_images, _ = next(iter(loader))
     inner = wrapped._model
     result = ProfilingResult(
         stats=stats,
         num_blocks=len(inner.blocks),
-        batch_shape=(config.batch_size, 3, 224, 224),
+        batch_shape=tuple(first_images.shape),
     )
     json_path = config.output_dir / "profiling_result.json"
     save_profiling_result(result, json_path)
     logger.info("Stats for %d sites saved to %s", len(stats), json_path)
 
-    # 5. Plots
-    _plot_histograms(stats, config)
+    # 5. Generate plots.
+    _plot_histograms(wrapped, transform, config)
     _plot_per_channel_heatmap(stats, config)
     logger.info("Phase 1 complete. Outputs in %s", config.output_dir)
 ```
 
-### 8.3 `_plot_histograms`
-
-Histograms are drawn from `N(mean, std²)` synthetic samples. Every title
-contains `[reconstructed N(μ,σ²)]`. This is a known limitation: the Gaussian
-reconstruction cannot show the heavy tails that kurtosis captures. The
-`--spot-batch` path (Section 9) produces real-data histograms.
+### 7.3 `_plot_histograms` (Step 6b — implement this)
 
 ```python
-def _plot_histograms(stats: dict[SiteId, LayerStats], config: ProfilingConfig) -> None:
+def _plot_histograms(
+    wrapped: NNsight,
+    transform: Callable,
+    config: ProfilingConfig,
+    block_indices: tuple[int, ...] = (0, 5, 11),
+) -> None:
+    """Generate real-activation histograms for selected blocks.
+
+    Runs one additional forward pass using ``histogram_profile_vit`` to
+    collect full activation tensors at all six sites for ``block_indices``.
+    Histograms show the true distribution including heavy tails.
+
+    Args:
+        wrapped: NNsight-wrapped model (already profiled by the Welford pass).
+        transform: The preprocessing transform returned by ``load_vit``.
+            Passed explicitly so a shuffled loader can be constructed here.
+        config: Profiling config (output_dir, device, data_dir, batch_size,
+            num_images).
+        block_indices: Encoder blocks to generate histograms for.
+    """
+    # Shuffled loader ensures the histogram batch spans many classes rather
+    # than the first alphabetical class(es) in the unshuffled val set.
+    # seed_everything(42) is called in main() before run(), so this is
+    # deterministic across runs.
+    histogram_loader = build_val_loader(
+        config.data_dir, transform, config.batch_size,
+        config.num_images, config.device, shuffle=True,
+    )
+    images, _ = next(iter(histogram_loader))
+    with torch.no_grad():
+        raw_tensors = histogram_profile_vit(
+            wrapped, images.to(config.device), block_indices,
+        )
     hist_dir = config.output_dir / "histograms"
     ensure_dir(hist_dir)
-    rng = np.random.default_rng(seed=0)
-    for key, s in stats.items():
-        synthetic = rng.normal(
-            loc=s.mean, scale=max(s.std, 1e-8), size=50_000
-        ).astype(np.float32)
+    for key, tensor in raw_tensors.items():
+        activations = tensor.detach().cpu().numpy().ravel().astype(np.float32)
         safe_key = key.replace("/", "_").replace(".", "_")
         plot_activation_histogram(
-            activations=synthetic,
-            layer_name=f"{key}  [reconstructed N(μ,σ²)]",
+            activations=activations,
+            layer_name=key,
             output_path=hist_dir / f"{safe_key}.png",
             log_scale=True,
         )
-    logger.info("Wrote %d histogram PNGs to %s", len(stats), hist_dir)
+    logger.info("Wrote %d real-activation histogram PNGs to %s", len(raw_tensors), hist_dir)
 ```
 
-### 8.4 `_plot_per_channel_heatmap`
+### 7.4 `_plot_per_channel_heatmap` ✅ Done
 
 ```python
-def _plot_per_channel_heatmap(stats: dict[SiteId, LayerStats], config: ProfilingConfig) -> None:
+def _plot_per_channel_heatmap(
+    stats: dict[SiteId, LayerStats], config: ProfilingConfig,
+) -> None:
     per_channel: dict[str, list[float]] = {
         key: s.per_channel_std
         for key, s in stats.items()
@@ -706,9 +662,8 @@ def _plot_per_channel_heatmap(stats: dict[SiteId, LayerStats], config: Profiling
     }
     if not per_channel:
         logger.warning(
-            "No per_channel_std data found in stats. "
-            "Ensure _register_stat_saves is called with track_per_channel=True "
-            "for pre_gelu and post_layernorm sites (Step 4b-iii)."
+            "No per_channel_std data found. Ensure _register_stat_saves is "
+            "called with track_per_channel=True for pre_gelu and post_layernorm sites."
         )
         return
     out_path = config.output_dir / "per_channel_std_heatmap.png"
@@ -718,114 +673,227 @@ def _plot_per_channel_heatmap(stats: dict[SiteId, LayerStats], config: Profiling
 
 ---
 
-## 9. `--spot-batch`: real activation histograms (Step 4b)
+## 8. Step 6b — three things to implement
 
-Add to `run_phase1_profiling.py`:
-```python
-parser.add_argument(
-    "--spot-batch",
-    action="store_true",
-    default=False,
-    help=(
-        "After the Welford pass, run one additional forward pass on a single "
-        "fixed batch and save real activation histograms under "
-        "spot_batch_histograms/. These show the true heavy-tailed distribution, "
-        "unlike the reconstructed N(μ,σ²) histograms from the main pass."
-    ),
-)
-```
+### 8.1 `build_val_loader` — add `shuffle` parameter
 
-Pass `spot_batch=args.spot_batch` via `ProfilingConfig` (add the field) or
-handle it directly in `main()`. In `exp1_profiling.run()`:
+In `src/data_loader.py`, add `shuffle: bool = False` as the final parameter.
+Pass it through to `DataLoader(dataset, ..., shuffle=shuffle, ...)`.
+Default `False` preserves all existing Welford-pass behaviour.
+
+### 8.2 `histogram_profile_vit` — add to `src/profiler.py`
 
 ```python
-if config.spot_batch:
-    _run_spot_batch(wrapped, loader, config)
-```
+def histogram_profile_vit(
+    wrapped_model: NNsight,
+    input_batch: torch.Tensor,
+    block_indices: tuple[int, ...] = (0, 5, 11),
+) -> dict[SiteId, torch.Tensor]:
+    """Run one forward pass and save full activation tensors for selected blocks.
 
-```python
-def _run_spot_batch(
-    wrapped: NNsight,
-    loader: DataLoader,
-    config: ProfilingConfig,
-) -> None:
-    """Run one fixed batch through profile_vit and save real activation histograms.
+    Collects real activation tensors at all six measurement sites for the
+    specified encoder blocks.  Used to generate histograms showing the true
+    heavy-tailed distribution.
 
-    This is the only path that produces histograms from real activation values.
-    The batch is always the first batch from the loader (deterministic given a
-    fixed seed in the DataLoader and seed_everything call in main()).
+    Intentionally separate from ``profile_vit`` so the Welford pipeline
+    never retains raw tensors.
+
+    Args:
+        wrapped_model: NNsight-wrapped VisionTransformer with fused_attn=False.
+        input_batch: Float tensor of shape ``(B, C, H, W)`` on the model device.
+        block_indices: Encoder blocks to collect. Default (0, 5, 11) covers
+            entry, midpoint, and exit of ViT-B/16.
+
+    Returns:
+        Mapping from site_identifier to a CPU float32 tensor of full activations.
+        Shapes: ``(B, N, D)`` for residual/layernorm sites, ``(B, N, D_mlp)``
+        for pre_gelu, ``(B, H, N, N)`` for pre/post_softmax.
+
+    Raises:
+        ProfilingError: If the nnsight trace fails.
+        ValueError: If ``input_batch`` is not 4-D.
     """
-    from src.profiler import profile_vit
-    images, _ = next(iter(loader))
-    with torch.no_grad():
-        result = profile_vit(wrapped, images.to(config.device))
-
-    spot_dir = config.output_dir / "spot_batch_histograms"
-    ensure_dir(spot_dir)
-    # profile_vit returns scalar stats only — no raw tensors.
-    # To get raw values we need a separate hook or nnsight .save() of the full
-    # tensor. This requires a dedicated spot_batch profiler that retains
-    # a capped raw sample (e.g. first 50_000 elements) per site.
-    # *** See NOTE below — this function body is a placeholder. ***
-    logger.warning(
-        "--spot-batch is not yet implemented: profile_vit discards raw tensors. "
-        "Implement a spot_profile_vit() that saves raw activation samples."
-    )
 ```
 
-> **NOTE on `--spot-batch` implementation:** `profile_vit` does not retain raw
-> activation tensors — only scalars. To get real histogram data, a separate
-> `spot_profile_vit(wrapped, batch, max_samples_per_site)` function is needed
-> that saves a fixed cap of raw values (e.g. `t[:50_000].save()` after
-> `reshape(-1)`) for each site. Define this function in `profiler.py` alongside
-> `profile_vit`. It is intentionally **separate** from `profile_vit` to ensure
-> the main profiling path stays memory-efficient.
+**Implementation notes:**
 
----
+- Validate `input_batch.ndim == 4`; raise `ValueError` if not.
+- Check `wrapped_model._model` has `blocks`; raise `ProfilingError` if not.
+- Extract `N`, `D`, `num_heads`, `head_dim`, `D_mlp` from model constants
+  (same pattern as `profile_vit`).
+- Inside `wrapped_model.trace(input_batch)`, iterate over `block_indices` only.
+- For each selected block `i`, save:
+  - `residual_stream`: `block.norm1.input[0][0].save()` — key is
+    `"patch_embed/residual_stream"` if `i == 0`, else `f"blocks.{i-1}/residual_stream"`.
+  - `post_layernorm_1`: `block.norm1.output.save()` — key `f"blocks.{i}/post_layernorm_1"`.
+  - `post_layernorm_2`: `block.norm2.output.save()` — key `f"blocks.{i}/post_layernorm_2"`.
+  - `pre_gelu`: `block.mlp.act.input[0][0].save()` — key `f"blocks.{i}/pre_gelu"`.
+  - `pre_softmax`: reconstruct QKᵀ/√d from `attn.qkv.output` using the same
+    split logic as `_register_pre_softmax_saves` (reshape to `(B, N, 3, H, head_dim)`,
+    permute to `(3, B, H, N, head_dim)`, compute `q * scale @ k.transpose(-2,-1)`),
+    then `.save()` the full `(B, H, N, N)` result — key `f"blocks.{i}/pre_softmax"`.
+  - `post_softmax`: `attn.attn_drop.input[0][0].save()` — key `f"blocks.{i}/post_softmax"`.
+- After the trace exits, return `{k: v.cpu() for k, v in raw.items()}`.
 
-## 10. Per `run_phase1_profiling.py` — `batch_shape` accuracy
+**Memory budget:**
 
-The `ProfilingResult.batch_shape` is currently hardcoded as
-`(config.batch_size, 3, 224, 224)` in `run()`. The last batch may be smaller
-than `config.batch_size` if `num_images % batch_size != 0`. Since
-`batch_shape` is metadata (used for documentation, not computation), set it
-from the first actual batch:
+| Site | Shape (B=64) | Memory |
+|------|-------------|--------|
+| `residual_stream` | (64, 197, 768) | 38.7 MB |
+| `post_layernorm_1` | (64, 197, 768) | 38.7 MB |
+| `post_layernorm_2` | (64, 197, 768) | 38.7 MB |
+| `pre_gelu` | (64, 197, 3072) | 155 MB |
+| `pre_softmax` | (64, 12, 197, 197) | 119 MB |
+| `post_softmax` | (64, 12, 197, 197) | 119 MB |
+| **Per block** | | **~510 MB** |
+| **3 blocks total** | | **~1.5 GB** |
+
+### 8.3 `test_slow_histogram_profile_vit_shapes` — add to `tests/test_profiler.py`
 
 ```python
-# In run(), before the profiling loop:
-# Peek at first batch shape for accurate metadata.
-first_images, _ = next(iter(loader))
-actual_batch_shape = tuple(first_images.shape)
-# ... after run_profiling_dataset_pass ...
-result = ProfilingResult(
-    stats=stats,
-    num_blocks=len(inner.blocks),
-    batch_shape=actual_batch_shape,
-)
-```
+@pytest.mark.slow
+def test_slow_histogram_profile_vit_shapes() -> None:
+    """histogram_profile_vit returns correct keys and tensor shapes."""
+    import timm
+    from nnsight import NNsight
+    from src.model import disable_fused_attn
+    from src.profiler import histogram_profile_vit
 
-Note: `build_val_loader` uses `shuffle=False`, so the first batch is
-deterministic given the dataset order.
+    model = timm.create_model("vit_base_patch16_224", pretrained=False)
+    model.eval()
+    disable_fused_attn(model)
+    wrapped = NNsight(model)
+
+    B = 2
+    batch = torch.zeros(B, 3, 224, 224)
+    result = histogram_profile_vit(wrapped, batch, block_indices=(0,))
+
+    N    = model.patch_embed.num_patches + 1        # 197
+    D    = model.embed_dim                           # 768
+    D_mlp = model.blocks[0].mlp.fc1.out_features   # 3072
+    H    = model.blocks[0].attn.num_heads           # 12
+
+    expected_shapes = {
+        "patch_embed/residual_stream": (B, N, D),
+        "blocks.0/post_layernorm_1":   (B, N, D),
+        "blocks.0/post_layernorm_2":   (B, N, D),
+        "blocks.0/pre_gelu":           (B, N, D_mlp),
+        "blocks.0/pre_softmax":        (B, H, N, N),
+        "blocks.0/post_softmax":       (B, H, N, N),
+    }
+    assert set(result.keys()) == set(expected_shapes.keys()), (
+        f"Missing keys: {set(expected_shapes) - set(result.keys())}"
+    )
+    for key, shape in expected_shapes.items():
+        assert result[key].shape == torch.Size(shape), (
+            f"{key}: expected {shape}, got {tuple(result[key].shape)}"
+        )
+        assert result[key].device == torch.device("cpu")
+        assert result[key].dtype == torch.float32
+```
 
 ---
 
-## 11. Critical constraints
+## 9. Critical constraints
 
 | Constraint | Enforced by |
 |---|---|
-| Population std (ddof=0) everywhere | `_register_stat_saves(correction=0)` + `merge_batch_stats` uses `b_var = b_std**2` |
-| Exact kurtosis (Pébay 2008) | `WelfordAccumulator` has M3/M4; `merge_batch_stats` uses full formula |
-| N derived from `patch_embed.num_patches + 1` | `_site_n` docstring; `run_profiling_dataset_pass` |
-| `_site_n` is top-level, not a closure | Defined as module-level function |
-| Architecture constants extracted before loop | `N, D, num_heads, D_mlp` outside `for batch_idx...` |
+| Population std (ddof=0) everywhere | `_register_stat_saves(correction=0)`; `merge_batch_stats` uses `b_var = b_std**2` |
+| Exact kurtosis (Pébay 2008) | `WelfordAccumulator` M3/M4; `merge_batch_stats` full formula |
+| N from `patch_embed.num_patches + 1` | `_site_n` docstring; both dataset-pass functions |
+| Architecture constants extracted before loop | `N, D, num_heads, D_mlp` outside `for` in both functions |
 | `torch.no_grad()` wraps dataset loop | `exp1_profiling.run()` |
-| `profile_vit` signature unchanged | Tests still pass; only internal callers updated |
-| Output is `profiling_result.json` | `save_profiling_result` called in `run()` |
-| All logging via `logger` | No bare `print()` |
+| `histogram_profile_vit` imported at module level | `exp1_profiling.py` top-of-file imports |
+| Histogram tensors converted with `.detach().cpu().numpy()` | `_plot_histograms` |
+| Output file is `profiling_result.json` | `save_profiling_result` in `run()` |
+| No bare `print()` | All logging via `logger` |
+| System info logged at start | `log_system_info()` in `main()` |
+| nnsight ≥0.7.0 API compatibility | `.input` returns tensor directly; forward-pass dependency order; `_val()` helper |
 
 ---
 
-## 12. Test checklist
+## 10. Auto-shuffle behaviour
+
+`build_val_loader` accepts `shuffle: bool | None = None`.  When `None` (default):
+
+| `num_images` | `shuffle` | Rationale |
+|---|---|---|
+| Subset (< full dataset) | `True` | Randomly samples `num_images` indices via `torch.randperm`. Ensures class diversity and enables cross-seed variance. |
+| Full dataset (`None` or ≥ dataset size) | `False` | All classes already covered; shuffling adds no benefit. |
+
+Pass an explicit `bool` to override.  The histogram pass always uses `shuffle=True`.
+
+---
+
+## 11. Multi-seed support
+
+`ProfilingConfig` accepts `seed: int = 42` and `num_seeds: int = 1`.
+
+When `num_seeds > 1`, the pipeline runs `num_seeds` independent passes with
+seeds `seed`, `seed+1`, ..., `seed+num_seeds-1`.  Each seed:
+
+1. Calls `seed_everything(seed)` to reset all RNGs.
+2. Builds a fresh DataLoader (different random subset if shuffling).
+3. Runs the full Welford pass + histogram generation.
+4. Saves results to `output_dir/seed_{s}/`.
+
+The model is loaded once and reused across all seeds.
+
+Cross-seed variance of key statistics (mean, std, kurtosis) can be computed
+from the per-seed `profiling_result.json` files.  With 256 images, statistics
+are stable to ~7 decimal places across seeds.
+
+---
+
+## 12. System information logging
+
+`log_system_info()` in `src/utils.py` records at INFO level:
+- Python version
+- PyTorch version
+- CUDA device name and memory (if available)
+- nnsight version
+
+Called once at the start of `run_phase1_profiling.main()`.
+
+---
+
+## 13. Environment
+
+Reproducible environment specified in `environment.yml`:
+
+```yaml
+name: vit-quant
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - numpy>=1.24
+  - matplotlib>=3.7
+  - pytest>=7.4
+  - pip:
+      - torch>=2.5.0
+      - torchvision>=0.20.0
+      - timm>=1.0.0
+      - nnsight>=0.7.0
+      - transformers>=4.40.0
+      - accelerate>=0.30.0
+      - diffusers>=0.28.0
+      - einops>=0.8.0
+      - sentencepiece>=0.2.0
+      - tokenizers>=0.19.0
+      - safetensors>=0.4.0
+```
+
+Create with: `conda env create -f environment.yml`
+
+Tested on: Python 3.13.13, PyTorch 2.12.1+cu130, nnsight 0.7.0, NVIDIA RTX 3070 (8 GB).
+
+---
+
+## 14. Test checklist
 
 | Test | File | Fast/Slow | Status |
 |---|---|---|---|
@@ -838,12 +906,91 @@ deterministic given the dataset order.
 | `test_site_n_returns_correct_counts` | `test_profiler.py` | Fast | ✅ Pass |
 | `test_merge_batch_stats_outlier_accumulation` | `test_profiler.py` | Fast | ✅ Pass |
 | `test_per_channel_merge_two_batches` | `test_profiler.py` | Fast | ✅ Pass |
-| `test_slow_run_profiling_dataset_pass_site_coverage` | `test_profiler.py` | Slow | ✅ Spec'd (needs PT 2.2) |
-| `test_slow_run_profiling_dataset_pass_exact_n_samples` | `test_profiler.py` | Slow | ✅ Spec'd (needs PT 2.2) |
-| `test_slow_run_profiling_dataset_pass_per_channel_std_present` | `test_profiler.py` | Slow | ✅ Spec'd (needs PT 2.2) |
-| `test_slow_run_profiling_dataset_pass_per_channel_std_shape` | `test_profiler.py` | Slow | ✅ Spec'd (needs PT 2.2) |
-| `test_slow_register_saves_finalize_layernorm` | `test_profiler.py` | Slow | Updated (n_samples arg) |
-| `test_slow_kurtosis_gaussian` | `test_profiler.py` | Slow | Updated (n_samples arg) |
+| `test_merge_batch_stats_unequal_batch_sizes` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_merge_batch_stats_large_mean_delta` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_merge_batch_stats_zero_variance_batch` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_merge_batch_stats_idempotent` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_merge_batch_stats_kurtosis_laplace` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_merge_batch_stats_per_channel_first_batch_none` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_site_n_unknown_site_type` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_site_n_substring_matching` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_load_profiling_result_raises_on_malformed_json` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_load_profiling_result_raises_on_missing_keys` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_save_profiling_result_overwrites_existing` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_profiling_result_batch_shape_preserves_order` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_layer_stats_per_channel_fields_default_none` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_layer_stats_m3_default_zero` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_layer_stats_n_samples_default_zero` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_welford_accumulator_outlier_keys_match_outlier_sigmas` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_histogram_profile_vit_raises_on_non_4d_input` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_histogram_profile_vit_raises_on_model_without_blocks` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_build_val_loader_shuffle_default_none` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_finalize_accumulator_single_element` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_finalize_accumulator_all_constant` | `test_profiler.py` | Fast | ✅ Pass |
 | `test_plot_activation_histogram_creates_file` | `test_plotting.py` | Fast | ✅ Pass |
 | `test_plot_per_channel_std_heatmap_creates_file` | `test_plotting.py` | Fast | ✅ Pass |
-| All existing fast tests | full suite | Fast | 59/68 pass (9 stub failures) |
+| `test_slow_run_profiling_dataset_pass_site_coverage` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_run_profiling_dataset_pass_exact_n_samples` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_run_profiling_dataset_pass_per_channel_std_present` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_run_profiling_dataset_pass_per_channel_std_shape` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_register_saves_finalize_layernorm` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_kurtosis_gaussian` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_histogram_profile_vit_shapes` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_pre_softmax_reconstruction_matches_manual` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_per_channel_std_matches_numpy` | `test_profiler.py` | Slow | ✅ Pass |
+
+---
+
+## Appendix A — nnsight 0.7.0 migration notes
+
+This codebase was originally designed for nnsight 0.2.21 (PyTorch 2.2.x).
+It has been migrated to nnsight 0.7.0 (PyTorch ≥2.5).  Three API changes
+required code adaptations:
+
+### A.1 `.input` returns the tensor directly
+
+**nnsight <0.3:** `module.input` returned `((tensor,), {})` — a tuple of
+`(args, kwargs)`.  Accessing the first positional argument required
+`module.input[0][0]`.
+
+**nnsight ≥0.3:** `module.input` is a property with a `@input.preprocess`
+decorator that extracts `[*value[0], *value[1].values()][0]` — the first
+input tensor directly.  `module.input[0][0]` would index into the tensor's
+first two dimensions, producing a slice instead of the full tensor.
+
+**Fix:** Replace `module.input[0][0]` with `module.input` everywhere
+(`block.norm1.input`, `block.mlp.act.input`, `attn.attn_drop.input`).
+
+### A.2 Forward-pass dependency ordering
+
+**nnsight ≥0.7:** The interleaver execution model registers "requesters"
+for each module access.  When a requester is registered for a module that
+has already been called during the forward pass (its output consumed by
+downstream operations), the interleaver raises `MissedProviderError`:
+"Did you call an Envoy out of order?"
+
+**The correct access order** follows the model's forward pass:
+
+```
+norm1.input → norm1.output → qkv.output → attn_drop.input
+→ norm2.output → mlp.act.input
+```
+
+This differs from the previous order which accessed `norm2.output` and
+`mlp.act.input` before `qkv.output`.  The new order is enforced in both
+`profile_vit` and `histogram_profile_vit`.
+
+**Reference:** nnsight source — `intervention/interleaver.py` lines 710–730
+(``MissedProviderError``), `intervention/envoy.py` lines 194–212
+(``.input`` property with preprocess/postprocess decorators).
+
+### A.3 `.save()` returns a concrete tensor
+
+**nnsight <0.3:** `.save()` returned a proxy object.  After the trace
+exited, the proxy's `.value` attribute held the concrete tensor.
+
+**nnsight ≥0.3:** `.save()` returns a concrete `torch.Tensor` directly.
+
+**Fix:** `_finalize_stats` uses a `_val()` helper that checks
+`isinstance(proxy, torch.Tensor)` first, then falls back to
+`proxy.value` for older nnsight versions.  This is robust to both APIs.
