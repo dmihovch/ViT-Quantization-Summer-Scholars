@@ -16,7 +16,7 @@ python run_phase1_profiling.py --num-images 1024
 # Multi-seed run for variance estimation
 python run_phase1_profiling.py --num-images 1024 --num-seeds 3 --seed 42
 
-# Full dataset (50k images, no shuffle needed)
+# Full dataset (50k images, shuffled for class-diverse batches)
 python run_phase1_profiling.py --all
 ```
 
@@ -25,6 +25,7 @@ produces (single seed):
 ```
 outputs/phase1-profiling/
 ├── profiling_result.json          # all 6 sites × 12 blocks (+ patch_embed)
+├── summary_table.csv              # 73 rows × (5 + num_sigma_thresholds) columns
 ├── histograms/
 │   ├── blocks.0_pre_gelu.png      # real activations — blocks 0, 5, 11 only
 │   ├── blocks.0_pre_softmax.png
@@ -34,7 +35,9 @@ outputs/phase1-profiling/
 │   ├── blocks.11_pre_softmax.png
 │   └── ...                        # one PNG per (selected block, site) — 18 total
 ├── per_channel_std_heatmap_d768.png   # layernorm sites (D=768)
-└── per_channel_std_heatmap_d3072.png  # pre_gelu sites (D=3072)
+├── per_channel_std_heatmap_d3072.png  # pre_gelu sites (D=3072)
+├── attention_entropy_cls_heatmap.png     # CLS query: 12 blocks × 12 heads
+└── attention_entropy_patches_heatmap.png  # patch queries: 12 blocks × 12 heads
 ```
 
 With `--num-seeds 3`, output is organised as:
@@ -819,7 +822,7 @@ def test_slow_histogram_profile_vit_shapes() -> None:
 | `num_images` | `shuffle` | Rationale |
 |---|---|---|
 | Subset (< full dataset) | `True` | Randomly samples `num_images` indices via `torch.randperm`. Ensures class diversity and enables cross-seed variance. |
-| Full dataset (`None` or ≥ dataset size) | `False` | All classes already covered; shuffling adds no benefit. |
+| Full dataset (`None` or ≥ dataset size) | `True` | Class-diverse batches produce representative per-batch σ, reducing the outlier-fraction overestimate documented in §2.3. |
 
 Pass an explicit `bool` to override.  The histogram pass always uses `shuffle=True`.
 

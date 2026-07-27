@@ -50,10 +50,9 @@ def build_val_loader(
         enabled (i.e. when CUDA is the target device).
     shuffle:
         Whether to shuffle the dataset at each epoch.  When ``None``
-        (default), auto-selects: ``True`` when ``num_images`` is a subset
-        (to ensure class diversity), ``False`` when using the full dataset
-        (all classes already covered).  Pass an explicit ``bool`` to
-        override.
+        (default), auto-selects to ``True`` (class-diverse batches for
+        representative per-batch statistics).  Pass an explicit ``bool``
+        to override.
 
     Returns
     -------
@@ -89,8 +88,11 @@ def build_val_loader(
 
     # Resolve effective shuffle before subsetting so the auto-selected
     # value controls both random sampling and DataLoader shuffling.
+    # Always shuffle by default — class-diverse batches produce
+    # representative per-batch σ, reducing the outlier-fraction
+    # overestimate documented in open-issues.md §10.1.
     if shuffle is None:
-        shuffle = is_subset
+        shuffle = True
 
     if num_images is not None:
         if num_images > full_size:

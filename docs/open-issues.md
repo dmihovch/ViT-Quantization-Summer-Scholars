@@ -12,28 +12,19 @@ to Phase 2/3 or are follow-up improvements.
 
 ## Active — Phase 1 follow-up
 
-### 10.1 — Outlier fractions are per-batch, not global-σ — ⚠️ Known limitation
+### 10.1 — Outlier fractions are per-batch, not global-σ — ✅ Resolved
 
-The outlier fractions in `profiling_result.json` are computed as weighted averages
-of per-batch outlier rates (threshold = k·σ_batch), not fractions relative to
-global σ. Per-batch σ < global σ (by the law of total variance), so the
-threshold is lower and outlier fractions are overestimated by ~5–10%.
+**Resolution:** Implemented `run_outlier_counting_pass` (F2) — a second pass that
+uses exact global μ and σ from the completed Welford accumulation to count outlier
+fractions correctly.  The two-pass approach is run by default; use
+`--skip-outlier-recount` for fast iteration (produces approximate per-batch-σ
+fractions).
 
-**Why this matters:** The standard practice in the quantization literature
-(Bondarenko et al. 2023; Dettmers et al. 2022; Xiao et al. 2023; Wei et al. 2022)
-is to report outlier fractions relative to global σ, computed in a two-pass
-manner (first pass: global μ, σ; second pass: count |x − μ_global| > k·σ_global).
-
-**Impact on Phase 2/3:** None. Phase 2 uses the correct global σ for thresholding
-(the JSON stores exact global σ from the Pébay merge). Only the *reported*
-outlier fractions in the JSON are approximate. Phase 3 uses moments (mean, std,
-kurtosis), not outlier fractions.
-
-**Resolution options:**
-1. Add a post-hoc counting pass (`run_outlier_counting_pass`) that uses global
-   μ and σ to count outliers correctly. This adds ~25 min to the full 50k run.
-2. Accept the ~5–10% overestimate as a diagnostic and document the limitation.
-   **Recommendation: Option 2 for now, Option 1 before publication.**
+**Original issue:** The outlier fractions in `profiling_result.json` were computed
+as weighted averages of per-batch outlier rates (threshold = k·σ_batch), not
+fractions relative to global σ. Per-batch σ < global σ (by the law of total
+variance), so the threshold was lower and outlier fractions were overestimated by
+~5–10%.
 
 ---
 

@@ -1,5 +1,8 @@
 # ViT Quantization & Outlier Profiling: Experimental Framework
 
+> **Citations:** All literature references in this document are catalogued with
+> full bibliographic details in [`docs/CITATIONS.md`](CITATIONS.md).
+
 ## 1. Project Objective
 Profile intermediate activations in an encoder-only Vision Transformer (ViT) to quantify the impact of massive outliers, evaluate outlier ablation, and establish a pathway for integer-only GELU non-linearities. The experiments are scoped pragmatically to prioritize measurable, executable outcomes suitable for edge deployment profiling on NVIDIA Jetson hardware.
 
@@ -9,12 +12,15 @@ Focus exclusively on literature that supports the defined boundaries. Avoid over
 ### Core Outlier & Sparsity Mechanics
 *   **The Lazy Neuron Phenomenon: On Emergence of Activation Sparsity in Transformers (arXiv:2210.06313)**
     *   *Focus:* Understanding the baseline for activation sparsity and how a minority of neurons dictate magnitude.
+    *   *Citation:* Li et al. (2023), ICLR 2023. See `docs/CITATIONS.md`.
 *   **Massive Activations in Large Language Models (arXiv:2402.17762)**
     *   *Focus:* The structural role of extreme outliers. Extract the methodology for measuring their impact without adopting LLM-scale assumptions for a ViT.
+    *   *Citation:* Sun et al. (2024), arXiv preprint. See `docs/CITATIONS.md`.
 
 ### Integer Non-linearities & ViT Quantization
 *   **I-ViT: Integer-only Quantization for Efficient Vision Transformer Inference**
-    *   *Focus:* The `ShiftGELU` mechanism. This is critical for Dr. Yang’s requirement to execute GELU on integers, demonstrating how to approximate the floating-point operation using integer bit-shifting or Lookup Tables (LUTs).
+    *   *Focus:* The `ShiftGELU` mechanism. This is critical for Dr. Yang's requirement to execute GELU on integers, demonstrating how to approximate the floating-point operation using integer bit-shifting or Lookup Tables (LUTs).
+    *   *Citation:* Li & Gu (2023), ICCV 2023, arXiv:2207.01405. See `docs/CITATIONS.md`.
 
 ### Special Attentions
 *   *Search Query Parameters:* "Vision Transformer attention outlier mitigation", "Sparse attention activation distribution".

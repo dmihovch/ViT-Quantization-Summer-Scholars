@@ -31,7 +31,9 @@ Histograms are generated from real activation tensors collected by
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
@@ -41,14 +43,21 @@ from nnsight import NNsight
 from src.config import ProfilingConfig
 from src.data_loader import build_val_loader
 from src.model import load_vit
-from src.plotting import plot_activation_histogram, plot_per_channel_std_heatmap
+from src.plotting import (
+    plot_activation_histogram,
+    plot_attention_entropy_heatmap,
+    plot_per_channel_std_heatmap,
+)
 from src.profiler import (
     LayerStats,
     ProfilingResult,
     SiteId,
+    generate_summary_table,
     histogram_profile_vit,
+    run_outlier_counting_pass,
     run_profiling_dataset_pass,
     save_profiling_result,
+    save_summary_table,
 )
 from src.utils import ensure_dir, seed_everything
 
@@ -119,7 +128,8 @@ def _run_single(
         Directory for this seed's outputs (created if needed).
     """
     # 2. Build the validation DataLoader.
-    #    Auto-shuffle: True for subsets (class diversity), False for full dataset.
+    #    Auto-shuffle: always True (class-diverse batches for representative
+    #    per-batch σ, reducing the outlier-fraction overestimate).
     loader = build_val_loader(
         config.data_dir,
         transform,
@@ -134,6 +144,25 @@ def _run_single(
     with torch.no_grad():
         stats: dict[SiteId, LayerStats] = run_profiling_dataset_pass(
             wrapped, loader, config.device,
+        )
+
+    # 3b. Global-σ outlier recount (F2).
+    if not config.skip_outlier_recount:
+        logger.info("Starting outlier recount pass (global-σ fractions)...")
+        with torch.no_grad():
+            corrected_fractions = run_outlier_counting_pass(
+                wrapped, loader, config.device, stats
+            )
+        # Patch stats in-place: replace per-batch outlier fractions with global-σ ones.
+        for site_id, fracs in corrected_fractions.items():
+            stats[site_id] = dataclasses.replace(
+                stats[site_id], outlier_fractions=fracs
+            )
+        logger.info("Outlier recount complete.")
+    else:
+        logger.warning(
+            "Skipping outlier recount pass (--skip-outlier-recount). "
+            "Outlier fractions in output are per-batch-σ approximations."
         )
 
     # 4. Save profiling result.
@@ -153,9 +182,16 @@ def _run_single(
     save_profiling_result(result, json_path)
     logger.info("Stats for %d sites saved to %s", len(stats), json_path)
 
+    # 4b. Generate summary table (F4).
+    table_rows = generate_summary_table(result)
+    table_path = output_dir / "summary_table.csv"
+    save_summary_table(table_rows, table_path)
+    logger.info("Summary table (%d rows) written to %s", len(table_rows), table_path)
+
     # 5. Generate plots.
     _plot_histograms(wrapped, transform, config, output_dir)
     _plot_per_channel_heatmap(stats, output_dir)
+    _plot_attention_entropy_heatmaps(stats, output_dir)
     logger.info("Seed complete. Outputs in %s", output_dir)
 
 
@@ -244,3 +280,48 @@ def _plot_per_channel_heatmap(
         out_path = output_dir / f"per_channel_std_heatmap{suffix}.png"
         plot_per_channel_std_heatmap(group, out_path)
         logger.info("Per-channel σ heatmap (D=%d) written to %s", d, out_path)
+
+
+def _plot_attention_entropy_heatmaps(
+    stats: dict[SiteId, LayerStats],
+    output_dir: Path,
+) -> None:
+    """Generate attention entropy heatmaps for CLS and patch queries.
+
+    Produces two separate heatmaps:
+    - ``attention_entropy_cls_heatmap.png``: CLS query entropy per head.
+    - ``attention_entropy_patches_heatmap.png``: patch query mean entropy per head.
+
+    The separation follows the literature convention (Maisonnave et al. 2025;
+    Mali 2025; Lee & Kim 2025) of treating CLS-to-patch attention as a
+    distinct distribution from patch-to-patch attention.
+
+    Args:
+        stats: Mapping from site_identifier to finalized global LayerStats.
+        output_dir: Directory where heatmap PNGs are written.
+    """
+    cls_entropies: dict[str, list[float]] = {
+        key: s.attention_entropy_cls
+        for key, s in stats.items()
+        if s.attention_entropy_cls is not None
+    }
+    patch_entropies: dict[str, list[float]] = {
+        key: s.attention_entropy_patches
+        for key, s in stats.items()
+        if s.attention_entropy_patches is not None
+    }
+    if not cls_entropies and not patch_entropies:
+        logger.warning("No attention entropy data found in stats.")
+        return
+    if cls_entropies:
+        plot_attention_entropy_heatmap(
+            cls_entropies,
+            output_dir / "attention_entropy_cls_heatmap.png",
+            title="CLS query attention entropy per head (nats)",
+        )
+    if patch_entropies:
+        plot_attention_entropy_heatmap(
+            patch_entropies,
+            output_dir / "attention_entropy_patches_heatmap.png",
+            title="Patch query mean attention entropy per head (nats)",
+        )

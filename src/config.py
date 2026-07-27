@@ -47,6 +47,10 @@ class ProfilingConfig:
     device: torch.device
     seed: int = 42
     num_seeds: int = 1
+    skip_outlier_recount: bool = False
+    """If True, skip the second-pass global-σ outlier recount.
+    Use only for fast iteration; results will have approximate outlier fractions.
+    """
 
 
 @dataclass(frozen=True)

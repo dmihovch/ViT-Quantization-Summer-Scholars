@@ -115,6 +115,53 @@ def plot_per_channel_std_heatmap(
     logger.debug("Saved per-channel σ heatmap to %s", output_path)
 
 
+def plot_attention_entropy_heatmap(
+    entropies: dict[str, list[float]],
+    output_path: Path,
+    title: str = "Attention entropy per head (nats)",
+) -> None:
+    """Save a heatmap of per-head mean attention entropy across blocks.
+
+    Renders a (num_blocks × num_heads) matrix using ``imshow`` with the
+    "viridis" colormap.  Each row is one block; each column is one head.
+
+    Parameters
+    ----------
+    entropies:
+        Mapping from block identifier (e.g. ``"blocks.3/post_softmax"``) to a
+        list of per-head mean Shannon entropies in nats. All lists must have
+        the same length (num_heads).
+    output_path:
+        File path where the PNG is written.  Parent directories must exist.
+    title:
+        Plot title (used to distinguish CLS vs patch heatmaps).
+    """
+    if not entropies:
+        logger.warning("Empty entropies dict; skipping attention entropy heatmap.")
+        return
+
+    # Sort keys for deterministic block ordering.
+    sorted_keys = sorted(entropies.keys())
+    data = np.array([entropies[k] for k in sorted_keys])  # (num_blocks, num_heads)
+
+    fig, ax = plt.subplots(figsize=(10, max(4, len(sorted_keys) * 0.4)))
+    im = ax.imshow(data, aspect="auto", cmap="viridis", interpolation="nearest")
+
+    ax.set_yticks(range(len(sorted_keys)))
+    ax.set_yticklabels(sorted_keys, fontsize=7)
+    ax.set_xlabel("Head index")
+    ax.set_ylabel("Block")
+    ax.set_title(title, fontsize=10)
+
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Mean entropy (nats)")
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    logger.debug("Saved attention entropy heatmap to %s", output_path)
+
+
 def plot_accuracy_vs_threshold(
     results: list[AblationResult],
     output_path: Path,

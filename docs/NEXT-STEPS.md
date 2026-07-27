@@ -1,5 +1,8 @@
 # Next Steps: Implementation Roadmap
 
+> **Citations:** All literature references in this document are catalogued with
+> full bibliographic details in [`docs/CITATIONS.md`](CITATIONS.md).
+
 ## Current State
 
 **Steps 1–6b are complete. Phase 1 is fully implemented.** 82/91 fast tests pass
@@ -396,8 +399,10 @@ Read these **as you implement**, not all upfront.
 
 - **Zhai et al. (2023) — Stabilizing Transformer Training by Preventing
   Attention Entropy Collapse**
-  https://arxiv.org/abs/2204.09548
-  > Provides the entropy measurement formula for `post_softmax` analysis.
+  https://arxiv.org/abs/2303.06296
+  > Published at ICML 2023. Provides the entropy measurement formula for
+  > ``post_softmax`` analysis and defines "entropy collapse" as a
+  > diagnostic signal.
 
 ### Before Step 7 (ablation)
 

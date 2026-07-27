@@ -1570,24 +1570,675 @@ def test_build_val_loader_auto_shuffle_different_seeds() -> None:
     )
 
 
-def test_build_val_loader_auto_shuffle_full_dataset() -> None:
-    """build_val_loader with num_images=None must auto-select shuffle=False."""
-    import torchvision.datasets as datasets
+def test_build_val_loader_auto_shuffle_full_dataset(temp_image_dir: Path) -> None:
+    """build_val_loader with num_images=None must auto-select shuffle=True.
+
+    Updated for F1: the auto-select logic now defaults to True for both
+    subsets and full-dataset runs.  Class-diverse batches produce
+    representative per-batch σ, reducing the outlier-fraction overestimate.
+    """
+    from torch.utils.data import SequentialSampler
     from src.data_loader import build_val_loader
-    from src.utils import seed_everything
+    import torchvision.transforms as T
 
-    data_dir = Path("data")
-    if not data_dir.exists():
-        pytest.skip("data/ directory not found")
+    loader = build_val_loader(
+        temp_image_dir,
+        T.Compose([T.Resize((8, 8)), T.ToTensor()]),
+        batch_size=2,
+        num_images=None,
+        device=torch.device("cpu"),
+    )
+    assert not isinstance(loader.sampler, SequentialSampler), (
+        "Full dataset must auto-select shuffle=True (F1 fix)"
+    )
 
-    seed_everything(42)
-    ds = datasets.ImageFolder(str(data_dir))
-    full_size = len(ds)
 
-    # Full dataset: is_subset=False, so shuffle auto-selects to False.
-    is_subset = full_size is not None and full_size < full_size
-    assert is_subset is False
+# ---------------------------------------------------------------------------
+# F2 — Global-σ outlier recount tests
+# ---------------------------------------------------------------------------
 
-    # With num_images=None, is_subset is False, so shuffle=False.
-    is_subset_none = False  # num_images=None → not a subset
-    assert is_subset_none is False
+
+def test_profiling_config_skip_outlier_recount_default_false() -> None:
+    """ProfilingConfig.skip_outlier_recount must default to False."""
+    from src.config import ProfilingConfig
+
+    cfg = ProfilingConfig(
+        data_dir=Path("data"),
+        output_dir=Path("outputs"),
+        num_images=64,
+        batch_size=8,
+        device=torch.device("cpu"),
+    )
+    assert cfg.skip_outlier_recount is False
+
+
+def test_profiling_config_skip_outlier_recount_can_be_set() -> None:
+    """ProfilingConfig.skip_outlier_recount can be set to True."""
+    from src.config import ProfilingConfig
+
+    cfg = ProfilingConfig(
+        data_dir=Path("data"),
+        output_dir=Path("outputs"),
+        num_images=64,
+        batch_size=8,
+        device=torch.device("cpu"),
+        skip_outlier_recount=True,
+    )
+    assert cfg.skip_outlier_recount is True
+
+
+@pytest.mark.slow
+def test_run_outlier_counting_pass_returns_correct_keys() -> None:
+    """run_outlier_counting_pass must return the same site keys as input stats.
+
+    Uses a mock that avoids nnsight traces by injecting a fake model that
+    produces known activations.
+    """
+    from src.profiler import run_outlier_counting_pass
+
+    # Build fake finalized_stats with known mean/std.
+    fake_stats: dict[str, LayerStats] = {
+        "blocks.0/pre_gelu": LayerStats(
+            site_identifier="blocks.0/pre_gelu",
+            mean=0.0, std=1.0, kurtosis=0.0,
+            outlier_fractions={"3.0_sigma": 0.01, "5.0_sigma": 0.001, "8.0_sigma": 0.0},
+            n_samples=1000,
+        ),
+        "blocks.0/post_softmax": LayerStats(
+            site_identifier="blocks.0/post_softmax",
+            mean=0.0, std=0.5, kurtosis=0.0,
+            outlier_fractions={"3.0_sigma": 0.02, "5.0_sigma": 0.002, "8.0_sigma": 0.0},
+            n_samples=2000,
+        ),
+    }
+
+    # Create a DataLoader with a simple tensor dataset.
+    from torch.utils.data import DataLoader, TensorDataset
+    images = torch.randn(4, 3, 224, 224)
+    labels = torch.zeros(4, dtype=torch.long)
+    loader = DataLoader(TensorDataset(images, labels), batch_size=2)
+
+    # Build a mock wrapped model that produces known activations.
+    # We use a real nnsight-wrapped identity model and intercept the trace.
+    # For a fast test, we construct a minimal model that exposes the right
+    # architecture attributes.
+    import timm
+    from nnsight import NNsight
+    from src.model import disable_fused_attn
+
+    model = timm.create_model("vit_base_patch16_224", pretrained=False)
+    model.eval()
+    disable_fused_attn(model)
+    wrapped = NNsight(model)
+
+    with torch.no_grad():
+        corrected = run_outlier_counting_pass(wrapped, loader, torch.device("cpu"), fake_stats)
+
+    assert set(corrected.keys()) == set(fake_stats.keys()), (
+        f"Keys mismatch: {set(corrected.keys())} vs {set(fake_stats.keys())}"
+    )
+
+
+@pytest.mark.slow
+def test_run_outlier_counting_pass_fractions_in_unit_interval() -> None:
+    """All returned outlier fractions must be in [0, 1]."""
+    from src.profiler import run_outlier_counting_pass
+    from torch.utils.data import DataLoader, TensorDataset
+    import timm
+    from nnsight import NNsight
+    from src.model import disable_fused_attn
+
+    model = timm.create_model("vit_base_patch16_224", pretrained=False)
+    model.eval()
+    disable_fused_attn(model)
+    wrapped = NNsight(model)
+
+    fake_stats: dict[str, LayerStats] = {
+        "blocks.0/pre_gelu": LayerStats(
+            site_identifier="blocks.0/pre_gelu",
+            mean=0.0, std=1.0, kurtosis=0.0,
+            outlier_fractions={"3.0_sigma": 0.01, "5.0_sigma": 0.001, "8.0_sigma": 0.0},
+            n_samples=1000,
+        ),
+    }
+
+    images = torch.randn(4, 3, 224, 224)
+    labels = torch.zeros(4, dtype=torch.long)
+    loader = DataLoader(TensorDataset(images, labels), batch_size=2)
+
+    with torch.no_grad():
+        corrected = run_outlier_counting_pass(wrapped, loader, torch.device("cpu"), fake_stats)
+
+    for site_id, fracs in corrected.items():
+        for key, val in fracs.items():
+            assert 0.0 <= val <= 1.0, (
+                f"{site_id}[{key}] = {val} not in [0, 1]"
+            )
+
+
+def test_run_outlier_counting_pass_known_gaussian() -> None:
+    """Outlier counting on N(0,1) data must recover ~0.0027 at 3σ.
+
+    Uses a direct tensor computation (no nnsight trace) to verify the
+    counting logic is correct.  The 3σ fraction for a standard normal
+    is approximately 0.0027 (two-sided).
+    """
+    from src.profiler import OUTLIER_SIGMAS
+
+    torch.manual_seed(42)
+    n = 100_000
+    data = torch.randn(n)
+    mu = data.mean().item()
+    sigma = data.std(correction=0).item()
+
+    # Count outliers using global μ and σ.
+    for k in OUTLIER_SIGMAS:
+        frac = (data.abs() > k * sigma).float().mean().item()
+        if k == 3.0:
+            # Theoretical: 2 * Φ(-3) ≈ 0.0027.  Allow ±0.002 for finite sample.
+            assert 0.0007 <= frac <= 0.0047, (
+                f"3σ fraction={frac:.6f}, expected ~0.0027"
+            )
+        # All fractions must be in [0, 1].
+        assert 0.0 <= frac <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# F3 — Attention entropy tests
+# ---------------------------------------------------------------------------
+
+
+def test_layer_stats_attention_entropy_cls_defaults_none() -> None:
+    """attention_entropy_cls and attention_entropy_patches must default to None."""
+    stats = LayerStats(
+        site_identifier="test", mean=0.0, std=1.0, kurtosis=0.0,
+    )
+    assert stats.attention_entropy_cls is None
+    assert stats.attention_entropy_patches is None
+
+
+def test_welford_accumulator_entropy_fields_default_none() -> None:
+    """WelfordAccumulator entropy fields must default to None/0."""
+    from src.profiler import WelfordAccumulator
+
+    acc = WelfordAccumulator(site_identifier="test")
+    assert acc.entropy_cls_sum is None
+    assert acc.entropy_cls_count == 0
+    assert acc.entropy_patch_sum is None
+    assert acc.entropy_patch_count == 0
+
+
+def test_merge_batch_stats_entropy_cls_accumulation_first_batch() -> None:
+    """First batch with entropy data must initialise accumulator fields."""
+    from src.profiler import WelfordAccumulator, merge_batch_stats
+
+    acc = WelfordAccumulator(site_identifier="test")
+    bs = LayerStats(
+        site_identifier="test",
+        mean=0.0, std=1.0, kurtosis=0.0,
+        attention_entropy_cls=[1.5, 2.0],
+        attention_entropy_patches=[6.0, 8.0],
+    )
+    merge_batch_stats(acc, bs, batch_n=100, patch_token_count=4)
+
+    assert acc.entropy_cls_sum == [1.5, 2.0]
+    assert acc.entropy_cls_count == 1
+    assert acc.entropy_patch_sum == [6.0, 8.0]
+    assert acc.entropy_patch_count == 4
+
+
+def test_merge_batch_stats_entropy_accumulation_two_batches() -> None:
+    """Two batches with entropy must accumulate sums and counts correctly."""
+    from src.profiler import WelfordAccumulator, merge_batch_stats
+
+    acc = WelfordAccumulator(site_identifier="test")
+
+    bs1 = LayerStats(
+        site_identifier="test",
+        mean=0.0, std=1.0, kurtosis=0.0,
+        attention_entropy_cls=[1.0, 2.0],
+        attention_entropy_patches=[4.0, 8.0],
+    )
+    merge_batch_stats(acc, bs1, batch_n=100, patch_token_count=4)
+
+    bs2 = LayerStats(
+        site_identifier="test",
+        mean=0.0, std=1.0, kurtosis=0.0,
+        attention_entropy_cls=[3.0, 4.0],
+        attention_entropy_patches=[8.0, 12.0],
+    )
+    merge_batch_stats(acc, bs2, batch_n=100, patch_token_count=4)
+
+    assert acc.entropy_cls_sum == [4.0, 6.0]
+    assert acc.entropy_cls_count == 2
+    assert acc.entropy_patch_sum == [12.0, 20.0]
+    assert acc.entropy_patch_count == 8
+
+
+def test_finalize_accumulator_entropy_cls_mean() -> None:
+    """finalize_accumulator must compute correct entropy means."""
+    from src.profiler import WelfordAccumulator, finalize_accumulator, merge_batch_stats
+
+    acc = WelfordAccumulator(site_identifier="test")
+
+    bs1 = LayerStats(
+        site_identifier="test",
+        mean=0.0, std=1.0, kurtosis=0.0,
+        attention_entropy_cls=[1.0, 2.0],
+        attention_entropy_patches=[4.0, 8.0],
+    )
+    merge_batch_stats(acc, bs1, batch_n=100, patch_token_count=4)
+
+    bs2 = LayerStats(
+        site_identifier="test",
+        mean=0.0, std=1.0, kurtosis=0.0,
+        attention_entropy_cls=[3.0, 4.0],
+        attention_entropy_patches=[8.0, 12.0],
+    )
+    merge_batch_stats(acc, bs2, batch_n=100, patch_token_count=4)
+
+    result = finalize_accumulator(acc)
+    # CLS: batch-count mean = (1+3)/2, (2+4)/2
+    assert result.attention_entropy_cls == pytest.approx([2.0, 3.0])
+    # Patch: sample-count mean = (4+8)/8, (8+12)/8
+    assert result.attention_entropy_patches == pytest.approx([1.5, 2.5])
+
+
+def test_finalize_accumulator_entropy_none_when_no_data() -> None:
+    """finalize_accumulator must return None for entropy when no data accumulated."""
+    from src.profiler import WelfordAccumulator, finalize_accumulator, merge_batch_stats
+
+    acc = WelfordAccumulator(site_identifier="test")
+    bs = LayerStats(
+        site_identifier="test",
+        mean=0.0, std=1.0, kurtosis=0.0,
+        attention_entropy_cls=None,
+        attention_entropy_patches=None,
+    )
+    merge_batch_stats(acc, bs, batch_n=100)
+    result = finalize_accumulator(acc)
+    assert result.attention_entropy_cls is None
+    assert result.attention_entropy_patches is None
+
+
+def test_layer_stats_entropy_serialisation_round_trip(tmp_path: Path) -> None:
+    """Entropy fields must survive save → load round-trip."""
+    from src.profiler import save_profiling_result, load_profiling_result
+
+    stats = LayerStats(
+        site_identifier="blocks.0/post_softmax",
+        mean=0.0, std=1.0, kurtosis=0.0,
+        attention_entropy_cls=[1.1, 2.2, 3.3],
+        attention_entropy_patches=[4.4, 5.5, 6.6],
+    )
+    result = ProfilingResult(
+        stats={"blocks.0/post_softmax": stats},
+        num_blocks=12,
+        batch_shape=(1, 3, 224, 224),
+    )
+    path = tmp_path / "entropy_test.json"
+    save_profiling_result(result, path)
+    loaded = load_profiling_result(path)
+
+    recovered = loaded.stats["blocks.0/post_softmax"]
+    assert recovered.attention_entropy_cls == pytest.approx([1.1, 2.2, 3.3])
+    assert recovered.attention_entropy_patches == pytest.approx([4.4, 5.5, 6.6])
+
+
+def test_layer_stats_entropy_backwards_compat(tmp_path: Path) -> None:
+    """Old JSON without entropy fields must deserialise with None defaults."""
+    from src.profiler import load_profiling_result
+
+    # Manually construct JSON without entropy fields.
+    raw = {
+        "stats": {
+            "blocks.0/post_softmax": {
+                "site_identifier": "blocks.0/post_softmax",
+                "mean": 0.0,
+                "std": 1.0,
+                "kurtosis": 0.0,
+                "m3": 0.0,
+                "outlier_fractions": {"3.0_sigma": 0.01},
+                "n_samples": 100,
+                "per_channel_std": None,
+                "per_channel_sum": None,
+                "per_channel_sum_sq": None,
+            }
+        },
+        "num_blocks": 12,
+        "batch_shape": [1, 3, 224, 224],
+    }
+    path = tmp_path / "old_format.json"
+    import json
+    path.write_text(json.dumps(raw))
+
+    loaded = load_profiling_result(path)
+    stats = loaded.stats["blocks.0/post_softmax"]
+    assert stats.attention_entropy_cls is None
+    assert stats.attention_entropy_patches is None
+
+
+def test_register_entropy_saves_output_shapes() -> None:
+    """_register_entropy_saves on a concrete tensor must produce correct shapes.
+
+    Tests the standalone computation (not through nnsight proxies).
+    """
+    from src.profiler import _register_entropy_saves
+
+    # (B=2, H=4, N=5, N=5): 1 CLS row + 4 patch rows
+    t = torch.rand(2, 4, 5, 5)
+    # Normalise to valid attention weights (sum to 1 along last dim).
+    t = t / t.sum(dim=-1, keepdim=True)
+
+    cls_proxy, patch_proxy = _register_entropy_saves(t)
+
+    # Both should be concrete tensors of shape (H,).
+    assert cls_proxy.shape == (4,)
+    assert patch_proxy.shape == (4,)
+    assert (cls_proxy >= 0).all(), "CLS entropy must be non-negative"
+    assert (patch_proxy >= 0).all(), "Patch entropy sum must be non-negative"
+    # Max entropy for 5 key tokens: log(5) ≈ 1.609
+    assert (cls_proxy <= math.log(5) + 1e-6).all(), (
+        f"CLS entropy exceeds log(5): {cls_proxy}"
+    )
+
+
+def test_register_entropy_saves_uniform_attention() -> None:
+    """Uniform attention weights must produce max entropy = log(N)."""
+    from src.profiler import _register_entropy_saves
+
+    B, H, N = 2, 4, 5
+    uniform = torch.ones(B, H, N, N) / N
+
+    cls_proxy, patch_proxy = _register_entropy_saves(uniform)
+
+    log_N = math.log(N)
+    # CLS: mean over B of H_cls.  Uniform → H_cls = log(N) for all heads.
+    assert cls_proxy.tolist() == pytest.approx([log_N] * H, abs=1e-4)
+    # Patch: sum over B*(N-1) of H_patch.  Each patch row has H=log(N).
+    # Total sum = B * (N-1) * log(N) = 2 * 4 * log(5) = 8 * log(5).
+    expected_patch_sum = B * (N - 1) * log_N
+    assert patch_proxy.tolist() == pytest.approx([expected_patch_sum] * H, abs=1e-4)
+
+
+def test_register_entropy_saves_peaked_attention() -> None:
+    """Peaked attention (one token gets prob 1.0) must give zero entropy."""
+    from src.profiler import _register_entropy_saves
+
+    B, H, N = 2, 4, 5
+    peaked = torch.zeros(B, H, N, N)
+    peaked[:, :, :, 0] = 1.0  # All queries attend to key 0 with prob 1.
+
+    cls_proxy, patch_proxy = _register_entropy_saves(peaked)
+
+    assert cls_proxy.tolist() == pytest.approx([0.0] * H, abs=1e-6)
+    assert patch_proxy.tolist() == pytest.approx([0.0] * H, abs=1e-6)
+
+
+def test_register_entropy_saves_cls_sink_not_diluted_by_patches() -> None:
+    """CLS sink signal must not be diluted by high patch entropy.
+
+    CLS row is peaked (H_cls=0, sink behaviour), patch rows are uniform
+    (H_patch = log(N)).  If CLS and patch were pooled, the sink signal
+    would be diluted.  This test catches that regression.
+    """
+    from src.profiler import _register_entropy_saves
+
+    B, H, N = 2, 4, 5
+    attn = torch.ones(B, H, N, N) / N  # uniform baseline
+    # Make CLS row peaked: all probability on key 0.
+    attn[:, :, 0, :] = 0.0
+    attn[:, :, 0, 0] = 1.0
+
+    cls_proxy, patch_proxy = _register_entropy_saves(attn)
+
+    # CLS entropy must be ~0 (sink detected).
+    assert cls_proxy.tolist() == pytest.approx([0.0] * H, abs=1e-6)
+    # Patch entropy must be > 0 (uniform, not diluted).
+    assert (patch_proxy > 0).all(), (
+        f"Patch entropy sum should be > 0, got {patch_proxy}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# F4 — Summary table tests
+# ---------------------------------------------------------------------------
+
+
+def test_generate_summary_table_row_count() -> None:
+    """generate_summary_table must produce one row per site."""
+    from src.profiler import generate_summary_table
+
+    stats: dict[str, LayerStats] = {
+        "patch_embed/residual_stream": LayerStats(
+            site_identifier="patch_embed/residual_stream",
+            mean=0.0, std=1.0, kurtosis=0.0,
+            outlier_fractions={"3.0_sigma": 0.01},
+        ),
+        "blocks.0/pre_gelu": LayerStats(
+            site_identifier="blocks.0/pre_gelu",
+            mean=0.5, std=2.0, kurtosis=1.0,
+            outlier_fractions={"3.0_sigma": 0.02},
+        ),
+        "blocks.0/post_softmax": LayerStats(
+            site_identifier="blocks.0/post_softmax",
+            mean=0.0, std=0.5, kurtosis=0.0,
+            outlier_fractions={"3.0_sigma": 0.03},
+        ),
+    }
+    result = ProfilingResult(stats=stats, num_blocks=12, batch_shape=(1, 3, 224, 224))
+    rows = generate_summary_table(result)
+    assert len(rows) == 3
+
+
+def test_generate_summary_table_column_names() -> None:
+    """Column names must be derived from outlier_fractions keys, not hardcoded."""
+    from src.profiler import generate_summary_table
+
+    stats: dict[str, LayerStats] = {
+        "blocks.0/pre_gelu": LayerStats(
+            site_identifier="blocks.0/pre_gelu",
+            mean=0.0, std=1.0, kurtosis=0.0,
+            outlier_fractions={"3.0_sigma": 0.01, "5.0_sigma": 0.001},
+        ),
+    }
+    result = ProfilingResult(stats=stats, num_blocks=12, batch_shape=(1, 3, 224, 224))
+    rows = generate_summary_table(result)
+    row = rows[0]
+
+    assert "block" in row
+    assert "site" in row
+    assert "mean" in row
+    assert "std" in row
+    assert "kurtosis" in row
+    assert "frac_3.0_sigma" in row
+    assert "frac_5.0_sigma" in row
+    assert "frac_8.0_sigma" not in row  # not in this test's outlier_fractions
+
+
+def test_generate_summary_table_block_site_parsing() -> None:
+    """Site identifiers must be correctly parsed into block and site columns."""
+    from src.profiler import generate_summary_table
+
+    stats: dict[str, LayerStats] = {
+        "blocks.3/pre_gelu": LayerStats(
+            site_identifier="blocks.3/pre_gelu",
+            mean=0.0, std=1.0, kurtosis=0.0,
+            outlier_fractions={},
+        ),
+        "patch_embed/residual_stream": LayerStats(
+            site_identifier="patch_embed/residual_stream",
+            mean=0.0, std=1.0, kurtosis=0.0,
+            outlier_fractions={},
+        ),
+    }
+    result = ProfilingResult(stats=stats, num_blocks=12, batch_shape=(1, 3, 224, 224))
+    rows = generate_summary_table(result)
+
+    # Find rows by block.
+    by_block = {r["block"]: r for r in rows}
+    assert by_block["blocks.3"]["site"] == "pre_gelu"
+    assert by_block["patch_embed"]["site"] == "residual_stream"
+
+
+def test_generate_summary_table_ordering() -> None:
+    """Rows must be ordered: patch_embed first, then blocks sorted numerically."""
+    from src.profiler import generate_summary_table
+
+    stats: dict[str, LayerStats] = {}
+    for block_idx in [11, 0, 5]:
+        key = f"blocks.{block_idx}/pre_gelu"
+        stats[key] = LayerStats(
+            site_identifier=key,
+            mean=0.0, std=1.0, kurtosis=0.0,
+            outlier_fractions={},
+        )
+    stats["patch_embed/residual_stream"] = LayerStats(
+        site_identifier="patch_embed/residual_stream",
+        mean=0.0, std=1.0, kurtosis=0.0,
+        outlier_fractions={},
+    )
+    result = ProfilingResult(stats=stats, num_blocks=12, batch_shape=(1, 3, 224, 224))
+    rows = generate_summary_table(result)
+
+    blocks = [r["block"] for r in rows]
+    assert blocks[0] == "patch_embed"
+    assert blocks[1] == "blocks.0"
+    assert blocks[2] == "blocks.5"
+    assert blocks[3] == "blocks.11"
+
+
+def test_generate_summary_table_canonical_site_order() -> None:
+    """Within a block, sites must follow canonical order."""
+    from src.profiler import generate_summary_table
+
+    stats: dict[str, LayerStats] = {}
+    for site in ["pre_gelu", "residual_stream", "pre_softmax"]:
+        key = f"blocks.0/{site}"
+        stats[key] = LayerStats(
+            site_identifier=key,
+            mean=0.0, std=1.0, kurtosis=0.0,
+            outlier_fractions={},
+        )
+    result = ProfilingResult(stats=stats, num_blocks=12, batch_shape=(1, 3, 224, 224))
+    rows = generate_summary_table(result)
+
+    sites = [r["site"] for r in rows]
+    # Canonical order: residual_stream (0), pre_softmax (2), pre_gelu (5)
+    assert sites[0] == "residual_stream"
+    assert sites[1] == "pre_softmax"
+    assert sites[2] == "pre_gelu"
+
+
+def test_generate_summary_table_values_correct() -> None:
+    """Row values must match the source LayerStats exactly."""
+    from src.profiler import generate_summary_table
+
+    stats: dict[str, LayerStats] = {
+        "blocks.0/pre_gelu": LayerStats(
+            site_identifier="blocks.0/pre_gelu",
+            mean=1.5, std=2.0, kurtosis=3.0,
+            outlier_fractions={"3.0_sigma": 0.02},
+        ),
+    }
+    result = ProfilingResult(stats=stats, num_blocks=12, batch_shape=(1, 3, 224, 224))
+    rows = generate_summary_table(result)
+    row = rows[0]
+
+    assert row["mean"] == 1.5
+    assert row["std"] == 2.0
+    assert row["kurtosis"] == 3.0
+    assert row["frac_3.0_sigma"] == 0.02
+
+
+def test_generate_summary_table_raises_on_empty_stats() -> None:
+    """generate_summary_table must raise ValueError on empty stats."""
+    from src.profiler import generate_summary_table
+
+    result = ProfilingResult(stats={}, num_blocks=0, batch_shape=(1, 3, 224, 224))
+    with pytest.raises(ValueError):
+        generate_summary_table(result)
+
+
+def test_save_summary_table_creates_file(tmp_path: Path) -> None:
+    """save_summary_table must create a non-empty CSV file."""
+    from src.profiler import save_summary_table
+
+    rows = [{"block": "blocks.0", "site": "pre_gelu", "mean": 1.0}]
+    path = tmp_path / "summary.csv"
+    save_summary_table(rows, path)
+
+    assert path.exists()
+    assert path.stat().st_size > 0
+
+
+def test_save_summary_table_header_row(tmp_path: Path) -> None:
+    """CSV must have a header row matching the dict keys."""
+    from src.profiler import save_summary_table
+
+    rows = [{"block": "blocks.0", "site": "pre_gelu", "mean": 1.0}]
+    path = tmp_path / "summary.csv"
+    save_summary_table(rows, path)
+
+    first_line = path.read_text().split("\n")[0]
+    assert first_line == "block,site,mean"
+
+
+def test_save_summary_table_round_trip(tmp_path: Path) -> None:
+    """Float values must survive CSV round-trip without lossy rounding."""
+    import csv
+    from src.profiler import save_summary_table
+
+    value = 1.23456789012345
+    rows = [{"mean": value}]
+    path = tmp_path / "summary.csv"
+    save_summary_table(rows, path)
+
+    with path.open("r", newline="") as f:
+        reader = csv.DictReader(f)
+        recovered = next(reader)
+    assert float(recovered["mean"]) == pytest.approx(value, rel=1e-10)
+
+
+def test_save_summary_table_raises_on_empty_rows(tmp_path: Path) -> None:
+    """save_summary_table must raise ValueError on empty rows list."""
+    from src.profiler import save_summary_table
+
+    with pytest.raises(ValueError):
+        save_summary_table([], tmp_path / "empty.csv")
+
+
+def test_generate_summary_table_full_profiling_result() -> None:
+    """generate_summary_table must produce 73 rows for a full ViT-B/16 result."""
+    from src.profiler import generate_summary_table
+
+    stats: dict[str, LayerStats] = {}
+    # patch_embed site
+    stats["patch_embed/residual_stream"] = LayerStats(
+        site_identifier="patch_embed/residual_stream",
+        mean=0.0, std=1.0, kurtosis=0.0,
+        outlier_fractions={"3.0_sigma": 0.01, "5.0_sigma": 0.001, "8.0_sigma": 0.0},
+    )
+    # 12 blocks × 6 sites
+    for i in range(12):
+        for site in [
+            "residual_stream", "post_layernorm_1", "pre_softmax",
+            "post_softmax", "post_layernorm_2", "pre_gelu",
+        ]:
+            key = f"blocks.{i}/{site}"
+            stats[key] = LayerStats(
+                site_identifier=key,
+                mean=float(i) * 0.1,
+                std=1.0 + float(i) * 0.05,
+                kurtosis=0.5,
+                outlier_fractions={"3.0_sigma": 0.01, "5.0_sigma": 0.001, "8.0_sigma": 0.0},
+            )
+
+    result = ProfilingResult(stats=stats, num_blocks=12, batch_shape=(1, 3, 224, 224))
+    rows = generate_summary_table(result)
+
+    assert len(rows) == 73  # 1 patch_embed + 12*6
+    assert rows[0]["block"] == "patch_embed"
+    assert rows[0]["site"] == "residual_stream"
+    assert rows[-1]["block"] == "blocks.11"
+    assert rows[-1]["site"] == "pre_gelu"

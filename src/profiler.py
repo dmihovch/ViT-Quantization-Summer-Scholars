@@ -5,6 +5,17 @@ It wraps a ``timm`` ``VisionTransformer`` with ``nnsight.NNsight`` and collects
 activation statistics at six sites across every encoder block in a single
 forward pass, without retaining any full activation tensors in memory.
 
+Key references:
+- Pébay (2008) SAND2008-6212: parallel higher-moments merge (M2, M3, M4).
+- Zhai et al. (2023) ICML, arXiv:2303.06296: attention entropy collapse.
+- Maisonnave et al. (2025) arXiv:2508.16311: CLS/patch entropy separation.
+- Bondarenko et al. (2021) arXiv:2109.12948: transformer quantization challenges.
+- Dettmers et al. (2022) NeurIPS, arXiv:2208.07339: LLM.int8() outlier handling.
+- Xiao et al. (2023) ICML, arXiv:2211.10438: SmoothQuant.
+- Wei et al. (2022) NeurIPS (Spotlight), arXiv:2209.13325: outlier suppression.
+
+See ``docs/CITATIONS.md`` for full bibliographic details.
+
 Measurement sites per block
 ---------------------------
 residual_stream
@@ -103,6 +114,16 @@ class LayerStats:
     per_channel_std: list[float] | None = None
     per_channel_sum: list[float] | None = None
     per_channel_sum_sq: list[float] | None = None
+    attention_entropy_cls: list[float] | None = None
+    # Per-head Shannon entropy (nats) of the CLS query's attention distribution,
+    # averaged over the batch dimension only.  Shape: [num_heads].
+    # None for all sites except post_softmax.
+    # Cite: Maisonnave et al. 2025 (arXiv:2508.16311); Mali 2025 (arXiv:2511.18925).
+    attention_entropy_patches: list[float] | None = None
+    # Per-head mean Shannon entropy (nats) of patch query attention distributions,
+    # averaged over batch and all N-1 patch query rows (rows 1..N-1).
+    # Shape: [num_heads].  None for all sites except post_softmax.
+    # Cite: Maisonnave et al. 2025; Lee & Kim 2025 (10.1109/isocc66390.2025.11329950).
 
 
 @dataclass
@@ -132,6 +153,12 @@ class WelfordAccumulator:
     Implements exact global statistics via the Pébay (2008) parallel
     higher-moments formula for M2, M3, and M4, enabling exact kurtosis
     without any per-batch centring approximation.
+
+    Reference: P. Pébay, "Formulas for Robust, One-Pass Parallel Computation
+    of Covariances and Arbitrary-Order Statistical Moments," Sandia National
+    Laboratories, Technical Report SAND2008-6212, 2008.
+    Eq. (3.1)-(3.4) provide the exact parallel merge for M2, M3, M4.
+    The Chan et al. (1983) parallel formula for M2 is a special case.
 
     All Mk values are **sums** (not means): ``Mk = Σ(x_i − μ)^k``.
 
@@ -165,6 +192,15 @@ class WelfordAccumulator:
     per_channel_sum: list[float] | None = None
     per_channel_sum_sq: list[float] | None = None
     per_channel_n: int = 0
+    entropy_cls_sum: list[float] | None = None
+    # Per-head CLS entropy sum across batches; shape [H].
+    # Each batch contributes its batch-mean (not a raw sum).
+    entropy_cls_count: int = 0
+    # Number of batches contributing to entropy_cls_sum.
+    entropy_patch_sum: list[float] | None = None
+    # Per-head patch entropy sum (raw sum over B*(N-1) tokens) across all batches.
+    entropy_patch_count: int = 0
+    # Total number of (B * (N-1)) patch-token samples accumulated.
 
 
 def _site_n(
@@ -205,6 +241,7 @@ def merge_batch_stats(
     acc: WelfordAccumulator,
     batch_stats: LayerStats,
     batch_n: int,
+    patch_token_count: int = 0,
 ) -> None:
     """Update a WelfordAccumulator with statistics from one batch.
 
@@ -222,6 +259,9 @@ def merge_batch_stats(
             Σ(x−μ)³, LayerStats.kurtosis is exact population excess kurtosis).
         batch_n: Number of scalar elements in this batch for this site.
             Use _site_n() to compute this correctly.
+        patch_token_count: For post_softmax sites, the number of patch
+            token samples in this batch: ``B * (N - 1)``.  Default 0 for
+            non-attention sites (ignored).
 
     Raises:
         ValueError: If batch_n <= 0.
@@ -302,6 +342,27 @@ def merge_batch_stats(
                     acc.per_channel_sum_sq[c] += b_per_ch_sum_sq[c]
                 acc.per_channel_n += b_per_ch_n
 
+    # --- Attention entropy accumulation ---
+    if batch_stats.attention_entropy_cls is not None:
+        H = len(batch_stats.attention_entropy_cls)
+        if acc.entropy_cls_sum is None:
+            acc.entropy_cls_sum = list(batch_stats.attention_entropy_cls)
+            acc.entropy_cls_count = 1
+        else:
+            for h in range(H):
+                acc.entropy_cls_sum[h] += batch_stats.attention_entropy_cls[h]
+            acc.entropy_cls_count += 1
+
+    if batch_stats.attention_entropy_patches is not None:
+        H = len(batch_stats.attention_entropy_patches)
+        if acc.entropy_patch_sum is None:
+            acc.entropy_patch_sum = list(batch_stats.attention_entropy_patches)
+            acc.entropy_patch_count = patch_token_count
+        else:
+            for h in range(H):
+                acc.entropy_patch_sum[h] += batch_stats.attention_entropy_patches[h]
+            acc.entropy_patch_count += patch_token_count
+
 
 def finalize_accumulator(acc: WelfordAccumulator) -> LayerStats:
     """Convert a WelfordAccumulator to a final LayerStats.
@@ -345,6 +406,21 @@ def finalize_accumulator(acc: WelfordAccumulator) -> LayerStats:
             for s, sum_sq in zip(acc.per_channel_sum, acc.per_channel_sum_sq)
         ]
 
+    # --- Attention entropy finalization ---
+    attention_entropy_cls: list[float] | None = None
+    if acc.entropy_cls_sum is not None and acc.entropy_cls_count > 0:
+        # CLS entropy: mean of batch means (each batch contributes equally
+        # regardless of batch size, because entropy was already meaned over B
+        # inside _register_entropy_saves for the CLS row).
+        attention_entropy_cls = [s / acc.entropy_cls_count for s in acc.entropy_cls_sum]
+
+    attention_entropy_patches: list[float] | None = None
+    if acc.entropy_patch_sum is not None and acc.entropy_patch_count > 0:
+        # Patch entropy: sample-count-weighted mean across all B*(N-1) tokens.
+        attention_entropy_patches = [
+            s / acc.entropy_patch_count for s in acc.entropy_patch_sum
+        ]
+
     return LayerStats(
         site_identifier=acc.site_identifier,
         mean=acc.mean,
@@ -354,6 +430,8 @@ def finalize_accumulator(acc: WelfordAccumulator) -> LayerStats:
         outlier_fractions=outlier_fractions,
         n_samples=acc.n,
         per_channel_std=per_channel_std,
+        attention_entropy_cls=attention_entropy_cls,
+        attention_entropy_patches=attention_entropy_patches,
     )
 
 
@@ -405,9 +483,11 @@ def run_profiling_dataset_pass(
 
         for site_id, layer_stats in batch_result.stats.items():
             batch_n = _site_n(site_id, B, N, D, D_mlp, num_heads)
+            ptc = B * (N - 1) if SITE_POST_SOFTMAX in site_id else 0
             if site_id not in accumulators:
                 accumulators[site_id] = WelfordAccumulator(site_identifier=site_id)
-            merge_batch_stats(accumulators[site_id], layer_stats, batch_n)
+            merge_batch_stats(accumulators[site_id], layer_stats, batch_n,
+                              patch_token_count=ptc)
 
         num_batches += 1
         if num_batches % 10 == 0:
@@ -418,6 +498,251 @@ def run_profiling_dataset_pass(
 
     logger.info("Finalizing accumulators for %d sites.", len(accumulators))
     return {sid: finalize_accumulator(acc) for sid, acc in accumulators.items()}
+
+
+# ---------------------------------------------------------------------------
+# Global-σ outlier recount — second pass (F2)
+# ---------------------------------------------------------------------------
+
+
+def _count_outliers_in_trace(
+    tensor_proxy: Any,
+    site_id: SiteId,
+    site_params: dict[SiteId, tuple[float, float]],
+    batch_counts: dict[SiteId, dict[str, Any]],
+) -> None:
+    """Register outlier count proxies for one site inside an nnsight trace.
+
+    Computes the count of elements where |x - μ_global| > k·σ_global for
+    each k in OUTLIER_SIGMAS, using global μ and σ as Python float
+    constants (not proxies).  Only the scalar counts are saved — no raw
+    tensors are materialized in host memory.
+
+    Must be called from within a ``with wrapped_model.trace(...):`` block.
+
+    Args:
+        tensor_proxy: nnsight proxy for the activation tensor at this site.
+        site_id: Site identifier string.
+        site_params: Mapping from site_id to (global_mean, global_std).
+        batch_counts: Dict to populate with .save() proxies for each sigma
+            key.  Modified in-place.
+    """
+    if site_id not in site_params:
+        return
+    global_mean, global_std = site_params[site_id]
+    if global_std <= 0.0:
+        return
+
+    count_proxies: dict[str, Any] = {}
+    deviation = (tensor_proxy - global_mean).abs()
+    for k in OUTLIER_SIGMAS:
+        key = f"{k}_sigma"
+        # Count elements exceeding the threshold; save only the scalar sum.
+        count_proxies[key] = (deviation > k * global_std).sum().save()
+    batch_counts[site_id] = count_proxies
+
+
+def _extract_scalar(proxy: Any) -> int:
+    """Extract a scalar integer from an nnsight .save() proxy or tensor.
+
+    Handles both nnsight <0.3 proxy objects and nnsight ≥0.3 concrete tensors.
+
+    Args:
+        proxy: nnsight proxy or torch.Tensor containing a scalar count.
+
+    Returns:
+        Integer value of the scalar.
+    """
+    if isinstance(proxy, torch.Tensor):
+        return int(proxy.item())
+    if hasattr(proxy, "value") and isinstance(proxy.value, torch.Tensor):
+        return int(proxy.value.item())
+    raise TypeError(
+        f"Expected torch.Tensor or nnsight proxy with .value, got {type(proxy)}"
+    )
+
+
+def run_outlier_counting_pass(
+    wrapped_model: NNsight,
+    loader: DataLoader,
+    device: torch.device,
+    finalized_stats: dict[SiteId, LayerStats],
+) -> dict[SiteId, dict[str, float]]:
+    """Second pass: count outlier fractions relative to exact global σ.
+
+    Uses the global mean and std from finalized_stats (produced by
+    run_profiling_dataset_pass) as fixed thresholds.  For each site and each
+    batch, counts the fraction of elements where |x - μ_global| > k·σ_global
+    for k in OUTLIER_SIGMAS.  Accumulates raw counts across all batches and
+    returns the final fractions.
+
+    This corrects the per-batch σ overestimate documented in open-issues.md §10.1.
+
+    The standard practice in the quantization literature (Bondarenko et al. 2023;
+    Dettmers et al. 2022; Xiao et al. 2023; Wei et al. 2022) is to report
+    outlier fractions relative to global σ, computed in a two-pass manner.
+
+    References:
+    - Bondarenko et al. (2023), "Understanding and Overcoming the Challenges
+      of Efficient Transformer Quantization," arXiv:2109.12948.
+    - Dettmers et al. (2022), "LLM.int8(): 8-bit Matrix Multiplication for
+      Transformers at Scale," NeurIPS 2022, arXiv:2208.07339.
+    - Xiao et al. (2023), "SmoothQuant: Accurate and Efficient Post-Training
+      Quantization for Large Language Models," ICML 2023, arXiv:2211.10438.
+    - Wei et al. (2022), "Outlier Suppression: Pushing the Limit of Low-bit
+      Transformer Language Models," NeurIPS 2022 (Spotlight), arXiv:2209.13325.
+
+    Args:
+        wrapped_model: NNsight-wrapped VisionTransformer (same as Pass 1).
+        loader: DataLoader over the same dataset used in Pass 1.
+        device: Compute device.
+        finalized_stats: dict[SiteId, LayerStats] from finalize_accumulator,
+            providing exact global mean and std for each site.
+
+    Returns:
+        Mapping from site_identifier to corrected outlier_fractions dict
+        (same key format as LayerStats.outlier_fractions: "3.0_sigma", etc.).
+
+    Raises:
+        RuntimeError: If loader yields zero batches.
+    """
+    inner_model = wrapped_model._model
+
+    # Extract architecture constants.
+    N: int = inner_model.patch_embed.num_patches + 1
+    D: int = inner_model.embed_dim
+    num_heads: int = inner_model.blocks[0].attn.num_heads
+    D_mlp: int = inner_model.blocks[0].mlp.fc1.out_features
+
+    # Build a mapping from site_id to (global_mean, global_std).
+    site_params: dict[SiteId, tuple[float, float]] = {}
+    for site_id, stats in finalized_stats.items():
+        site_params[site_id] = (stats.mean, stats.std)
+
+    # Accumulate raw outlier counts per site per sigma threshold.
+    outlier_counts: dict[SiteId, dict[str, int]] = {
+        sid: {f"{k}_sigma": 0 for k in OUTLIER_SIGMAS}
+        for sid in finalized_stats
+    }
+    total_elements: dict[SiteId, int] = {sid: 0 for sid in finalized_stats}
+
+    num_batches: int = 0
+
+    for images, _ in loader:
+        images = images.to(device)
+        B: int = images.shape[0]
+
+        # Compute outlier counts inside the nnsight trace to avoid
+        # materializing full activation tensors in host memory.
+        # For each site and each sigma threshold, we save only the
+        # scalar count of elements exceeding k·σ_global.
+        batch_counts: dict[SiteId, dict[str, Any]] = {}
+
+        try:
+            with wrapped_model.trace(images):
+                for i in range(len(inner_model.blocks)):
+                    block = wrapped_model.blocks[i]
+                    attn = block.attn
+                    block_attn = inner_model.blocks[i].attn
+
+                    # --- residual_stream ---
+                    residual_label: SiteId = (
+                        "patch_embed/residual_stream" if i == 0
+                        else f"blocks.{i - 1}/residual_stream"
+                    )
+                    _count_outliers_in_trace(
+                        block.norm1.input, residual_label,
+                        site_params, batch_counts,
+                    )
+
+                    # --- post_layernorm_1 ---
+                    _count_outliers_in_trace(
+                        block.norm1.output,
+                        f"blocks.{i}/{SITE_POST_LAYERNORM_1}",
+                        site_params, batch_counts,
+                    )
+
+                    # --- pre_softmax (reconstruct from qkv) ---
+                    qkv = attn.qkv.output
+                    b_n_3hd = qkv.reshape(
+                        qkv.shape[0], qkv.shape[1], 3,
+                        block_attn.num_heads, block_attn.head_dim,
+                    )
+                    b_n_3hd = b_n_3hd.permute(2, 0, 3, 1, 4)
+                    q = b_n_3hd[0] * block_attn.scale
+                    k = b_n_3hd[1]
+                    logits = q @ k.transpose(-2, -1)
+                    _count_outliers_in_trace(
+                        logits, f"blocks.{i}/{SITE_PRE_SOFTMAX}",
+                        site_params, batch_counts,
+                    )
+
+                    # --- post_softmax ---
+                    _count_outliers_in_trace(
+                        attn.attn_drop.input,
+                        f"blocks.{i}/{SITE_POST_SOFTMAX}",
+                        site_params, batch_counts,
+                    )
+
+                    # --- post_layernorm_2 ---
+                    _count_outliers_in_trace(
+                        block.norm2.output,
+                        f"blocks.{i}/{SITE_POST_LAYERNORM_2}",
+                        site_params, batch_counts,
+                    )
+
+                    # --- pre_gelu ---
+                    _count_outliers_in_trace(
+                        block.mlp.act.input,
+                        f"blocks.{i}/{SITE_PRE_GELU}",
+                        site_params, batch_counts,
+                    )
+
+        except Exception as exc:
+            raise ProfilingError(
+                f"Outlier recount trace failed: {exc}"
+            ) from exc
+
+        # Trace exited — accumulate counts.
+        for site_id, count_proxies in batch_counts.items():
+            if site_id not in site_params:
+                continue
+            _, global_std = site_params[site_id]
+            if global_std <= 0.0:
+                continue
+            for key, proxy in count_proxies.items():
+                val = _extract_scalar(proxy)
+                outlier_counts[site_id][key] += int(val)
+            # Track total elements from the first sigma key's count proxy
+            # (all proxies for a site have the same tensor shape).
+            # We estimate n from the first batch's known architecture.
+            # Actually, we track n via _site_n below.
+
+        # Track total elements per site using architecture constants.
+        for site_id in site_params:
+            if site_id in batch_counts:
+                batch_n = _site_n(site_id, B, N, D, D_mlp, num_heads)
+                total_elements[site_id] += batch_n
+
+        num_batches += 1
+        if num_batches % 10 == 0:
+            logger.info("Outlier recount: %d batches...", num_batches)
+
+    if num_batches == 0:
+        raise RuntimeError("DataLoader yielded zero batches; cannot count outliers.")
+
+    # Compute final fractions.
+    result: dict[SiteId, dict[str, float]] = {}
+    for site_id in finalized_stats:
+        n = total_elements[site_id]
+        if n == 0:
+            result[site_id] = {f"{k}_sigma": 0.0 for k in OUTLIER_SIGMAS}
+        else:
+            result[site_id] = {
+                key: count / n for key, count in outlier_counts[site_id].items()
+            }
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +768,10 @@ class _StatsSavers:
         kurtosis: Saved excess-kurtosis proxy.
         outlier_proxies: Ordered list of saved outlier-fraction proxies,
             one per entry in OUTLIER_SIGMAS.
+        entropy_cls_proxy: Saved CLS entropy proxy (shape (H,)); non-None
+            for post_softmax sites only.
+        entropy_patch_sum_proxy: Saved patch entropy sum proxy (shape (H,));
+            non-None for post_softmax sites only.
     """
 
     site_identifier: SiteId
@@ -454,6 +783,8 @@ class _StatsSavers:
     n_samples: int
     per_channel_sum: Any = None
     per_channel_sum_sq: Any = None
+    entropy_cls_proxy: Any = None
+    entropy_patch_sum_proxy: Any = None
 
 
 def _register_stat_saves(
@@ -539,6 +870,61 @@ def _register_stat_saves(
     )
 
 
+def _register_entropy_saves(
+    attn_weight_proxy: Any,
+) -> tuple[Any, Any]:
+    """Compute per-head Shannon entropy for CLS and patch queries separately.
+
+    Follows the literature convention of treating CLS-to-all attention and
+    patch-to-patch attention as distinct distributions.
+    Ref: Maisonnave et al. 2025 (arXiv:2508.16311);
+         Mali 2025 (arXiv:2511.18925).
+
+    The Shannon entropy formula H = -Σ p_j log(p_j) follows Zhai et al. (2023,
+    ICML, arXiv:2303.06296), who define attention entropy collapse as a
+    diagnostic for transformer training stability.
+
+    For each head h and query position i, entropy is:
+        H(i, h) = -Σ_{j=1..N} p_{h,i,j} · log(p_{h,i,j} + ε)
+    where ε = 1e-8 is a proxy NaN guard (not a bias-correction).
+
+    When called inside an nnsight trace context, returns .save() proxies.
+    When called with a concrete torch.Tensor, returns concrete tensors directly
+    (for standalone testing without nnsight).
+
+    Args:
+        attn_weight_proxy: Proxy or tensor of shape (B, H, N, N).
+            Row 0 of the query (dim 2) is the CLS token.
+            Rows 1..N-1 are patch token queries.
+
+    Returns:
+        (cls_entropy_proxy, patch_entropy_sum_proxy) each of shape (H,).
+        cls_entropy_proxy:   mean over B of H(query=CLS, head=h).
+        patch_entropy_sum_proxy: sum over B×(N-1) of H(query=patch_i, head=h).
+    """
+    eps = 1e-8  # proxy NaN guard only; not a bias-correction
+
+    # Per-query entropy: -(p * log(p + eps)).sum(dim=-1) → shape (B, H, N)
+    per_query_entropy = -(attn_weight_proxy * (attn_weight_proxy + eps).log()).sum(dim=-1)
+
+    # CLS row: query index 0 → shape (B, H)
+    cls_entropy = per_query_entropy[:, :, 0]          # (B, H)
+    # Mean over batch → (H,)
+    cls_entropy_mean = cls_entropy.mean(dim=0)         # (H,)
+
+    # Patch rows: query indices 1..N-1 → shape (B, H, N-1)
+    patch_entropy = per_query_entropy[:, :, 1:]        # (B, H, N-1)
+    # Sum across batch and patch queries, track total count separately.
+    # Use sum (not mean) so the accumulator can do sample-count weighting.
+    patch_entropy_sum = patch_entropy.sum(dim=(0, 2))  # (H,)
+
+    # If we're inside an nnsight trace, .save() the results.
+    # If called with concrete tensors (standalone testing), return as-is.
+    if hasattr(cls_entropy_mean, "save"):
+        return cls_entropy_mean.save(), patch_entropy_sum.save()
+    return cls_entropy_mean, patch_entropy_sum
+
+
 def _finalize_stats(savers: _StatsSavers) -> LayerStats:
     """Convert saved proxy values to a concrete :class:`LayerStats`.
 
@@ -590,6 +976,18 @@ def _finalize_stats(savers: _StatsSavers) -> LayerStats:
             var_ch = sum_sq_ch / per_ch_n - mean_ch**2
             std_ch = var_ch.clamp(min=0.0).sqrt()
             per_channel_std = std_ch.tolist()
+
+    # --- Attention entropy finalization ---
+    attention_entropy_cls: list[float] | None = None
+    attention_entropy_patches: list[float] | None = None
+    if savers.entropy_cls_proxy is not None:
+        attention_entropy_cls = _val(savers.entropy_cls_proxy).tolist()
+    if savers.entropy_patch_sum_proxy is not None:
+        # attention_entropy_patches carries the raw per-batch sum when
+        # produced by profile_vit; it carries the global mean when produced
+        # by finalize_accumulator.  The field name is reused for both stages.
+        attention_entropy_patches = _val(savers.entropy_patch_sum_proxy).tolist()
+
     return LayerStats(
         site_identifier=savers.site_identifier,
         mean=float(_val(savers.mean).item()),
@@ -601,6 +999,8 @@ def _finalize_stats(savers: _StatsSavers) -> LayerStats:
         per_channel_std=per_channel_std,
         per_channel_sum=per_channel_sum,
         per_channel_sum_sq=per_channel_sum_sq,
+        attention_entropy_cls=attention_entropy_cls,
+        attention_entropy_patches=attention_entropy_patches,
     )
 
 
@@ -770,11 +1170,15 @@ def profile_vit(
 
                 # --- post_softmax ---
                 # attn_drop receives the post-softmax attention weights.
-                all_savers.append(
-                    _register_stat_saves(
-                        attn.attn_drop.input, f"blocks.{i}/{SITE_POST_SOFTMAX}", n_attn
-                    )
+                # Capture the proxy once to avoid double .input access.
+                attn_input_proxy = attn.attn_drop.input
+                ps_savers = _register_stat_saves(
+                    attn_input_proxy, f"blocks.{i}/{SITE_POST_SOFTMAX}", n_attn
                 )
+                # Register entropy saves on the same proxy.
+                ps_savers.entropy_cls_proxy, ps_savers.entropy_patch_sum_proxy = \
+                    _register_entropy_saves(attn_input_proxy)
+                all_savers.append(ps_savers)
 
                 # --- post_layernorm_2 (pre-MLP LN output) ---
                 all_savers.append(
@@ -918,6 +1322,140 @@ def histogram_profile_vit(
         ) from exc
 
     return {k: v.cpu() for k, v in raw.items()}
+
+
+# ---------------------------------------------------------------------------
+# Summary table generation (F4)
+# ---------------------------------------------------------------------------
+
+# Canonical site order for row sorting within each block.
+_CANONICAL_SITE_ORDER: dict[str, int] = {
+    SITE_RESIDUAL_STREAM: 0,
+    SITE_POST_LAYERNORM_1: 1,
+    SITE_PRE_SOFTMAX: 2,
+    SITE_POST_SOFTMAX: 3,
+    SITE_POST_LAYERNORM_2: 4,
+    SITE_PRE_GELU: 5,
+}
+
+
+def generate_summary_table(
+    result: ProfilingResult,
+) -> list[dict[str, object]]:
+    """Convert a ProfilingResult to a flat list of row dicts for CSV export.
+
+    Each row corresponds to one (block, site) pair. Columns: block, site,
+    mean, std, kurtosis, and one column per outlier-fraction key in
+    LayerStats.outlier_fractions (column names prefixed with 'frac_').
+
+    Rows are ordered by block (patch_embed first, then 0..11) then by
+    canonical site order within each block.
+
+    Column names for outlier fraction keys are derived from the keys in the
+    first non-empty outlier_fractions dict encountered. Never hardcode sigma
+    values; let the key names drive the column names.
+
+    Args:
+        result: Completed ProfilingResult (from run_profiling_dataset_pass
+            or loaded via load_profiling_result).
+
+    Returns:
+        List of row dicts ordered as described above.
+        Suitable for passing to csv.DictWriter.
+
+    Raises:
+        ValueError: If result.stats is empty.
+    """
+    if not result.stats:
+        raise ValueError("ProfilingResult.stats is empty; cannot generate summary table.")
+
+    # Discover outlier fraction column names from the first LayerStats that
+    # has a non-empty outlier_fractions dict.
+    frac_keys: list[str] = []
+    for stats in result.stats.values():
+        if stats.outlier_fractions:
+            frac_keys = sorted(stats.outlier_fractions.keys())
+            break
+
+    # Parse site identifiers into (block_key, site_name) pairs.
+    parsed: list[tuple[str, str, str, LayerStats]] = []
+    for site_id, stats in result.stats.items():
+        # Split on "/" — max 1 split.
+        parts = site_id.split("/", 1)
+        if len(parts) == 2:
+            block_key, site_name = parts[0], parts[1]
+        else:
+            block_key, site_name = site_id, ""
+        parsed.append((block_key, site_name, site_id, stats))
+
+    # Sort key: (block_sort_key, site_sort_key).
+    def _block_sort_key(block_key: str) -> tuple[int, int | str]:
+        """Return sort key for a block prefix.
+
+        patch_embed sorts first (0, 0).
+        blocks.N sorts by numeric N (1, N).
+        Unknown prefixes sort last (2, block_key).
+        """
+        if block_key == "patch_embed":
+            return (0, 0)
+        if block_key.startswith("blocks."):
+            try:
+                n = int(block_key.split(".", 1)[1])
+                return (1, n)
+            except (ValueError, IndexError):
+                pass
+        return (2, block_key)
+
+    def _site_sort_key(site_name: str) -> int:
+        """Return sort index for a site name; unknown sites sort last."""
+        return _CANONICAL_SITE_ORDER.get(site_name, 99)
+
+    parsed.sort(key=lambda x: (_block_sort_key(x[0]), _site_sort_key(x[1])))
+
+    # Build rows.
+    rows: list[dict[str, object]] = []
+    for block_key, site_name, _site_id, stats in parsed:
+        row: dict[str, object] = {
+            "block": block_key,
+            "site": site_name,
+            "mean": stats.mean,
+            "std": stats.std,
+            "kurtosis": stats.kurtosis,
+        }
+        for fk in frac_keys:
+            col_name = f"frac_{fk}"
+            row[col_name] = stats.outlier_fractions.get(fk, "")
+        rows.append(row)
+
+    return rows
+
+
+def save_summary_table(rows: list[dict[str, object]], path: Path) -> None:
+    """Write summary table rows to a CSV file.
+
+    Creates parent directories if they do not exist.
+
+    Args:
+        rows: Non-empty output of generate_summary_table.
+        path: Destination CSV path.
+
+    Raises:
+        ValueError: If rows is empty.
+    """
+    import csv
+
+    if not rows:
+        raise ValueError("rows is empty; cannot write summary table.")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = list(rows[0].keys())
+
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="raise")
+        writer.writeheader()
+        writer.writerows(rows)
+
+    logger.info("Summary table (%d rows) written to %s", len(rows), path)
 
 
 # ---------------------------------------------------------------------------

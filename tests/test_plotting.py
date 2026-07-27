@@ -67,3 +67,52 @@ def test_plot_per_channel_std_heatmap_creates_file(tmp_path: Path) -> None:
     plot_per_channel_std_heatmap(stds, output_path)
     assert output_path.exists(), "Expected heatmap PNG was not created."
     assert output_path.stat().st_size > 0, "Heatmap PNG is empty."
+
+
+# ---------------------------------------------------------------------------
+# F3 — Attention entropy heatmap tests
+# ---------------------------------------------------------------------------
+
+
+def test_plot_attention_entropy_heatmap_creates_file(tmp_path: Path) -> None:
+    """plot_attention_entropy_heatmap must write a PNG file."""
+    from src.plotting import plot_attention_entropy_heatmap
+
+    entropies: dict[str, list[float]] = {
+        "blocks.0/post_softmax": [1.0, 1.5, 2.0],
+        "blocks.1/post_softmax": [0.5, 0.8, 1.2],
+    }
+    output_path = tmp_path / "entropy.png"
+    plot_attention_entropy_heatmap(entropies, output_path)
+
+    assert output_path.exists(), "Expected entropy heatmap PNG was not created."
+    assert output_path.stat().st_size > 0, "Entropy heatmap PNG is empty."
+
+
+def test_plot_attention_entropy_heatmap_title_in_file(tmp_path: Path) -> None:
+    """plot_attention_entropy_heatmap must accept a title parameter without error."""
+    from src.plotting import plot_attention_entropy_heatmap
+
+    entropies: dict[str, list[float]] = {
+        "blocks.0/post_softmax": [1.0, 1.5, 2.0],
+    }
+    output_path = tmp_path / "entropy_titled.png"
+    plot_attention_entropy_heatmap(
+        entropies, output_path, title="CLS entropy",
+    )
+
+    assert output_path.exists(), "Entropy heatmap with title was not created."
+    assert output_path.stat().st_size > 0, "Entropy heatmap with title is empty."
+
+
+def test_plot_attention_entropy_heatmap_empty_input(tmp_path: Path) -> None:
+    """plot_attention_entropy_heatmap with empty dict must not crash."""
+    from src.plotting import plot_attention_entropy_heatmap
+
+    output_path = tmp_path / "empty_entropy.png"
+    plot_attention_entropy_heatmap({}, output_path)
+
+    # Empty input: function should log a warning and not write a file.
+    assert not output_path.exists(), (
+        "Empty input should not produce a file"
+    )

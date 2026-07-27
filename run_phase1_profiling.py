@@ -71,6 +71,16 @@ def _parse_args() -> argparse.Namespace:
         help="Number of independent runs with different seeds. "
         "Results saved to output_dir/seed_{s}/ for each seed.",
     )
+    parser.add_argument(
+        "--skip-outlier-recount",
+        dest="skip_outlier_recount",
+        action="store_true",
+        help=(
+            "Skip the second-pass global-σ outlier recount. "
+            "Outlier fractions in the output JSON will be approximate (per-batch-σ). "
+            "Use only for fast iteration, not for publishable results."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -92,6 +102,7 @@ def main() -> None:
         device=get_device(),
         seed=args.seed,
         num_seeds=args.num_seeds,
+        skip_outlier_recount=args.skip_outlier_recount,
     )
     run(config)
 
