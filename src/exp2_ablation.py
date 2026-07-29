@@ -7,8 +7,8 @@ Pipeline
 --------
 1. Load the pretrained ViT-B/16 model and preprocessing transform.
 2. Load Phase 1 per-layer statistics from ``config.layer_stats_path``
-   (produced by ``hooks.save_stats``).  These provide exact global ``σ``
-   for the ``pre_gelu`` and ``residual_stream`` sites.
+   (``profiling_result.json`` produced by ``profiler.save_profiling_result``).
+   These provide exact global ``σ`` for all six measurement sites.
 3. **Sample attention-site σ:** build a single batch of
    ``config.attn_profile_num_images`` images using fixed seed
    ``config.attn_profile_seed``, run ``profiler.profile_vit`` on that

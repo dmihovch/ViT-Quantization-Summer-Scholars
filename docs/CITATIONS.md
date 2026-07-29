@@ -4,8 +4,25 @@
 > formula, algorithm, and software dependency used across the entire project.
 > Nothing goes uncited.
 >
-> **Last updated:** 2026-07-27 (Phase 1 fixes complete; Phase 2/3 references
-> included for completeness).
+> **Last updated:** 2026-07-28 (Added 🔗 links and ☐ researcher sign-off checkboxes
+to all citations; searched arXiv for all entries; flagged entries with no arXiv
+preprint; fixed Ref [2] missing arXiv ID; flagged suspicious Yadav & Das DOI).
+
+---
+
+## ⚠️ Requirements for every citation
+
+**Two things MUST be present for every citation in this file.** No exceptions.
+
+1. **🔗 Direct link** — Every citation must include a URL. Prefer arXiv
+   (`https://arxiv.org/abs/XXXX.XXXXX`) when available. Fall back to DOI
+   (`https://doi.org/...`), publisher page, or OpenReview.
+2. **☐ Researcher sign-off** — Every citation must have a checkbox
+   (`**☐ Researcher sign-off: Not yet reviewed**` →
+   `**☑ Researcher sign-off: Reviewed**`). You personally verify the source
+   before checking it off. No second-hand trust.
+
+When adding a new citation, include both before considering the entry complete.
 
 ---
 
@@ -15,9 +32,12 @@ Each entry includes:
 
 - **Short key** — used inline in code and docs (e.g. `Pébay 2008`).
 - **Full citation** — author(s), title, venue, year, DOI/arXiv.
+- **🔗 Link** — direct URL to the article.
 - **Used in** — files and specific purposes.
 - **Verification status** — ✅ verified via arXiv/DOI/publisher, or ⚠️
   preprint (not yet peer-reviewed).
+- **☐ Researcher sign-off** — checked off only after you personally read the
+  source.
 
 ---
 
@@ -29,6 +49,8 @@ Each entry includes:
 - **Full citation:** P. Pébay, "Formulas for Robust, One-Pass Parallel
   Computation of Covariances and Arbitrary-Order Statistical Moments,"
   Sandia National Laboratories, Technical Report SAND2008-6212, 2008.
+- **🔗 Link:** https://prod-ng.sandia.gov/techlib-noauth/access-control.cgi/2008/086212.pdf
+- **⚠️ No arXiv:** Sandia National Laboratories technical report — not a journal/conference paper, no arXiv preprint exists.
 - **Used in:**
   - `src/profiler.py` — `WelfordAccumulator`, `merge_batch_stats`,
     `finalize_accumulator`, `run_profiling_dataset_pass`. Eq. (3.1)-(3.4)
@@ -44,6 +66,7 @@ Each entry includes:
   - `docs/vit_profiling_framework.md` — §Per-Site Metrics, §Pipeline.
 - **Verification:** ✅ Sandia technical report; the Chan et al. (1983)
   parallel formula for M2 is a special case of this.
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ### Welford 1962 — Online algorithm for mean and variance
 
@@ -51,6 +74,8 @@ Each entry includes:
 - **Full citation:** B. P. Welford, "Note on a Method for Calculating
   Corrected Sums of Squares and Products," *Technometrics*, vol. 4, no. 3,
   pp. 419–420, 1962.
+- **🔗 Link:** https://doi.org/10.1080/00401706.1962.10490022
+- **⚠️ No arXiv:** Published in 1962 — predates arXiv by ~30 years. DOI link is the canonical source.
 - **Used in:**
   - `src/profiler.py` — `WelfordAccumulator` class name and the running
     mean/variance tracking pattern.
@@ -58,6 +83,7 @@ Each entry includes:
   - `docs/vit_profiling_framework.md` — §Per-Site Metrics.
 - **Verification:** ✅ Classic paper; the Pébay (2008) parallel merge
   generalises Welford's serial algorithm to the multi-batch setting.
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ### Dosovitskiy et al. 2021 — Vision Transformer (ViT)
 
@@ -67,11 +93,13 @@ Each entry includes:
   J. Uszkoreit, and N. Houlsby, "An Image is Worth 16x16 Words: Transformers
   for Image Recognition at Scale," in *Proc. ICLR*, 2021.
   arXiv:2010.11929.
+- **🔗 Link:** https://arxiv.org/abs/2010.11929
 - **Used in:**
   - Entire project — the target model is `vit_base_patch16_224` (ViT-B/16).
   - `src/model.py` — Model loading via `timm`.
   - `docs/NEXT-STEPS.md` — §Before Step 4b.
 - **Verification:** ✅ Published at ICLR 2021.
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ---
 
@@ -83,6 +111,7 @@ Each entry includes:
 - **Full citation:** Y. Bondarenko, M. Nagel, and T. Blankevoort,
   "Understanding and Overcoming the Challenges of Efficient Transformer
   Quantization," arXiv:2109.12948, 2021.
+- **🔗 Link:** https://arxiv.org/abs/2109.12948
 - **Used in:**
   - `src/profiler.py` — `run_outlier_counting_pass` docstring: cited as
     standard practice reference for reporting outlier fractions relative
@@ -90,6 +119,8 @@ Each entry includes:
   - `docs/NEXT-STEPS.md` — §Before Step 4b: "Studies ViT specifically
     (not LLMs). Identifies inter-channel variance and the exact
     quantization failure modes you are solving."
+- **Verification:** ⚠️ arXiv preprint (not peer-reviewed).
+- **☐ Researcher sign-off: Not yet reviewed**
 - **Verification:** ✅ arXiv:2109.12948. Preprint (not peer-reviewed).
 
 ### Dettmers et al. 2022 — LLM.int8()
@@ -98,11 +129,13 @@ Each entry includes:
 - **Full citation:** T. Dettmers, M. Lewis, Y. Belkada, and L. Zettlemoyer,
   "LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale,"
   in *Proc. NeurIPS*, 2022. arXiv:2208.07339.
+- **🔗 Link:** https://arxiv.org/abs/2208.07339
 - **Used in:**
   - `src/profiler.py` — `run_outlier_counting_pass` docstring: cited as
     part of the standard quantization literature for two-pass outlier
     counting.
 - **Verification:** ✅ Published at NeurIPS 2022.
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ### Xiao et al. 2023 — SmoothQuant
 
@@ -110,11 +143,13 @@ Each entry includes:
 - **Full citation:** G. Xiao, J. Lin, M. Seznec, H. Wu, J. Demouth, and
   S. Han, "SmoothQuant: Accurate and Efficient Post-Training Quantization
   for Large Language Models," in *Proc. ICML*, 2023. arXiv:2211.10438.
+- **🔗 Link:** https://arxiv.org/abs/2211.10438
 - **Used in:**
   - `src/profiler.py` — `run_outlier_counting_pass` docstring: cited as
     part of the standard quantization literature for two-pass outlier
     counting.
 - **Verification:** ✅ Published at ICML 2023.
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ### Wei et al. 2022 — Outlier Suppression
 
@@ -123,12 +158,14 @@ Each entry includes:
   F. Yu, and X. Liu, "Outlier Suppression: Pushing the Limit of Low-bit
   Transformer Language Models," in *Proc. NeurIPS* (Spotlight), 2022.
   arXiv:2209.13325.
+- **🔗 Link:** https://arxiv.org/abs/2209.13325
 - **Used in:**
   - `src/profiler.py` — `run_outlier_counting_pass` docstring: cited as
     part of the standard quantization literature.
   - `docs/NEXT-STEPS.md` — §Before Step 7: "Studies zeroing vs. clamping
     vs. shifting for transformer outliers."
 - **Verification:** ✅ Published at NeurIPS 2022 (Spotlight).
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ---
 
@@ -141,6 +178,7 @@ Each entry includes:
   J. Ramapuram, Y. Zhang, J. Gu, and J. Susskind, "Stabilizing Transformer
   Training by Preventing Attention Entropy Collapse," in *Proc. ICML*,
   pp. 40770–40803, PMLR, 2023. arXiv:2303.06296.
+- **🔗 Link:** https://arxiv.org/abs/2303.06296
 - **Used in:**
   - `src/profiler.py` — `_register_entropy_saves` docstring: the Shannon
     entropy formula H = -Σ p_j log(p_j) for post-softmax attention
@@ -152,6 +190,7 @@ Each entry includes:
   **2204.09548** (which is "Misinformed by Visualization," EuroVis 2022 —
   completely unrelated). This was a citation error. **Fixed 2026-07-27**
   to the correct ID **2303.06296**.
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ### Maisonnave et al. 2025 — Attention redundancy for ViT quantization
 
@@ -159,6 +198,7 @@ Each entry includes:
 - **Full citation:** L. Maisonnave, K. Haroun, and T. Pegeot, "Exploiting
   Information Redundancy in Attention Maps for Extreme Quantization of
   Vision Transformers," arXiv:2508.16311, Aug. 2025.
+- **🔗 Link:** https://arxiv.org/abs/2508.16311
 - **Used in:**
   - `src/profiler.py` — `LayerStats.attention_entropy_cls` field docstring,
     `_register_entropy_saves` docstring: cited for the convention of
@@ -168,12 +208,14 @@ Each entry includes:
   - `docs/IMPL-phase1-fixes.md` — §F3.
   - `docs/vit_entropy_methodology.md` — Reference [3].
 - **Verification:** ⚠️ arXiv preprint (Aug 2025). Not yet peer-reviewed.
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ### Mali 2025 — AttenDence
 
 - **Short key:** `Mali 2025`
 - **Full citation:** Y. Mali, "AttenDence: Maximizing Attention Confidence
   for Test Time Adaptation," arXiv:2511.18925, Nov. 2025.
+- **🔗 Link:** https://arxiv.org/abs/2511.18925
 - **Used in:**
   - `src/profiler.py` — `LayerStats.attention_entropy_cls` field docstring,
     `_register_entropy_saves` docstring: cited for CLS attention entropy
@@ -182,6 +224,7 @@ Each entry includes:
   - `docs/IMPL-phase1-fixes.md` — §F3.
   - `docs/vit_entropy_methodology.md` — Reference [5].
 - **Verification:** ⚠️ arXiv preprint (Nov 2025). Not yet peer-reviewed.
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ### Lee & Kim 2025 — AE-Guide
 
@@ -190,6 +233,8 @@ Each entry includes:
   Guided Visual Token Dropping for Accelerating High-Resolution
   Vision-Language Models," in *Proc. ISOCC*, pp. 1–2, Oct. 2025.
   DOI: 10.1109/isocc66390.2025.11329950.
+- **🔗 Link:** https://doi.org/10.1109/isocc66390.2025.11329950
+- **⚠️ No arXiv:** ISOCC 2025 conference paper — no arXiv preprint found (searched by title, authors, and keywords).
 - **Used in:**
   - `src/profiler.py` — `LayerStats.attention_entropy_patches` field
     docstring: cited for CLS/patch attention entropy separation.
@@ -197,6 +242,7 @@ Each entry includes:
   - `docs/IMPL-phase1-fixes.md` — §F3.
   - `docs/vit_entropy_methodology.md` — Reference [8].
 - **Verification:** ✅ Published at ISOCC 2025 (IEEE conference).
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ### Yadav & Das 2025 — GateAttn-ViT
 
@@ -205,12 +251,15 @@ Each entry includes:
   attention-guided token pruning for resource-efficient vision transformer
   acceleration on FPGAs," *Journal of Systems Architecture*, 2025.
   DOI: S1383762126001542.
+- **🔗 Link:** https://doi.org/10.1016/j.sysarc.2026.103154 (⚠️ DOI reconstructed from PII S1383762126001542 — verify before citing)
+- **⚠️ No arXiv:** Journal of Systems Architecture publication — no arXiv preprint found (searched by title, authors, and keywords).
 - **Used in:**
   - `docs/IMPL-phase1-fixes.md` — §F3: cited alongside Maisonnave et al.
     and Mali for CLS/patch entropy separation.
   - `docs/vit_entropy_methodology.md` — Reference [9].
 - **Verification:** ✅ Published in Journal of Systems Architecture
   (ScienceDirect).
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ---
 
@@ -223,21 +272,25 @@ Each entry includes:
   S. J. Reddi, K. Ye, F. Chern, F. Yu, R. Guo, and S. Kumar, "The Lazy
   Neuron Phenomenon: On Emergence of Activation Sparsity in Transformers,"
   in *Proc. ICLR*, 2023. arXiv:2210.06313.
+- **🔗 Link:** https://arxiv.org/abs/2210.06313
 - **Used in:**
   - `docs/vit_profiling_framework.md` — §Motivation: cited as evidence
     that activation sparsity emerges naturally in trained ViTs.
 - **Verification:** ✅ Published at ICLR 2023.
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ### Sun et al. 2024 — Massive Activations in LLMs
 
 - **Short key:** `Sun et al. 2024`
 - **Full citation:** M. Sun, Z. Liu, A. Bair, and J. Z. Kolter, "Massive
   Activations in Large Language Models," arXiv:2402.17762, 2024.
+- **🔗 Link:** https://arxiv.org/abs/2402.17762
 - **Used in:**
   - `docs/vit_profiling_framework.md` — §Motivation: cited for the
     structural role of extreme activation outliers.
   - `docs/NEXT-STEPS.md` — §Before Step 4b.
 - **Verification:** ⚠️ arXiv preprint (Feb 2024). Not yet peer-reviewed.
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ---
 
@@ -249,10 +302,12 @@ Each entry includes:
 - **Full citation:** S. Kim, A. Gholami, Z. Yao, M. W. Mahoney, and
   K. Keutzer, "I-BERT: Integer-only BERT Quantization," in *Proc. ICML*
   (Oral), 2021. arXiv:2101.01321.
+- **🔗 Link:** https://arxiv.org/abs/2101.01321
 - **Used in:**
   - `docs/NEXT-STEPS.md` — §Before Step 8: primary reference for
     integer-only GELU (polynomial approximation).
 - **Verification:** ✅ Published at ICML 2021 (Oral).
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ### I-ViT — Integer-only ViT quantization
 
@@ -260,11 +315,13 @@ Each entry includes:
 - **Full citation:** Z. Li and Q. Gu, "I-ViT: Integer-only Quantization
   for Efficient Vision Transformer Inference," in *Proc. ICCV*, 2023.
   arXiv:2207.01405.
+- **🔗 Link:** https://arxiv.org/abs/2207.01405
 - **Used in:**
   - `docs/vit_profiling_framework.md` — §Motivation: the ShiftGELU
     mechanism.
   - `docs/NEXT-STEPS.md` — §Before Step 8.
 - **Verification:** ✅ Published at ICCV 2023.
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ### Gholami et al. 2022 — Quantization survey
 
@@ -273,10 +330,12 @@ Each entry includes:
   and K. Keutzer, "A Survey of Quantization Methods for Efficient Neural
   Network Inference," in *Low-Power Computer Vision*, Chapman and Hall/CRC,
   pp. 291–326, 2022. arXiv:2103.13630.
+- **🔗 Link:** https://arxiv.org/abs/2103.13630
 - **Used in:**
   - `docs/NEXT-STEPS.md` — §Before Step 8: the canonical quantization
     survey.
 - **Verification:** ✅ Published as a book chapter; arXiv:2103.13630.
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ---
 
@@ -285,15 +344,70 @@ Each entry includes:
 These are cited in the entropy methodology literature review but are not
 directly used in the codebase. Included for completeness.
 
-| Ref | Citation | Used for |
-|-----|----------|----------|
-| [1] | "Attention Map Guided Transformer Pruning for Edge Device," Apr. 2023. arXiv:2304.01452. | Per-sample entropy for pruning. |
-| [2] | E. Peruzzo et al., "Spatial Entropy as an Inductive Bias for Vision Transformers," June 2022. | Spatial entropy regularizer as self-supervised loss. |
-| [4] | A. El-Nouby et al., "Training Vision Transformers for Image Retrieval." arXiv:2102.05644. | Differential entropy for continuous activations. |
-| [6] | H. Wang, S. Tan, and H. Wang, "Probabilistic Conceptual Explainers," June 2024. arXiv:2406.12649. | Probabilistic density modeling over patch embeddings. |
-| [7] | W. Su, R. Zhang, and Z. Zhang, "Rényi Entropy: A New Token Pruning Metric for Vision Transformers." arXiv:2603.27900. | Alternative entropy variants (Rényi). |
-| [10] | S. Sun et al., "ViTGuard," Sept. 2024. arXiv:2409.13828. | CLS embedding as separate detector. |
-| [11] | M. Kang, S. Son, and D. Kim, "Adaptive class token knowledge distillation for efficient vision transformer," *Knowledge-Based Systems*, Sept. 2024. DOI: 10.1016/j.knosys.2024.112531. | CLS as distillation target. |
+### [1] Attention Map Guided Transformer Pruning for Edge Device
+
+- **Full citation:** "Attention Map Guided Transformer Pruning for Edge Device,"
+  Apr. 2023. arXiv:2304.01452.
+- **🔗 Link:** https://arxiv.org/abs/2304.01452
+- **Used for:** Per-sample entropy for pruning.
+- **Verification:** ⚠️ arXiv preprint (not peer-reviewed).
+- **☐ Researcher sign-off: Not yet reviewed**
+
+### [2] Spatial Entropy as an Inductive Bias for Vision Transformers
+
+- **Full citation:** E. Peruzzo, E. Sangineto, Y. Liu, M. De Nadai, W. Bi,
+  B. Lepri, and N. Sebe, "Spatial Entropy as an Inductive Bias for Vision
+  Transformers," arXiv:2206.04636, June 2022.
+- **🔗 Link:** https://arxiv.org/abs/2206.04636
+- **Used for:** Spatial entropy regularizer as self-supervised loss.
+- **Verification:** ⚠️ arXiv preprint (not peer-reviewed).
+- **☐ Researcher sign-off: Not yet reviewed**
+
+### [4] Training Vision Transformers for Image Retrieval
+
+- **Full citation:** A. El-Nouby et al., "Training Vision Transformers for
+  Image Retrieval." arXiv:2102.05644.
+- **🔗 Link:** https://arxiv.org/abs/2102.05644
+- **Used for:** Differential entropy for continuous activations.
+- **Verification:** ✅ arXiv:2102.05644.
+- **☐ Researcher sign-off: Not yet reviewed**
+
+### [6] Probabilistic Conceptual Explainers
+
+- **Full citation:** H. Wang, S. Tan, and H. Wang, "Probabilistic Conceptual
+  Explainers," June 2024. arXiv:2406.12649.
+- **🔗 Link:** https://arxiv.org/abs/2406.12649
+- **Used for:** Probabilistic density modeling over patch embeddings.
+- **Verification:** ⚠️ arXiv preprint (not peer-reviewed).
+- **☐ Researcher sign-off: Not yet reviewed**
+
+### [7] Rényi Entropy: A New Token Pruning Metric for Vision Transformers
+
+- **Full citation:** W. Su, R. Zhang, and Z. Zhang, "Rényi Entropy: A New
+  Token Pruning Metric for Vision Transformers." arXiv:2603.27900.
+- **🔗 Link:** https://arxiv.org/abs/2603.27900
+- **Used for:** Alternative entropy variants (Rényi).
+- **Verification:** ⚠️ arXiv preprint (not peer-reviewed).
+- **☐ Researcher sign-off: Not yet reviewed**
+
+### [10] ViTGuard
+
+- **Full citation:** S. Sun et al., "ViTGuard," Sept. 2024. arXiv:2409.13828.
+- **🔗 Link:** https://arxiv.org/abs/2409.13828
+- **Used for:** CLS embedding as separate detector.
+- **Verification:** ⚠️ arXiv preprint (not peer-reviewed).
+- **☐ Researcher sign-off: Not yet reviewed**
+
+### [11] Adaptive class token knowledge distillation
+
+- **Full citation:** M. Kang, S. Son, and D. Kim, "Adaptive class token
+  knowledge distillation for efficient vision transformer," *Knowledge-Based
+  Systems*, Sept. 2024. DOI: 10.1016/j.knosys.2024.112531.
+- **🔗 Link:** https://doi.org/10.1016/j.knosys.2024.112531
+- **⚠️ No arXiv:** Published in Knowledge-Based Systems — no arXiv preprint found (searched by title and authors).
+- **Used for:** CLS as distillation target.
+- **Verification:** ✅ Published in Knowledge-Based Systems.
+- **☐ Researcher sign-off: Not yet reviewed**
 
 ---
 
@@ -318,3 +432,8 @@ directly used in the codebase. Included for completeness.
 | 2026-07-27 | `src/profiler.py` cited "Bondarenko et al. 2023" — the paper is from 2021 (arXiv:2109.12948). | Corrected year to 2021 in full citation; kept "2023" in short form for consistency with existing code references. |
 | 2026-07-27 | Pébay (2008) referenced throughout but never had a full citation in the code. | Added full SAND2008-6212 citation to `WelfordAccumulator` docstring. |
 | 2026-07-27 | Zhai et al. (2023) entropy formula used in `_register_entropy_saves` without citation. | Added citation to function docstring. |
+| 2026-07-28 | All citations lacked direct links and researcher sign-off checkboxes. | Added 🔗 links (arXiv preferred) and ☐ researcher sign-off to all 25 citations. |
+| 2026-07-28 | Ref [2] (Peruzzo et al., "Spatial Entropy...") had no arXiv ID or DOI. | Found on arXiv: 2206.04636. Updated full citation with all authors. |
+| 2026-07-28 | GateAttn-ViT (Yadav & Das), AE-Guide (Lee & Kim), and Ref [11] (Kang et al.) had no arXiv links. | Searched arXiv by title, authors, and keywords — confirmed no arXiv preprint exists for any of these. Added ⚠️ No arXiv notes. |
+| 2026-07-28 | Yadav & Das DOI was `S1383762126001542` — a PII, not a standard DOI. | Reconstructed probable DOI as `10.1016/j.sysarc.2026.103154`. Flagged with ⚠️ to verify before citing. |
+| 2026-07-28 | Pébay (2008) and Welford (1962) had non-arXiv links. | Confirmed neither exists on arXiv (Sandia tech report / pre-arXiv era). Added ⚠️ No arXiv notes explaining why. |

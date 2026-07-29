@@ -67,8 +67,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--layer-stats",
         type=Path,
-        default=Path("outputs/phase1-profiling/layer_stats.json"),
-        help="Path to the layer_stats.json produced by Phase 1.",
+        default=Path("outputs/phase1-profiling/profiling_result.json"),
+        help="Path to the profiling_result.json produced by Phase 1.",
     )
     return parser.parse_args()
 

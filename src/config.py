@@ -74,9 +74,9 @@ class AblationConfig:
         ``k * σ`` for each layer.  A tuple is used to guarantee immutability
         inside the frozen dataclass.
     layer_stats_path:
-        Path to the JSON file produced by Phase 1 (``hooks.save_stats``).
-        Provides exact global σ for ``pre_gelu`` and ``residual_stream``
-        sites.
+        Path to the ``profiling_result.json`` file produced by Phase 1
+        (``profiler.save_profiling_result``).  Provides exact global σ
+        for all six measurement sites across every encoder block.
     attn_profile_num_images:
         Number of images in the single representative batch used to estimate
         per-layer ``pre_softmax`` σ via ``profiler.profile_vit``.  Must be

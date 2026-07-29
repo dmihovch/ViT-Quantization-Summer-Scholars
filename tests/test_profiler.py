@@ -47,6 +47,7 @@ from src.profiler import (
     ProfilingResult,
     _finalize_stats,
     _register_stat_saves,
+    histogram_profile_vit,
     load_profiling_result,
     profile_vit,
     save_profiling_result,
@@ -376,9 +377,13 @@ def test_slow_register_saves_finalize_layernorm() -> None:
     wrapped = NNsight(nn.LayerNorm(16))
     x = torch.randn(4, 32, 16)
     n_samples = 4 * 32 * 16  # B * seq * D
+
+    # nnsight ≥0.3: .trace() does not bind local variables in the body.
+    # Use the list-outside-trace pattern from profile_vit.
+    savers_list: list = []
     with wrapped.trace(x):
-        savers = _register_stat_saves(wrapped.output, "test/ln", n_samples)
-    stats = _finalize_stats(savers)
+        savers_list.append(_register_stat_saves(wrapped.output, "test/ln", n_samples))
+    stats = _finalize_stats(savers_list[0])
 
     assert stats.n_samples == n_samples
     assert math.isfinite(stats.mean)
@@ -401,9 +406,12 @@ def test_slow_kurtosis_gaussian() -> None:
     wrapped = NNsight(nn.Identity())
     t = torch.randn(1, 1, 10000)
     n_samples = 1 * 1 * 10000
+
+    # nnsight ≥0.3: .trace() does not bind local variables in the body.
+    savers_list: list = []
     with wrapped.trace(t):
-        savers = _register_stat_saves(wrapped.output, "test/gauss", n_samples)
-    stats = _finalize_stats(savers)
+        savers_list.append(_register_stat_saves(wrapped.output, "test/gauss", n_samples))
+    stats = _finalize_stats(savers_list[0])
     assert abs(stats.kurtosis) < 0.5, f"kurtosis={stats.kurtosis:.4f} expected ~0"
     assert stats.n_samples == n_samples
 
@@ -1515,15 +1523,19 @@ def test_slow_per_channel_std_matches_numpy() -> None:
     x = torch.randn(4, 32, 16)
     n_samples = 4 * 32 * 16
 
+    # nnsight ≥0.3: .trace() does not bind local variables in the body.
+    savers_list: list = []
     with wrapped.trace(x):
-        savers = _register_stat_saves(
+        savers_list.append(_register_stat_saves(
             wrapped.output, "test/ln", n_samples, track_per_channel=True,
-        )
-    stats = _finalize_stats(savers)
+        ))
+    stats = _finalize_stats(savers_list[0])
 
-    # Ground truth: per-channel population std over (B*N, D).
-    x_flat = x.reshape(-1, 16)  # (128, 16)
-    gt_std = x_flat.std(dim=0, correction=0).numpy()  # shape (16,)
+    # Ground truth: per-channel population std of the LayerNorm output.
+    with torch.no_grad():
+        ln_out = wrapped._model(x)  # (4, 32, 16)
+    out_flat = ln_out.reshape(-1, 16)  # (128, 16)
+    gt_std = out_flat.std(dim=0, correction=0).numpy()  # shape (16,)
 
     assert stats.per_channel_std is not None
     for c in range(16):
