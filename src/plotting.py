@@ -51,13 +51,14 @@ def plot_activation_histogram(
     if log_scale:
         ax.set_yscale("log")
 
-    # Annotate mean ± 3σ and ± 6σ boundaries.
+    # Annotate mean ± 3σ, ± 4σ, and ± 6σ boundaries (matching OUTLIER_SIGMAS).
     mu = float(np.mean(flat))
     sigma = float(np.std(flat))
     ylim = ax.get_ylim()
     ax.axvline(mu, color="black", linestyle="-", linewidth=0.8, label=f"μ = {mu:.3f}")
     for k, style, lbl in [
         (3, "--", f"±3σ = [{mu - 3 * sigma:.3f}, {mu + 3 * sigma:.3f}]"),
+        (4, "-.", f"±4σ = [{mu - 4 * sigma:.3f}, {mu + 4 * sigma:.3f}]"),
         (6, ":", f"±6σ = [{mu - 6 * sigma:.3f}, {mu + 6 * sigma:.3f}]"),
     ]:
         ax.axvline(mu - k * sigma, color="red", linestyle=style, linewidth=0.8)

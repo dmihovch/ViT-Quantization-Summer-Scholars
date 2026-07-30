@@ -6,7 +6,7 @@ import torch
 import pytest
 
 from src.ablation import build_zeroing_hook, compute_pct_zeroed
-from src.hooks import LayerStats
+from src.profiler import LayerStats
 
 
 def test_compute_pct_zeroed_all_below_threshold(dummy_tensor: torch.Tensor) -> None:

@@ -74,7 +74,10 @@ SITE_PRE_SOFTMAX: str = "pre_softmax"
 SITE_POST_SOFTMAX: str = "post_softmax"
 
 # Sigma thresholds for outlier fraction computation.
-OUTLIER_SIGMAS: tuple[float, ...] = (3.0, 5.0, 8.0)
+# 3σ: moderate outliers (Gaussian tail baseline ≈ 0.27%)
+# 4σ: standard quantization-literature threshold (Bondarenko et al. 2021)
+# 6σ: extreme outlier detection (Dettmers et al. 2022; Wei et al. 2022)
+OUTLIER_SIGMAS: tuple[float, ...] = (3.0, 4.0, 6.0)
 
 # Type alias for the site_identifier key format.
 SiteId: TypeAlias = str
@@ -101,7 +104,7 @@ class LayerStats:
             heavy tails give positive values.
         outlier_fractions: Fraction of elements where |x| > k·σ, for each k
             in OUTLIER_SIGMAS.  Keys are formatted as ``"{k}_sigma"``, e.g.
-            ``"3.0_sigma"``, ``"5.0_sigma"``, ``"8.0_sigma"``.
+            ``"3.0_sigma"``, ``"4.0_sigma"``, ``"6.0_sigma"``.
     """
 
     site_identifier: SiteId
@@ -124,6 +127,32 @@ class LayerStats:
     # averaged over batch and all N-1 patch query rows (rows 1..N-1).
     # Shape: [num_heads].  None for all sites except post_softmax.
     # Cite: Maisonnave et al. 2025; Lee & Kim 2025 (10.1109/isocc66390.2025.11329950).
+    layernorm_gamma: list[float] | None = None
+    # Learned scale parameters (γ) of the LayerNorm module at this site.
+    # Shape [D] for post_layernorm_1 and post_layernorm_2; None for all other sites.
+    # These are static model weights (not activation statistics), extracted from
+    # inner_model.blocks[i].norm{1,2}.weight after the trace exits.
+    # Critical for distinguishing learned-scale outliers from distribution outliers
+    # in per-channel quantization decisions (SmoothQuant, Xiao et al. 2023).
+    layernorm_beta: list[float] | None = None
+    # Learned bias parameters (β) of the LayerNorm module at this site.
+    # Shape [D] for post_layernorm_1 and post_layernorm_2; None for all other sites.
+    residual_delta_ratio: float | None = None
+    # Mean over batch and tokens of ‖mlp_output‖₂ / ‖x_skip‖₂.
+    # Non-None only for residual_stream sites, where it represents the
+    # MLP contribution in the block that produced this residual.
+    # For patch_embed/residual_stream, this is always None (no preceding MLP).
+    # This metric directly answers: "how aggressively does each MLP block
+    # modify the residual stream?" — the primary driver of quantization
+    # range expansion (Bondarenko et al. 2021, §4.2; Wei et al. 2022, §3.1).
+    max: float = 0.0
+    # Maximum observed value over all profiled batches.  Useful for
+    # sanity-checking quantization ranges — the absolute range determines
+    # whether uniform quantization is feasible at all (e.g. INT8 [-128, 127]).
+    # Default 0.0 for backward compatibility with old JSON files.
+    min: float = 0.0
+    # Minimum observed value over all profiled batches.  Default 0.0 for
+    # backward compatibility with old JSON files.
 
 
 @dataclass
@@ -201,6 +230,25 @@ class WelfordAccumulator:
     # Per-head patch entropy sum (raw sum over B*(N-1) tokens) across all batches.
     entropy_patch_count: int = 0
     # Total number of (B * (N-1)) patch-token samples accumulated.
+    layernorm_gamma: list[float] | None = None
+    # LayerNorm γ weights (static model parameters, not merged).
+    # Copied from the first batch's LayerStats; subsequent batches are
+    # expected to carry identical values (model weights don't change).
+    # Shape [D]; non-None for post_layernorm_1 and post_layernorm_2 only.
+    layernorm_beta: list[float] | None = None
+    # LayerNorm β bias (static model parameters, not merged).
+    residual_delta_ratio_sum: float = 0.0
+    # Running sum of per-batch residual delta ratios (‖mlp_output‖₂ / ‖x_skip‖₂).
+    # Accumulated as a simple sum (not Pébay merge) because the ratio is already
+    # a per-batch mean.  Divided by residual_delta_ratio_count at finalization.
+    residual_delta_ratio_count: int = 0
+    # Number of batches contributing to residual_delta_ratio_sum.
+    max_val: float = float("-inf")
+    # Running maximum across all batches (element-wise, not Pébay-merged).
+    # Initialized to -inf so the first batch always sets it.
+    min_val: float = float("inf")
+    # Running minimum across all batches (element-wise, not Pébay-merged).
+    # Initialized to +inf so the first batch always sets it.
 
 
 def _site_n(
@@ -363,6 +411,30 @@ def merge_batch_stats(
                 acc.entropy_patch_sum[h] += batch_stats.attention_entropy_patches[h]
             acc.entropy_patch_count += patch_token_count
 
+    # --- LayerNorm γ/β carry-through (static model weights, not merged) ---
+    # These are model parameters — they don't change between batches.
+    # Store the first batch's values; subsequent batches should carry identical values.
+    if batch_stats.layernorm_gamma is not None and acc.layernorm_gamma is None:
+        acc.layernorm_gamma = list(batch_stats.layernorm_gamma)
+    if batch_stats.layernorm_beta is not None and acc.layernorm_beta is None:
+        acc.layernorm_beta = list(batch_stats.layernorm_beta)
+
+    # --- Residual delta ratio accumulation (simple mean across batches) ---
+    # The delta ratio is already a per-batch mean (averaged over B×N tokens),
+    # so we accumulate a simple sum and divide by count at finalization.
+    if batch_stats.residual_delta_ratio is not None:
+        acc.residual_delta_ratio_sum += batch_stats.residual_delta_ratio
+        acc.residual_delta_ratio_count += 1
+
+    # --- Running max/min (element-wise, not Pébay-merged) ---
+    # Max/min don't have a parallel merge formula — we track the
+    # element-wise extremum across all batches seen so far.
+    if batch_stats.max > acc.max_val:
+        acc.max_val = batch_stats.max
+    if batch_stats.min < acc.min_val:
+        acc.min_val = batch_stats.min
+
+
 
 def finalize_accumulator(acc: WelfordAccumulator) -> LayerStats:
     """Convert a WelfordAccumulator to a final LayerStats.
@@ -432,6 +504,15 @@ def finalize_accumulator(acc: WelfordAccumulator) -> LayerStats:
         per_channel_std=per_channel_std,
         attention_entropy_cls=attention_entropy_cls,
         attention_entropy_patches=attention_entropy_patches,
+        layernorm_gamma=acc.layernorm_gamma,
+        layernorm_beta=acc.layernorm_beta,
+        residual_delta_ratio=(
+            acc.residual_delta_ratio_sum / acc.residual_delta_ratio_count
+            if acc.residual_delta_ratio_count > 0
+            else None
+        ),
+        max=acc.max_val if math.isfinite(acc.max_val) else 0.0,
+        min=acc.min_val if math.isfinite(acc.min_val) else 0.0,
     )
 
 
@@ -646,6 +727,8 @@ def run_outlier_counting_pass(
                     block_attn = inner_model.blocks[i].attn
 
                     # --- residual_stream ---
+                    # Site labeling convention: blocks.{k}/residual_stream = output
+                    # of block k (input to block k+1).  See docs/EXP1-IMPL.md §0.1.
                     residual_label: SiteId = (
                         "patch_embed/residual_stream" if i == 0
                         else f"blocks.{i - 1}/residual_stream"
@@ -697,6 +780,16 @@ def run_outlier_counting_pass(
                         f"blocks.{i}/{SITE_PRE_GELU}",
                         site_params, batch_counts,
                     )
+
+                # --- Final residual stream (output of last encoder block, before head LN) ---
+                # Same gap as profile_vit — the block loop labels block[i].norm1.input
+                # as blocks.{i-1}/residual_stream, so the output of the final block is
+                # never counted.  Capture it from the final LayerNorm's input.
+                _count_outliers_in_trace(
+                    wrapped_model.norm.input,
+                    f"blocks.{len(inner_model.blocks) - 1}/residual_stream",
+                    site_params, batch_counts,
+                )
 
         except Exception as exc:
             raise ProfilingError(
@@ -785,6 +878,15 @@ class _StatsSavers:
     per_channel_sum_sq: Any = None
     entropy_cls_proxy: Any = None
     entropy_patch_sum_proxy: Any = None
+    residual_delta_ratio: Any = None
+    # Saved proxy for the residual delta ratio (‖mlp_output‖₂ / ‖x_skip‖₂).
+    # Non-None only for residual_stream sites (except patch_embed).
+    # Set after the post_layernorm_2 registration when both norm1.input
+    # and norm2.output proxies are available.
+    max_proxy: Any = None
+    # Saved proxy for the element-wise maximum of the activation tensor.
+    min_proxy: Any = None
+    # Saved proxy for the element-wise minimum of the activation tensor.
 
 
 def _register_stat_saves(
@@ -857,6 +959,10 @@ def _register_stat_saves(
         per_channel_sum_proxy = t_bn_d.sum(dim=0).save()       # shape (D,)
         per_channel_sum_sq_proxy = (t_bn_d**2).sum(dim=0).save()  # shape (D,)
 
+    # Element-wise max/min for quantization range analysis.
+    max_proxy = t.max().save()
+    min_proxy = t.min().save()
+
     return _StatsSavers(
         site_identifier=site_id,
         mean=mean_proxy,
@@ -867,6 +973,8 @@ def _register_stat_saves(
         n_samples=n_samples,
         per_channel_sum=per_channel_sum_proxy,
         per_channel_sum_sq=per_channel_sum_sq_proxy,
+        max_proxy=max_proxy,
+        min_proxy=min_proxy,
     )
 
 
@@ -1001,6 +1109,13 @@ def _finalize_stats(savers: _StatsSavers) -> LayerStats:
         per_channel_sum_sq=per_channel_sum_sq,
         attention_entropy_cls=attention_entropy_cls,
         attention_entropy_patches=attention_entropy_patches,
+        residual_delta_ratio=(
+            float(_val(savers.residual_delta_ratio).item())
+            if savers.residual_delta_ratio is not None
+            else None
+        ),
+        max=float(_val(savers.max_proxy).item()) if savers.max_proxy is not None else 0.0,
+        min=float(_val(savers.min_proxy).item()) if savers.min_proxy is not None else 0.0,
     )
 
 
@@ -1127,6 +1242,14 @@ def profile_vit(
 
     try:
         with wrapped_model.trace(input_batch):
+            # Delta ratio for blocks.{i}/residual_stream is computed using
+            # block i's norm1.input (skip) and norm2.output (MLP).
+            # Since norm1.input is consumed by _register_stat_saves and
+            # cannot be re-accessed (nnsight 0.7.0 OutOfOrderError), we
+            # capture the per-token skip norm as a separate proxy at the
+            # point of first access and store it for later use.
+            pending_skip_norm: Any = None  # skip norm proxy from previous iteration
+
             for i in range(num_blocks):
                 block = wrapped_model.blocks[i]
                 attn = block.attn
@@ -1136,13 +1259,31 @@ def profile_vit(
                 # (not a (args, kwargs) tuple), so no [0][0] indexing.
 
                 # --- residual_stream ---
+                # Site labeling convention (see docs/EXP1-IMPL.md §0.1):
+                #   blocks.{k}/residual_stream = output of block k (input to block k+1)
+                #   patch_embed/residual_stream = patch embed + pos encoding + CLS (input to block 0)
+                #   blocks.11/residual_stream = final encoder output (before head LN)
+                # All other sites (post_layernorm_1, pre_softmax, etc.) are measured
+                # INSIDE the block whose index appears in the label.
                 residual_label: SiteId = (
                     "patch_embed/residual_stream" if i == 0
                     else f"blocks.{i - 1}/residual_stream"
                 )
-                all_savers.append(
-                    _register_stat_saves(block.norm1.input, residual_label, n_residual)
+                # Capture skip norm BEFORE _register_stat_saves consumes the proxy.
+                # This is the per-token L2 norm of the residual entering block i,
+                # averaged over batch and tokens: mean_{b,t} ‖x_skip[b,t,:]‖₂.
+                skip_norm_proxy = block.norm1.input.norm(dim=-1).mean().save()
+
+                residual_savers = _register_stat_saves(
+                    block.norm1.input, residual_label, n_residual
                 )
+                # Attach delta ratio computed from the previous iteration's
+                # skip_norm and mlp_output.  For i=0 (patch_embed/residual_stream),
+                # pending_skip_norm is None — correct, no preceding MLP block.
+                if pending_skip_norm is not None:
+                    residual_savers.residual_delta_ratio = pending_skip_norm
+                    pending_skip_norm = None
+                all_savers.append(residual_savers)
 
                 # --- post_layernorm_1 (pre-attention LN output) ---
                 all_savers.append(
@@ -1188,6 +1329,17 @@ def profile_vit(
                     )
                 )
 
+                # --- Residual delta ratio: ‖mlp_output‖₂ / ‖x_skip‖₂ ---
+                # Computed per-token and averaged over batch and tokens.
+                # skip_norm_proxy was captured above (before norm1.input was consumed).
+                # mlp_norm uses norm2.output which is available now.
+                # The ratio will be attached to blocks.{i}/residual_stream in the
+                # next loop iteration (or after the loop for the final block).
+                # Ref: Bondarenko et al. (2021), arXiv:2109.12948, §4.2;
+                #      Wei et al. (2022), NeurIPS, arXiv:2209.13325, §3.1.
+                mlp_norm = block.norm2.output.norm(dim=-1).mean()  # scalar proxy
+                pending_skip_norm = (mlp_norm / (skip_norm_proxy + 1e-8)).save()
+
                 # --- pre_gelu ---
                 all_savers.append(
                     _register_stat_saves(
@@ -1195,6 +1347,26 @@ def profile_vit(
                         track_per_channel=True,
                     )
                 )
+
+            # --- Final residual stream (output of last encoder block, before head LN) ---
+            # The block loop labels block[i].norm1.input as blocks.{i-1}/residual_stream,
+            # so the output of the final block (block 11) is never captured inside the
+            # loop.  We capture it here from the final LayerNorm's input, which is the
+            # raw residual stream exiting block num_blocks-1.
+            #
+            # This is the single most important activation tensor for quantization
+            # range calibration in Phase 2/3 — it represents the cumulative effect of
+            # all encoder blocks before the classification head.
+            # Ref: Bondarenko et al. (2021), arXiv:2109.12948, §4.2.
+            final_residual_savers = _register_stat_saves(
+                wrapped_model.norm.input,
+                f"blocks.{num_blocks - 1}/residual_stream",
+                n_residual,
+            )
+            # Attach the delta ratio from the final block's MLP.
+            if pending_skip_norm is not None:
+                final_residual_savers.residual_delta_ratio = pending_skip_norm
+            all_savers.append(final_residual_savers)
 
     except Exception as exc:
         raise ProfilingError(
@@ -1205,6 +1377,30 @@ def profile_vit(
     stats: dict[SiteId, LayerStats] = {
         s.site_identifier: _finalize_stats(s) for s in all_savers
     }
+
+    # --- Attach LayerNorm γ/β weights to post_layernorm sites ---
+    # These are static model parameters, extracted outside the trace from the
+    # underlying PyTorch model.  They enable distinguishing learned-scale
+    # outliers (large γ) from distribution outliers (large activation variance)
+    # during per-channel quantization calibration (SmoothQuant, Xiao et al. 2023).
+    for i in range(num_blocks):
+        block = inner_model.blocks[i]
+        # norm1 → post_layernorm_1
+        ln1_site = f"blocks.{i}/{SITE_POST_LAYERNORM_1}"
+        if ln1_site in stats:
+            ln1 = block.norm1
+            stats[ln1_site].layernorm_gamma = ln1.weight.detach().cpu().tolist()
+            stats[ln1_site].layernorm_beta = (
+                ln1.bias.detach().cpu().tolist() if ln1.bias is not None else None
+            )
+        # norm2 → post_layernorm_2
+        ln2_site = f"blocks.{i}/{SITE_POST_LAYERNORM_2}"
+        if ln2_site in stats:
+            ln2 = block.norm2
+            stats[ln2_site].layernorm_gamma = ln2.weight.detach().cpu().tolist()
+            stats[ln2_site].layernorm_beta = (
+                ln2.bias.detach().cpu().tolist() if ln2.bias is not None else None
+            )
 
     logger.info(
         "Trace complete: collected stats for %d sites.", len(stats)
@@ -1468,6 +1664,13 @@ def save_profiling_result(result: ProfilingResult, path: Path) -> None:
 
     Creates parent directories if they do not exist.  The JSON mirrors the
     dataclass structure exactly via ``dataclasses.asdict``.
+
+    All floating-point values are serialised with full float64 precision.
+    Python's ``json.dump`` uses ``repr()`` internally, which guarantees
+    round-trip fidelity (the shortest decimal representation that reproduces
+    the exact IEEE 754 binary value).  This means a value like ``0.00261``
+    in the JSON is the exact float64 that was computed — not a truncated
+    approximation.  See ``test_float_precision_round_trip`` for verification.
 
     Args:
         result: Completed profiling result to serialise.

@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 from torch.utils.hooks import RemovableHandle
 
-from src.hooks import LayerStats
+from src.profiler import LayerStats
 
 logger = logging.getLogger(__name__)
 

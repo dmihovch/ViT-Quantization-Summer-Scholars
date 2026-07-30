@@ -330,9 +330,9 @@ hooks) for the dataset-wide pass to get exact statistics for 3 sites, and
    C is available.
 
 **What to do instead:** Option C — Welford merge inside `profiler.py` (nnsight)
-covering all 6 sites exactly. `hooks.py` is retained for reference and its
-existing tests but is not used in any phase. See `NEXT-STEPS.md` architecture
-decision section.
+covering all 6 sites exactly. `hooks.py` is retained for reference (its
+`LayerStats` dataclass was deleted 2026-07-30 in favour of `profiler.LayerStats`)
+but is not used in any phase. See `NEXT-STEPS.md` architecture decision section.
 
 ---
 
@@ -469,3 +469,188 @@ landed and was not subsequently updated.
 **Current status:** The fixes listed in §10b have all been applied. The section
 is now historical record. `NEXT-STEPS.md §6c` status reflects this (items
 marked ✅ DONE). Do not re-apply any of them.
+
+---
+
+## 8. Site coverage mistakes
+
+### 8.1 — Final encoder residual stream (`blocks.11/residual_stream`) never captured
+
+**What happened:** `profile_vit` and `run_outlier_counting_pass` both iterate
+`for i in range(num_blocks)` and label `block[i].norm1.input` as
+`blocks.{i-1}/residual_stream`.  For `i=11` (the last block), the label is
+`blocks.10/residual_stream`.  The output of block 11 — the final encoder output
+before the classification head — was never captured as a raw residual stream.
+It was only seen after LayerNorm as `blocks.11/post_layernorm_1`, which is
+zero-mean, unit-variance per token and masks the true magnitude growth.
+
+**Why it's wrong:** The residual stream at the final encoder output is the
+representation fed to the classification head.  Its statistics — especially
+outlier fractions and kurtosis — are critical for understanding whether
+quantization error accumulates through the network.  This is the single most
+important activation tensor for quantization range decisions in Phase 2/3,
+because it represents the cumulative effect of all 12 blocks.
+
+**What to do instead:** Add a hook on `wrapped_model.norm.input` (the final
+LayerNorm before the classification head) after the block loop in both
+`profile_vit` and `run_outlier_counting_pass`.  Label it
+`blocks.{num_blocks-1}/residual_stream`.  Update site-count tests from 72 to 73.
+See T-001 in `docs/issues.md`.
+
+**Reference:** Bondarenko et al. (2021), arXiv:2109.12948, §4.2 — residual
+stream magnitude growth is the primary cause of quantization range blow-up in
+transformers.
+
+---
+
+## 9. Outlier sigma threshold mistakes
+
+### 9.1 — OUTLIER_SIGMAS used (3, 5, 8) instead of spec (3, 4, 6)
+
+**What happened:** `src/profiler.py` defined `OUTLIER_SIGMAS = (3.0, 5.0, 8.0)`
+while the spec (`docs/scispace-docs/vit_profiling_framework.md`) specified
+$k \in \{3, 4, 6\}$.  The original implementation decision acknowledged the
+discrepancy and ordered not to change the values because doing so would
+invalidate previously collected data.
+
+**Why it's wrong:** The 4σ threshold is standard in the quantization literature
+(Bondarenko et al. 2021 uses it as their primary outlier detection threshold).
+The 6σ threshold is standard for extreme outlier detection (Dettmers et al. 2022;
+Wei et al. 2022).  The 5σ and 8σ thresholds are non-standard and make results
+incomparable with the literature.
+
+**Resolution (2026-07-30):** Changed `OUTLIER_SIGMAS` to `(3.0, 4.0, 6.0)` in
+`src/profiler.py`.  Updated all downstream references in `src/plotting.py`,
+`src/hooks.py`, `docs/scispace-docs/vit_profiling_framework.md`,
+`docs/NEXT-STEPS.md`, and `tests/test_profiler.py`.  See `docs/issues.md` T-002.
+
+**What to do instead:** Always use `(3.0, 4.0, 6.0)` — these are the
+literature-standard thresholds.  Any previously collected data with the old
+thresholds must be regenerated.
+
+---
+
+## 10. LayerNorm weight capture mistakes
+
+### 10.1 — LayerNorm γ/β never captured (spec required it)
+
+**What happened:** The framework spec (`docs/scispace-docs/vit_profiling_framework.md`)
+explicitly required logging LayerNorm γ weights alongside per-channel σ to separate
+learned-scale outliers from distribution outliers.  This was never implemented —
+`LayerStats` had no fields for γ or β, and `profile_vit` never extracted them from
+the model.
+
+**Why it's wrong:** Without γ/β, per-channel σ values are ambiguous for quantization
+calibration.  A channel with high σ could be a genuine distribution outlier (requiring
+quantization accommodation) or simply a channel where the model learned a large γ on
+a well-behaved distribution (the SmoothQuant solution: migrate quantization difficulty
+from activations to weights by scaling γ down and the next linear layer up).  The two
+cases require fundamentally different Phase 2/3 strategies.
+
+**Resolution (2026-07-30):** Added `layernorm_gamma` and `layernorm_beta` fields to
+`LayerStats` (shape `[D]`, non-None for post_layernorm_1/2 only).  Extraction is done
+in `profile_vit` **after the trace exits** by reading `inner_model.blocks[i].norm{1,2}.weight`
+and `.bias` directly — these are static model parameters, not activation statistics.
+The `WelfordAccumulator` carries them through unchanged (first batch wins; subsequent
+batches carry identical values).  See `docs/issues.md` T-004.
+
+**What to do instead:** γ/β are now automatically captured for every `profile_vit` call.
+Use them alongside `per_channel_std` to classify each channel as a learned-scale outlier
+(high γ, low activation variance) vs. a distribution outlier (low γ, high activation
+variance) before making per-channel quantization decisions.
+
+---
+
+## 11. Residual delta ratio mistakes
+
+### 11.1 — Residual update delta ‖Δ‖/‖x_skip‖ never computed (spec required it)
+
+**What happened:** The framework spec (`docs/scispace-docs/vit_profiling_framework.md`,
+§Residual Update Stream) explicitly specified computing the MLP update magnitude
+relative to the skip connection: `‖mlp_output‖ / ‖x_skip‖`.  This was never
+implemented — `LayerStats` had no field for it, and `profile_vit` never computed
+the ratio inside the trace.
+
+**Why it's wrong:** Without this metric, we know *that* the residual stream has
+heavy tails (from kurtosis) but not *why*.  The delta ratio distinguishes whether
+the MLP or the attention sub-block is the dominant contributor to quantization
+range expansion.  This is directly actionable for Phase 2: blocks with large delta
+ratios are where MLP outlier ablation will have the most impact (Wei et al. 2022,
+§3.1).
+
+**Resolution (2026-07-30):** Added `residual_delta_ratio: float | None` field to
+`LayerStats`.  The ratio `‖mlp_output‖₂ / ‖x_skip‖₂` is computed per-token inside
+the nnsight trace and averaged over batch and tokens.  It is attached to
+`blocks.{i}/residual_stream` (representing the MLP contribution in block `i`).
+`patch_embed/residual_stream` has `None` (no preceding MLP).
+
+A key implementation challenge was nnsight 0.7.0's `OutOfOrderError`: once
+`block.norm1.input` is consumed by `_register_stat_saves` (which calls
+`.reshape(-1)` on it), the proxy cannot be re-accessed later in the trace.
+The solution captures `skip_norm = block.norm1.input.norm(dim=-1).mean().save()`
+**before** passing the proxy to `_register_stat_saves`, then computes the ratio
+`mlp_norm / (skip_norm + 1e-8)` after `norm2.output` becomes available.  A
+one-iteration pending buffer bridges the site-labeling gap (the ratio for block
+`i`'s MLP is attached to `blocks.{i}/residual_stream`, which is labeled in
+iteration `i+1`).
+
+**What to do instead:** The delta ratio is now automatically computed for every
+`profile_vit` call.  Use it alongside kurtosis to identify which blocks have
+MLP-driven vs. attention-driven outliers before designing Phase 2 ablation
+experiments.
+
+**References**
+- Bondarenko et al. (2021), arXiv:2109.12948, §4.2 — residual connections cause
+  quantization range expansion.
+- Wei et al. (2022), "Outlier Suppression," NeurIPS 2022 (Spotlight),
+  arXiv:2209.13325, §3.1 — analyzes which transformer sub-layers produce outliers.
+
+See `docs/issues.md` T-005.
+
+---
+
+## 12. Framework documentation staleness
+
+### 12.1 — `vit_profiling_framework.md` fell out of sync with implementation
+
+**What happened:** The authoritative framework spec
+(`docs/scispace-docs/vit_profiling_framework.md`) was written early in the
+project and not updated as the implementation evolved through T-001 to T-005.
+Several sections became stale:
+- The Site Labeling Convention table marked `blocks.11/residual_stream` as
+  "Not yet captured" even after T-001 was resolved.
+- The sigma thresholds, outlier fraction methodology, γ/β logging, delta ratio,
+  and measurement sites count were all corrected incrementally during T-001
+  through T-005 resolution, but no holistic audit was performed.
+
+**Why it's wrong:** The framework doc is the ground truth for contributors.
+Stale claims mislead anyone reading it about what the code actually does.
+The doc and code must agree — if they don't, one of them is wrong.
+
+**Resolution (2026-07-30):** Performed a full audit of the framework doc against
+the current implementation.  All seven items from the T-006 proposed fix list
+were verified:
+1. Sigma thresholds: `k ∈ {3, 4, 6}` — matches `OUTLIER_SIGMAS = (3.0, 4.0, 6.0)`
+2. Outlier fraction methodology: two-pass recount (F2) — correctly documented
+3. max/min: correctly marked as "not yet implemented" (T-010 open)
+4. γ/β logging: correctly documented as captured (T-004 closed)
+5. Delta ratio: correctly documented as computed (T-005 closed)
+6. Measurement sites: 6 rows in table — correct
+7. Document Conventions: present with site labeling and sigma conventions
+
+The only remaining stale item — `blocks.11/residual_stream` marked "Not yet
+captured" — was corrected to reflect T-001 resolution.
+
+**Verification:** Cross-referenced sigma thresholds across all files:
+- `src/profiler.py`: `OUTLIER_SIGMAS = (3.0, 4.0, 6.0)`
+- `src/hooks.py`: `_OUTLIER_SIGMAS = (3, 4, 6)`
+- `src/plotting.py`: annotates `±3σ, ±4σ, ±6σ`
+- `docs/scispace-docs/vit_profiling_framework.md`: `k ∈ {3, 4, 6}`
+
+All four sources agree on `(3, 4, 6)`.
+
+**What to do instead:** When resolving any issue that changes the implementation,
+always check whether the framework doc needs a corresponding update.  The doc
+should be treated as a living specification, not a frozen artifact.
+
+See `docs/issues.md` T-006.

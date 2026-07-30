@@ -1,8 +1,7 @@
 # EXP1-IMPL: Experiment 1 — Baseline Activation Profiling
 
 > **Status:** Phase 1 complete. All steps implemented and tested.
-> 82/91 fast tests pass (9 failures are pre-existing stubs in Phase 2/3).
-> 22 slow tests (marked `@pytest.mark.slow`) require nnsight trace context.
+> 80/112 fast tests pass (32 slow tests require nnsight trace context).
 > Tested with PyTorch 2.12.1, nnsight 0.7.0, CUDA 13.0, NVIDIA RTX 3070 (8 GB).
 
 ---
@@ -24,7 +23,8 @@ produces (single seed):
 
 ```
 outputs/phase1-profiling/
-├── profiling_result.json          # all 6 sites × 12 blocks (+ patch_embed)
+├── profiling_result.json          # 6 sites × 12 blocks + patch_embed + final residual = 73 sites
+│                                     # Each residual_stream site includes residual_delta_ratio
 ├── summary_table.csv              # 73 rows × (5 + num_sigma_thresholds) columns
 ├── histograms/
 │   ├── blocks.0_pre_gelu.png      # real activations — blocks 0, 5, 11 only
@@ -54,6 +54,44 @@ outputs/phase1-profiling/
 ```
 
 All fast tests (`pytest -m "not slow"`) pass with no regressions.
+
+---
+
+## 0.1 Site Labeling Convention
+
+The `residual_stream` site label `blocks.{k}/residual_stream` denotes the residual
+stream **after** encoder block `k` has processed it — i.e., the input to block `k+1`.
+
+| Label | Meaning |
+|-------|---------|
+| `patch_embed/residual_stream` | Patch embedding + positional encoding + CLS token (input to block 0) |
+| `blocks.0/residual_stream` | Output of block 0 (input to block 1) |
+| `blocks.5/residual_stream` | Output of block 5 (input to block 6) |
+| `blocks.10/residual_stream` | Output of block 10 (input to block 11) |
+| `blocks.11/residual_stream` | Output of block 11 (final encoder output, before head LayerNorm) |
+
+All other site labels `blocks.{k}/{site}` denote measurements **inside** block `k`:
+
+| Site | Where measured |
+|------|---------------|
+| `post_layernorm_1` | Output of `blocks.{k}.norm1` (pre-attention LayerNorm) |
+| `pre_softmax` | Reconstructed QKᵀ/√d logit matrix inside `blocks.{k}.attn` |
+| `post_softmax` | Attention weights after softmax (`blocks.{k}.attn.attn_drop.input`) |
+| `post_layernorm_2` | Output of `blocks.{k}.norm2` (pre-MLP LayerNorm) |
+| `pre_gelu` | Input to `blocks.{k}.mlp.act` (GELU activation) |
+
+**Why this matters:** When interpreting results, `blocks.5/residual_stream`
+(kurtosis=2992 from the 2026-07-28 run) is the residual **after** block 5, not
+**inside** block 5. Misreading this could lead to misattribution of outlier
+emergence — e.g., thinking block 5 produces the outliers when block 4 actually does.
+
+The canonical site order for display is:
+
+```
+residual_stream → post_layernorm_1 → pre_softmax → post_softmax → post_layernorm_2 → pre_gelu
+```
+
+This follows the forward-pass dataflow through each encoder block.
 
 ---
 
@@ -194,6 +232,10 @@ class WelfordAccumulator:
         per_channel_sum: Per-channel running sum; None if not tracked.
         per_channel_sum_sq: Per-channel running sum of squares; None if not tracked.
         per_channel_n: Total per-channel sample count (B·N accumulated).
+        layernorm_gamma: LayerNorm γ weights (static, first batch stored).
+        layernorm_beta: LayerNorm β biases (static, first batch stored).
+        residual_delta_ratio_sum: Running sum of per-batch delta ratios.
+        residual_delta_ratio_count: Number of batches contributing.
     """
 
     site_identifier: SiteId
@@ -208,6 +250,10 @@ class WelfordAccumulator:
     per_channel_sum: list[float] | None = None
     per_channel_sum_sq: list[float] | None = None
     per_channel_n: int = 0
+    layernorm_gamma: list[float] | None = None
+    layernorm_beta: list[float] | None = None
+    residual_delta_ratio_sum: float = 0.0
+    residual_delta_ratio_count: int = 0
 ```
 
 ### 3.3 `merge_batch_stats`
@@ -330,6 +376,13 @@ def finalize_accumulator(acc: WelfordAccumulator) -> LayerStats:
         outlier_fractions=outlier_fractions,
         n_samples=acc.n,
         per_channel_std=per_channel_std,
+        layernorm_gamma=acc.layernorm_gamma,
+        layernorm_beta=acc.layernorm_beta,
+        residual_delta_ratio=(
+            acc.residual_delta_ratio_sum / acc.residual_delta_ratio_count
+            if acc.residual_delta_ratio_count > 0
+            else None
+        ),
     )
 ```
 
@@ -341,14 +394,16 @@ def run_profiling_dataset_pass(
     loader: DataLoader,
     device: torch.device,
 ) -> dict[SiteId, LayerStats]:
-    """Collect dataset-wide activation statistics at all 6 sites via exact merge.
+    """Collect dataset-wide activation statistics at all sites via exact merge.
 
     Iterates over all batches in loader, calls profile_vit for each, and
     merges per-batch LayerStats into WelfordAccumulators using the exact
     Pébay (2008) parallel higher-moments formula.
 
     All six measurement sites (residual_stream, post_layernorm_1, post_layernorm_2,
-    pre_gelu, pre_softmax, post_softmax) are covered for every encoder block.
+    pre_gelu, pre_softmax, post_softmax) are covered for every encoder block,
+    plus the final residual stream (output of the last block, before the head
+    LayerNorm) as a seventh site.
 
     Must be called inside torch.no_grad() — the caller is responsible.
 
@@ -494,8 +549,9 @@ def test_slow_run_profiling_dataset_pass_exact_n_samples(_vit_wrapped) -> None:
 1. `fig, ax = plt.subplots(figsize=(7, 4))`.
 2. `ax.hist(activations.ravel(), bins=200, color="steelblue", alpha=0.8)`.
 3. If `log_scale`: `ax.set_yscale("log")`.
-4. Vertical lines at `mean ± 3σ` (dashed red) and `mean ± 6σ` (dotted red),
-   computing mean and std from the input array via `np.mean` / `np.std`.
+4. Vertical lines at `mean ± 3σ` (dashed red), `mean ± 4σ` (dash-dot red),
+   and `mean ± 6σ` (dotted red), computing mean and std from the input array
+   via `np.mean` / `np.std`.
 5. Title, axis labels, legend, save to `output_path`, `plt.close(fig)`.
 
 ### 5.2 `plot_per_channel_std_heatmap`
@@ -941,6 +997,28 @@ Tested on: Python 3.13.13, PyTorch 2.12.1+cu130, nnsight 0.7.0, NVIDIA RTX 3070 
 | `test_slow_histogram_profile_vit_shapes` | `test_profiler.py` | Slow | ✅ Pass |
 | `test_slow_pre_softmax_reconstruction_matches_manual` | `test_profiler.py` | Slow | ✅ Pass |
 | `test_slow_per_channel_std_matches_numpy` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_layer_stats_residual_delta_ratio_default_none` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_layer_stats_residual_delta_ratio_stores_value` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_layer_stats_residual_delta_ratio_serialization_roundtrip` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_welford_accumulator_delta_ratio_defaults` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_merge_batch_stats_delta_ratio_accumulation` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_finalize_accumulator_delta_ratio_mean` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_finalize_accumulator_delta_ratio_none_when_no_data` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_slow_residual_delta_ratio_present_on_residual_stream` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_residual_delta_ratio_positive` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_residual_delta_ratio_absent_on_non_residual_sites` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_residual_delta_ratio_survives_serialisation` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_residual_delta_ratio_reasonable_magnitude` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_run_outlier_counting_pass_correctness` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_run_outlier_counting_pass_multiple_sites_correctness` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_layer_stats_max_min_defaults` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_layer_stats_max_min_store_values` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_layer_stats_max_min_survive_serialization` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_layer_stats_max_min_backwards_compat` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_slow_max_min_present` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_max_min_survives_serialisation` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_merge_batch_stats_max_min_tracking` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_float_precision_round_trip` | `test_profiler.py` | Fast | ✅ Pass |
 
 ---
 

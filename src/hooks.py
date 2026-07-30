@@ -39,6 +39,7 @@ import torch.nn as nn
 from torch.utils.hooks import RemovableHandle
 
 from src.exceptions import HookRegistrationError
+from src.profiler import LayerStats
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,8 @@ SITE_PRE_GELU: str = "pre_gelu"
 SITE_POST_LAYERNORM: str = "post_layernorm"
 SITE_RESIDUAL_STREAM: str = "residual_stream"
 
-# Outlier sigma thresholds matched to the spec.
+# Outlier sigma thresholds: 3σ (moderate), 4σ (standard lit.), 6σ (extreme).
+# Matches OUTLIER_SIGMAS in profiler.py.
 _OUTLIER_SIGMAS: tuple[int, ...] = (3, 4, 6)
 
 StatsKey: TypeAlias = str  # format: "{layer_name}/{site}"
@@ -61,42 +63,12 @@ StatsKey: TypeAlias = str  # format: "{layer_name}/{site}"
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class LayerStats:
-    """Per-layer summary statistics for one measurement site.
-
-    All scalar statistics reflect the full distribution of tensor elements
-    seen across every profiling batch.
-
-    Attributes:
-        site: Site key (e.g. ``"pre_gelu"``). One of the SITE_* constants.
-        layer_name: Fully-qualified module name from ``model.named_modules()``.
-        max: Maximum observed value over all profiled batches.
-        min: Minimum observed value over all profiled batches.
-        mean: Global mean over all profiled batches.
-        std: Global standard deviation over all profiled batches.
-        kurtosis: Excess kurtosis (E[(x−μ)⁴]/σ⁴ − 3). A Gaussian scores 0;
-            heavy-tailed distributions score positive.
-        outlier_frac: Fraction of elements where |x| > k·σ, for k in {3,4,6}.
-            Keys are string representations of k: ``"3"``, ``"4"``, ``"6"``.
-        per_channel_std: Per-channel σ over batch and token dims; shape [D].
-            Non-None only for ``pre_gelu`` and ``post_layernorm`` sites.
-        attn_entropy: Per-head mean attention entropy in bits. Non-None only
-            for ``post_softmax`` (not yet implemented, always ``None``).
-        n_samples: Total scalar elements accumulated (for reference).
-    """
-
-    site: str
-    layer_name: str
-    max: float
-    min: float
-    mean: float
-    std: float
-    kurtosis: float
-    outlier_frac: dict[str, float]
-    per_channel_std: list[float] | None
-    attn_entropy: list[float] | None
-    n_samples: int
+# NOTE: hooks.LayerStats was deleted 2026-07-30 (T-009).
+# The canonical LayerStats is now src.profiler.LayerStats.
+# The hook machinery below (_SiteAccumulator, register_profiling_hooks,
+# remove_hooks, save_stats, load_stats) is retained for reference but
+# is not used in any Phase 1/2/3 pipeline.  The nnsight-based profiler
+# (src/profiler.py) is the primary profiling path.
 
 
 @dataclass
@@ -322,17 +294,15 @@ def _finalize_accumulator(acc: _SiteAccumulator) -> LayerStats:
         per_channel_std = std_ch.tolist()
 
     return LayerStats(
-        site=acc.site,
-        layer_name=acc.layer_name,
-        max=acc.running_max,
-        min=acc.running_min,
+        site_identifier=f"{acc.layer_name}/{acc.site}",
         mean=acc.welford_mean,
         std=global_std,
         kurtosis=kurtosis,
-        outlier_frac=outlier_frac,
-        per_channel_std=per_channel_std,
-        attn_entropy=None,
+        outlier_fractions=outlier_frac,
         n_samples=acc.n,
+        per_channel_std=per_channel_std,
+        max=acc.running_max,
+        min=acc.running_min,
     )
 
 

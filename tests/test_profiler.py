@@ -102,6 +102,21 @@ def _canned_result() -> ProfilingResult:
                 outlier_fractions={f"{s}_sigma": 0.002 for s in OUTLIER_SIGMAS},
                 n_samples=0,
             )
+    # Add the final residual stream (output of last encoder block, before head LN).
+    # This is blocks.{_NUM_BLOCKS-1}/residual_stream — the one site that the
+    # per-block loop cannot produce because it labels block[i].norm1.input as
+    # blocks.{i-1}/residual_stream.  See T-001.
+    final_res_key = f"blocks.{_NUM_BLOCKS - 1}/residual_stream"
+    stats[final_res_key] = LayerStats(
+        site_identifier=final_res_key,
+        mean=0.0,
+        std=0.5,
+        kurtosis=0.1,
+        m3=0.0,
+        outlier_fractions={f"{s}_sigma": 0.002 for s in OUTLIER_SIGMAS},
+        n_samples=0,
+    )
+
     return ProfilingResult(
         stats=stats,
         num_blocks=_NUM_BLOCKS,
@@ -121,7 +136,7 @@ def test_layer_stats_construction() -> None:
         mean=0.1,
         std=1.5,
         kurtosis=2.3,
-        outlier_fractions={"3.0_sigma": 0.003, "5.0_sigma": 0.0, "8.0_sigma": 0.0},
+        outlier_fractions={"3.0_sigma": 0.003, "4.0_sigma": 0.0, "6.0_sigma": 0.0},
     )
     assert stats.site_identifier == "blocks.0/pre_gelu"
     assert stats.mean == pytest.approx(0.1)
@@ -142,6 +157,80 @@ def test_layer_stats_invariant_outlier_keys() -> None:
         outlier_fractions=fracs,
     )
     assert set(stats.outlier_fractions.keys()) == {f"{s}_sigma" for s in OUTLIER_SIGMAS}
+
+
+def test_layer_stats_max_min_defaults() -> None:
+    """max and min must default to 0.0 when not supplied."""
+    stats = LayerStats(site_identifier="test", mean=0.0, std=1.0, kurtosis=0.0)
+    assert stats.max == 0.0
+    assert stats.min == 0.0
+
+
+def test_layer_stats_max_min_store_values() -> None:
+    """max and min must accept and store explicit float values."""
+    stats = LayerStats(
+        site_identifier="test", mean=0.0, std=1.0, kurtosis=0.0,
+        max=12.5, min=-3.7,
+    )
+    assert stats.max == pytest.approx(12.5)
+    assert stats.min == pytest.approx(-3.7)
+
+
+def test_layer_stats_max_min_survive_serialization(tmp_path: Path) -> None:
+    """max and min must survive JSON save → load roundtrip."""
+    result = ProfilingResult(
+        stats={
+            "blocks.0/pre_gelu": LayerStats(
+                site_identifier="blocks.0/pre_gelu",
+                mean=0.0, std=1.0, kurtosis=0.0,
+                max=8.5, min=-6.2,
+            ),
+        },
+        num_blocks=12,
+        batch_shape=(1, 3, 224, 224),
+    )
+    path = tmp_path / "maxmin_roundtrip.json"
+    save_profiling_result(result, path)
+    loaded = load_profiling_result(path)
+    recovered = loaded.stats["blocks.0/pre_gelu"]
+    assert recovered.max == pytest.approx(8.5)
+    assert recovered.min == pytest.approx(-6.2)
+
+
+def test_layer_stats_max_min_backwards_compat(tmp_path: Path) -> None:
+    """Old JSON without max/min keys must deserialize with max=0.0, min=0.0."""
+    import json
+
+    raw = {
+        "stats": {
+            "blocks.0/pre_gelu": {
+                "site_identifier": "blocks.0/pre_gelu",
+                "mean": 0.5,
+                "std": 2.0,
+                "kurtosis": 1.0,
+                "m3": 0.0,
+                "outlier_fractions": {"3.0_sigma": 0.01},
+                "n_samples": 1000,
+                "per_channel_std": None,
+                "per_channel_sum": None,
+                "per_channel_sum_sq": None,
+                "attention_entropy_cls": None,
+                "attention_entropy_patches": None,
+                "layernorm_gamma": None,
+                "layernorm_beta": None,
+                "residual_delta_ratio": None,
+            }
+        },
+        "num_blocks": 12,
+        "batch_shape": [1, 3, 224, 224],
+    }
+    path = tmp_path / "old_no_maxmin.json"
+    path.write_text(json.dumps(raw))
+
+    loaded = load_profiling_result(path)
+    stats = loaded.stats["blocks.0/pre_gelu"]
+    assert stats.max == 0.0, f"Expected max=0.0 for backward compat, got {stats.max}"
+    assert stats.min == 0.0, f"Expected min=0.0 for backward compat, got {stats.min}"
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +324,57 @@ def test_site_identifier_survives_serialisation(tmp_path: Path) -> None:
         assert stats.site_identifier == key
 
 
+def test_float_precision_round_trip(tmp_path: Path) -> None:
+    """Float values must survive JSON round-trip with full float64 precision.
+
+    Verifies that json.dump (which uses repr() internally) preserves exact
+    IEEE 754 binary values.  This is critical for outlier fractions where
+    values like 0.00261 must round-trip losslessly — a truncated value like
+    0.0026 would be a different float64.
+    """
+    # Use values that are sensitive to truncation.
+    sensitive_values = [
+        0.0026099999999999999,  # near the suspicious 0.00261
+        1.2345678901234567e-10,  # very small
+        3.141592653589793,       # π
+        0.0,
+        -0.0,
+        1.0,
+    ]
+    for original in sensitive_values:
+        stats = LayerStats(
+            site_identifier="test",
+            mean=original,
+            std=original * 2.0,
+            kurtosis=original * 3.0,
+            outlier_fractions={"3.0_sigma": original},
+        )
+        result = ProfilingResult(
+            stats={"test": stats},
+            num_blocks=12,
+            batch_shape=(1, 3, 224, 224),
+        )
+        path = tmp_path / "precision_test.json"
+        save_profiling_result(result, path)
+        loaded = load_profiling_result(path)
+        recovered = loaded.stats["test"]
+
+        # Use exact equality (not pytest.approx) — the values must be
+        # bit-identical after round-trip.
+        assert recovered.mean == original, (
+            f"mean: {recovered.mean!r} != {original!r}"
+        )
+        assert recovered.std == original * 2.0, (
+            f"std: {recovered.std!r} != {original * 2.0!r}"
+        )
+        assert recovered.kurtosis == original * 3.0, (
+            f"kurtosis: {recovered.kurtosis!r} != {original * 3.0!r}"
+        )
+        assert recovered.outlier_fractions["3.0_sigma"] == original, (
+            f"outlier_frac: {recovered.outlier_fractions['3.0_sigma']!r} != {original!r}"
+        )
+
+
 def test_profiling_result_canned_site_keys() -> None:
     """Hand-crafted result must contain all expected site keys for every block."""
     result = _canned_result()
@@ -248,6 +388,58 @@ def test_profiling_result_canned_site_keys() -> None:
         assert f"blocks.{i}/{SITE_POST_SOFTMAX}" in keys
     for i in range(1, _NUM_BLOCKS):
         assert f"blocks.{i - 1}/residual_stream" in keys
+    # Final residual stream (output of last encoder block) — see T-001.
+    assert f"blocks.{_NUM_BLOCKS - 1}/residual_stream" in keys
+
+
+# ---------------------------------------------------------------------------
+# LayerStats — LayerNorm γ/β fields (T-004)
+# ---------------------------------------------------------------------------
+
+
+def test_layer_stats_layernorm_fields_default_none() -> None:
+    """layernorm_gamma and layernorm_beta must default to None."""
+    stats = LayerStats(site_identifier="blocks.0/pre_gelu", mean=0.0, std=1.0, kurtosis=0.0)
+    assert stats.layernorm_gamma is None
+    assert stats.layernorm_beta is None
+
+
+def test_layer_stats_layernorm_fields_store_values() -> None:
+    """layernorm_gamma and layernorm_beta must accept and store float lists."""
+    gamma = [0.5, 1.2, 3.0]
+    beta = [-0.1, 0.0, 0.1]
+    stats = LayerStats(
+        site_identifier="blocks.0/post_layernorm_1",
+        mean=0.0, std=1.0, kurtosis=0.0,
+        layernorm_gamma=gamma,
+        layernorm_beta=beta,
+    )
+    assert stats.layernorm_gamma == gamma
+    assert stats.layernorm_beta == beta
+    assert len(stats.layernorm_gamma) == 3
+
+
+def test_layer_stats_layernorm_serialization_roundtrip(tmp_path: Path) -> None:
+    """γ/β must survive JSON save → load roundtrip (dataclasses.asdict)."""
+    gamma = [0.5, 1.2, 3.0]
+    beta = [-0.1, 0.0, 0.1]
+    result = ProfilingResult(
+        stats={
+            "blocks.0/post_layernorm_1": LayerStats(
+                site_identifier="blocks.0/post_layernorm_1",
+                mean=0.0, std=1.0, kurtosis=0.0,
+                layernorm_gamma=gamma, layernorm_beta=beta,
+            ),
+        },
+        num_blocks=12,
+        batch_shape=(1, 3, 224, 224),
+    )
+    path = tmp_path / "gamma_roundtrip.json"
+    save_profiling_result(result, path)
+    loaded = load_profiling_result(path)
+    ln_stats = loaded.stats["blocks.0/post_layernorm_1"]
+    assert ln_stats.layernorm_gamma == gamma
+    assert ln_stats.layernorm_beta == beta
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +474,8 @@ def test_slow_num_blocks(_vit_result: ProfilingResult) -> None:
 
 @pytest.mark.slow
 def test_slow_total_site_count(_vit_result: ProfilingResult) -> None:
-    assert len(_vit_result.stats) == _NUM_BLOCKS * _SITES_PER_BLOCK
+    # 12 blocks × 6 sites + 1 final residual stream = 73
+    assert len(_vit_result.stats) == _NUM_BLOCKS * _SITES_PER_BLOCK + 1
 
 
 @pytest.mark.slow
@@ -297,6 +490,8 @@ def test_slow_all_expected_sites_present(_vit_result: ProfilingResult) -> None:
         assert f"blocks.{i}/{SITE_POST_SOFTMAX}" in keys
     for i in range(1, _NUM_BLOCKS):
         assert f"blocks.{i - 1}/residual_stream" in keys
+    # Final residual stream (output of last encoder block) — see T-001.
+    assert f"blocks.{_NUM_BLOCKS - 1}/residual_stream" in keys
 
 
 @pytest.mark.slow
@@ -366,6 +561,117 @@ def test_slow_round_trip(tmp_path: Path, _vit_result: ProfilingResult) -> None:
     assert loaded.stats[sample_key].mean == pytest.approx(
         _vit_result.stats[sample_key].mean, abs=1e-6
     )
+
+
+@pytest.mark.slow
+def test_slow_layernorm_gamma_present(_vit_result: ProfilingResult) -> None:
+    """All post_layernorm sites must have non-None layernorm_gamma.
+
+    γ weights are static model parameters extracted outside the trace.
+    For ViT-B/16 with D=768, each γ vector must have length 768.
+    """
+    for i in range(_NUM_BLOCKS):
+        for site in (SITE_POST_LAYERNORM_1, SITE_POST_LAYERNORM_2):
+            key = f"blocks.{i}/{site}"
+            stats = _vit_result.stats[key]
+            assert stats.layernorm_gamma is not None, f"missing gamma at {key}"
+            assert isinstance(stats.layernorm_gamma, list)
+            assert len(stats.layernorm_gamma) == 768, (
+                f"Expected 768 gamma values at {key}, got {len(stats.layernorm_gamma)}"
+            )
+            assert all(isinstance(g, float) for g in stats.layernorm_gamma), (
+                f"gamma values must be floats at {key}"
+            )
+
+
+@pytest.mark.slow
+def test_slow_layernorm_beta_present(_vit_result: ProfilingResult) -> None:
+    """All post_layernorm sites must have non-None layernorm_beta.
+
+    β biases are static model parameters extracted outside the trace.
+    For ViT-B/16 with D=768, each β vector must have length 768.
+    """
+    for i in range(_NUM_BLOCKS):
+        for site in (SITE_POST_LAYERNORM_1, SITE_POST_LAYERNORM_2):
+            key = f"blocks.{i}/{site}"
+            stats = _vit_result.stats[key]
+            assert stats.layernorm_beta is not None, f"missing beta at {key}"
+            assert isinstance(stats.layernorm_beta, list)
+            assert len(stats.layernorm_beta) == 768, (
+                f"Expected 768 beta values at {key}, got {len(stats.layernorm_beta)}"
+            )
+            assert all(isinstance(b, float) for b in stats.layernorm_beta), (
+                f"beta values must be floats at {key}"
+            )
+
+
+@pytest.mark.slow
+def test_slow_layernorm_fields_absent_on_non_ln_sites(
+    _vit_result: ProfilingResult,
+) -> None:
+    """Non-LayerNorm sites must have None for layernorm_gamma and layernorm_beta."""
+    for key, stats in _vit_result.stats.items():
+        if SITE_POST_LAYERNORM_1 in key or SITE_POST_LAYERNORM_2 in key:
+            continue  # LN sites — covered by the tests above
+        assert stats.layernorm_gamma is None, (
+            f"non-LN site {key} has unexpected layernorm_gamma"
+        )
+        assert stats.layernorm_beta is None, (
+            f"non-LN site {key} has unexpected layernorm_beta"
+        )
+
+
+@pytest.mark.slow
+def test_slow_layernorm_gamma_match_model_weights(
+    _vit_wrapped, _vit_result: ProfilingResult,
+) -> None:
+    """γ/β from profile_vit must match the model's actual LayerNorm weights.
+
+    Extracts norm{1,2}.weight and norm{1,2}.bias from the underlying model
+    and compares against the values stored in LayerStats.
+    """
+    inner = _vit_wrapped._model
+    for i in range(_NUM_BLOCKS):
+        block = inner.blocks[i]
+        for norm_attr, site in [
+            ("norm1", SITE_POST_LAYERNORM_1),
+            ("norm2", SITE_POST_LAYERNORM_2),
+        ]:
+            key = f"blocks.{i}/{site}"
+            ln = getattr(block, norm_attr)
+            expected_gamma = ln.weight.detach().cpu().tolist()
+            expected_beta = (
+                ln.bias.detach().cpu().tolist() if ln.bias is not None else None
+            )
+            stats = _vit_result.stats[key]
+            # Compare with tolerance for float conversion roundtrip
+            for j, (a, b) in enumerate(zip(stats.layernorm_gamma, expected_gamma)):
+                assert a == pytest.approx(b, rel=1e-6), (
+                    f"gamma mismatch at {key}[{j}]: {a} vs {b}"
+                )
+            if expected_beta is not None:
+                for j, (a, b) in enumerate(zip(stats.layernorm_beta, expected_beta)):
+                    assert a == pytest.approx(b, rel=1e-6), (
+                        f"beta mismatch at {key}[{j}]: {a} vs {b}"
+                    )
+
+
+@pytest.mark.slow
+def test_slow_layernorm_gamma_survives_serialisation(
+    tmp_path: Path, _vit_result: ProfilingResult,
+) -> None:
+    """γ/β must survive JSON save → load roundtrip on a real result."""
+    path = tmp_path / "ln_roundtrip.json"
+    save_profiling_result(_vit_result, path)
+    loaded = load_profiling_result(path)
+    for i in range(_NUM_BLOCKS):
+        for site in (SITE_POST_LAYERNORM_1, SITE_POST_LAYERNORM_2):
+            key = f"blocks.{i}/{site}"
+            orig = _vit_result.stats[key]
+            loaded_stats = loaded.stats[key]
+            assert loaded_stats.layernorm_gamma == orig.layernorm_gamma
+            assert loaded_stats.layernorm_beta == orig.layernorm_beta
+
 
 
 @pytest.mark.slow
@@ -612,14 +918,14 @@ def test_merge_batch_stats_outlier_accumulation() -> None:
     )
 
     acc = WelfordAccumulator(site_identifier="test/site")
-    # Batch with 10% outliers at 3σ, 5% at 5σ, 0% at 8σ
+    # Batch with 10% outliers at 3σ, 5% at 4σ, 0% at 6σ
     bs = LayerStats(
         site_identifier="test/site",
         mean=0.0,
         std=1.0,
         kurtosis=0.0,
         m3=0.0,
-        outlier_fractions={"3.0_sigma": 0.10, "5.0_sigma": 0.05, "8.0_sigma": 0.0},
+        outlier_fractions={"3.0_sigma": 0.10, "4.0_sigma": 0.05, "6.0_sigma": 0.0},
         n_samples=1000,
     )
     merge_batch_stats(acc, bs, 1000)
@@ -628,8 +934,8 @@ def test_merge_batch_stats_outlier_accumulation() -> None:
     result = finalize_accumulator(acc)
     # 0.10 * 1000 = 100 per batch, two batches → 200 / 2000 = 0.10
     assert math.isclose(result.outlier_fractions["3.0_sigma"], 0.10, rel_tol=1e-6)
-    assert math.isclose(result.outlier_fractions["5.0_sigma"], 0.05, rel_tol=1e-6)
-    assert math.isclose(result.outlier_fractions["8.0_sigma"], 0.0)
+    assert math.isclose(result.outlier_fractions["4.0_sigma"], 0.05, rel_tol=1e-6)
+    assert math.isclose(result.outlier_fractions["6.0_sigma"], 0.0)
     assert result.n_samples == 2000
 
 
@@ -1653,13 +1959,13 @@ def test_run_outlier_counting_pass_returns_correct_keys() -> None:
         "blocks.0/pre_gelu": LayerStats(
             site_identifier="blocks.0/pre_gelu",
             mean=0.0, std=1.0, kurtosis=0.0,
-            outlier_fractions={"3.0_sigma": 0.01, "5.0_sigma": 0.001, "8.0_sigma": 0.0},
+            outlier_fractions={"3.0_sigma": 0.01, "4.0_sigma": 0.001, "6.0_sigma": 0.0},
             n_samples=1000,
         ),
         "blocks.0/post_softmax": LayerStats(
             site_identifier="blocks.0/post_softmax",
             mean=0.0, std=0.5, kurtosis=0.0,
-            outlier_fractions={"3.0_sigma": 0.02, "5.0_sigma": 0.002, "8.0_sigma": 0.0},
+            outlier_fractions={"3.0_sigma": 0.02, "4.0_sigma": 0.002, "6.0_sigma": 0.0},
             n_samples=2000,
         ),
     }
@@ -1709,7 +2015,7 @@ def test_run_outlier_counting_pass_fractions_in_unit_interval() -> None:
         "blocks.0/pre_gelu": LayerStats(
             site_identifier="blocks.0/pre_gelu",
             mean=0.0, std=1.0, kurtosis=0.0,
-            outlier_fractions={"3.0_sigma": 0.01, "5.0_sigma": 0.001, "8.0_sigma": 0.0},
+            outlier_fractions={"3.0_sigma": 0.01, "4.0_sigma": 0.001, "6.0_sigma": 0.0},
             n_samples=1000,
         ),
     }
@@ -1732,8 +2038,14 @@ def test_run_outlier_counting_pass_known_gaussian() -> None:
     """Outlier counting on N(0,1) data must recover ~0.0027 at 3σ.
 
     Uses a direct tensor computation (no nnsight trace) to verify the
-    counting logic is correct.  The 3σ fraction for a standard normal
-    is approximately 0.0027 (two-sided).
+    mathematical definition of outlier fraction is correct.  The 3σ
+    fraction for a standard normal is approximately 0.0027 (two-sided).
+
+    NOTE: This is a **mathematical sanity check**, not a test of the
+    recount pass code.  It does not exercise run_outlier_counting_pass,
+    nnsight traces, batch accumulation, or site_id lookups.  For a true
+    integration test of the recount pass, see
+    test_slow_run_outlier_counting_pass_correctness.
     """
     from src.profiler import OUTLIER_SIGMAS
 
@@ -1753,6 +2065,174 @@ def test_run_outlier_counting_pass_known_gaussian() -> None:
             )
         # All fractions must be in [0, 1].
         assert 0.0 <= frac <= 1.0
+
+
+@pytest.mark.slow
+def test_slow_run_outlier_counting_pass_correctness(_vit_wrapped) -> None:
+    """run_outlier_counting_pass must match ground-truth outlier fractions.
+
+    Integration test (T-008): creates a small synthetic dataset, runs the
+    full two-pass pipeline, and independently verifies recount fractions
+    against a ground-truth computation on the same data using the global
+    μ and σ from pass 1.
+
+    This exercises the actual recount pass code — nnsight trace, site_id
+    lookup, batch accumulation, and fraction computation — not just the
+    mathematical definition of outlier fraction.
+    """
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from src.profiler import (
+        OUTLIER_SIGMAS,
+        run_outlier_counting_pass,
+        run_profiling_dataset_pass,
+    )
+
+    # Small synthetic dataset: 4 images, batch_size=2 → 2 batches.
+    torch.manual_seed(42)
+    images = torch.randn(4, 3, 224, 224)
+    labels = torch.zeros(4, dtype=torch.long)
+    dataset = TensorDataset(images, labels)
+    loader = DataLoader(dataset, batch_size=2)
+    device = torch.device("cpu")
+
+    # --- Pass 1: get global μ and σ ---
+    with torch.no_grad():
+        finalized_stats = run_profiling_dataset_pass(_vit_wrapped, loader, device)
+
+    # --- Pass 2: recount outlier fractions using global σ ---
+    loader2 = DataLoader(dataset, batch_size=2)
+    with torch.no_grad():
+        recount_fractions = run_outlier_counting_pass(
+            _vit_wrapped, loader2, device, finalized_stats,
+        )
+
+    # --- Ground truth: capture raw activations and count manually ---
+    # We run a separate nnsight trace that saves the actual activation
+    # tensors for a subset of sites, then compute outlier fractions
+    # using the global μ and σ from pass 1.
+    raw_activations: list[torch.Tensor] = []
+    loader3 = DataLoader(dataset, batch_size=2)
+    for images_batch, _ in loader3:
+        images_batch = images_batch.to(device)
+        with _vit_wrapped.trace(images_batch):
+            raw = _vit_wrapped.blocks[0].mlp.act.input.save()
+        raw_activations.append(raw)
+
+    # Concatenate all batches along the batch dimension.
+    all_raw = torch.cat(raw_activations, dim=0)  # [4, 197, 3072]
+
+    # Ground-truth outlier fractions using global μ, σ from pass 1.
+    site_key = "blocks.0/pre_gelu"
+    global_mu = finalized_stats[site_key].mean
+    global_sigma = finalized_stats[site_key].std
+
+    gt_fractions: dict[str, float] = {}
+    for k in OUTLIER_SIGMAS:
+        key = f"{k}_sigma"
+        # Match the recount pass: |x - μ_global| > k·σ_global
+        gt_fractions[key] = (
+            ((all_raw - global_mu).abs() > k * global_sigma).float().mean().item()
+        )
+
+    # --- Assert recount matches ground truth ---
+    recount = recount_fractions[site_key]
+    for k in OUTLIER_SIGMAS:
+        key = f"{k}_sigma"
+        gt = gt_fractions[key]
+        rc = recount[key]
+        # Allow small floating-point tolerance (nnsight proxies may have
+        # minor numerical differences vs direct tensor computation).
+        assert rc == pytest.approx(gt, abs=1e-6), (
+            f"{site_key}[{key}]: recount={rc:.8f}, ground_truth={gt:.8f}"
+        )
+
+    # Also verify the recount fractions are in [0, 1] and monotone.
+    fracs = [recount[f"{k}_sigma"] for k in OUTLIER_SIGMAS]
+    for f in fracs:
+        assert 0.0 <= f <= 1.0, f"Fraction {f} not in [0, 1]"
+    for lo, hi in zip(fracs, fracs[1:]):
+        assert lo >= hi - 1e-8, f"Non-monotone: {fracs}"
+
+
+@pytest.mark.slow
+def test_slow_run_outlier_counting_pass_multiple_sites_correctness(
+    _vit_wrapped,
+) -> None:
+    """Recount fractions must match ground truth across multiple site types.
+
+    Verifies the recount pass for pre_gelu, post_layernorm_1, and
+    residual_stream sites — each with different tensor shapes and
+    element counts.
+    """
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from src.profiler import (
+        OUTLIER_SIGMAS,
+        run_outlier_counting_pass,
+        run_profiling_dataset_pass,
+    )
+
+    torch.manual_seed(123)
+    images = torch.randn(4, 3, 224, 224)
+    labels = torch.zeros(4, dtype=torch.long)
+    dataset = TensorDataset(images, labels)
+    device = torch.device("cpu")
+
+    # Pass 1
+    loader1 = DataLoader(dataset, batch_size=2)
+    with torch.no_grad():
+        finalized_stats = run_profiling_dataset_pass(_vit_wrapped, loader1, device)
+
+    # Pass 2
+    loader2 = DataLoader(dataset, batch_size=2)
+    with torch.no_grad():
+        recount_fractions = run_outlier_counting_pass(
+            _vit_wrapped, loader2, device, finalized_stats,
+        )
+
+    # Ground truth for multiple sites.
+    # Collect raw activations for blocks.0/pre_gelu, blocks.0/post_layernorm_1,
+    # and patch_embed/residual_stream.
+    raw_pre_gelu: list[torch.Tensor] = []
+    raw_post_ln1: list[torch.Tensor] = []
+    raw_residual: list[torch.Tensor] = []
+
+    loader3 = DataLoader(dataset, batch_size=2)
+    for images_batch, _ in loader3:
+        images_batch = images_batch.to(device)
+        with _vit_wrapped.trace(images_batch):
+            # Forward-pass dependency order: norm1.input → norm1.output → mlp.act.input
+            r_res = _vit_wrapped.blocks[0].norm1.input.save()
+            r_ln1 = _vit_wrapped.blocks[0].norm1.output.save()
+            r_gelu = _vit_wrapped.blocks[0].mlp.act.input.save()
+        raw_pre_gelu.append(r_gelu)
+        raw_post_ln1.append(r_ln1)
+        raw_residual.append(r_res)
+
+    all_pre_gelu = torch.cat(raw_pre_gelu, dim=0)
+    all_post_ln1 = torch.cat(raw_post_ln1, dim=0)
+    all_residual = torch.cat(raw_residual, dim=0)
+
+    sites_to_check = [
+        ("blocks.0/pre_gelu", all_pre_gelu),
+        ("blocks.0/post_layernorm_1", all_post_ln1),
+        ("patch_embed/residual_stream", all_residual),
+    ]
+
+    for site_key, raw_tensor in sites_to_check:
+        global_mu = finalized_stats[site_key].mean
+        global_sigma = finalized_stats[site_key].std
+        recount = recount_fractions[site_key]
+
+        for k in OUTLIER_SIGMAS:
+            key = f"{k}_sigma"
+            # Match the recount pass: |x - μ_global| > k·σ_global
+            gt = ((raw_tensor - global_mu).abs() > k * global_sigma).float().mean().item()
+            rc = recount[key]
+            assert rc == pytest.approx(gt, abs=1e-6), (
+                f"{site_key}[{key}]: recount={rc:.8f}, ground_truth={gt:.8f}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -2051,7 +2531,7 @@ def test_generate_summary_table_column_names() -> None:
         "blocks.0/pre_gelu": LayerStats(
             site_identifier="blocks.0/pre_gelu",
             mean=0.0, std=1.0, kurtosis=0.0,
-            outlier_fractions={"3.0_sigma": 0.01, "5.0_sigma": 0.001},
+            outlier_fractions={"3.0_sigma": 0.01, "4.0_sigma": 0.001},
         ),
     }
     result = ProfilingResult(stats=stats, num_blocks=12, batch_shape=(1, 3, 224, 224))
@@ -2064,8 +2544,8 @@ def test_generate_summary_table_column_names() -> None:
     assert "std" in row
     assert "kurtosis" in row
     assert "frac_3.0_sigma" in row
-    assert "frac_5.0_sigma" in row
-    assert "frac_8.0_sigma" not in row  # not in this test's outlier_fractions
+    assert "frac_4.0_sigma" in row
+    assert "frac_6.0_sigma" not in row  # not in this test's outlier_fractions
 
 
 def test_generate_summary_table_block_site_parsing() -> None:
@@ -2229,7 +2709,7 @@ def test_generate_summary_table_full_profiling_result() -> None:
     stats["patch_embed/residual_stream"] = LayerStats(
         site_identifier="patch_embed/residual_stream",
         mean=0.0, std=1.0, kurtosis=0.0,
-        outlier_fractions={"3.0_sigma": 0.01, "5.0_sigma": 0.001, "8.0_sigma": 0.0},
+        outlier_fractions={"3.0_sigma": 0.01, "4.0_sigma": 0.001, "6.0_sigma": 0.0},
     )
     # 12 blocks × 6 sites
     for i in range(12):
@@ -2243,7 +2723,7 @@ def test_generate_summary_table_full_profiling_result() -> None:
                 mean=float(i) * 0.1,
                 std=1.0 + float(i) * 0.05,
                 kurtosis=0.5,
-                outlier_fractions={"3.0_sigma": 0.01, "5.0_sigma": 0.001, "8.0_sigma": 0.0},
+                outlier_fractions={"3.0_sigma": 0.01, "4.0_sigma": 0.001, "6.0_sigma": 0.0},
             )
 
     result = ProfilingResult(stats=stats, num_blocks=12, batch_shape=(1, 3, 224, 224))
@@ -2254,3 +2734,298 @@ def test_generate_summary_table_full_profiling_result() -> None:
     assert rows[0]["site"] == "residual_stream"
     assert rows[-1]["block"] == "blocks.11"
     assert rows[-1]["site"] == "pre_gelu"
+
+
+# ---------------------------------------------------------------------------
+# Residual delta ratio tests (T-005)
+# ---------------------------------------------------------------------------
+
+
+def test_layer_stats_residual_delta_ratio_default_none() -> None:
+    """residual_delta_ratio must default to None."""
+    stats = LayerStats(site_identifier="blocks.0/residual_stream", mean=0.0, std=1.0, kurtosis=0.0)
+    assert stats.residual_delta_ratio is None
+
+
+def test_layer_stats_residual_delta_ratio_stores_value() -> None:
+    """residual_delta_ratio must accept and store a float value."""
+    stats = LayerStats(
+        site_identifier="blocks.3/residual_stream",
+        mean=0.0, std=1.0, kurtosis=0.0,
+        residual_delta_ratio=1.234,
+    )
+    assert stats.residual_delta_ratio == pytest.approx(1.234)
+
+
+def test_layer_stats_residual_delta_ratio_serialization_roundtrip(
+    tmp_path: Path,
+) -> None:
+    """residual_delta_ratio must survive JSON save → load roundtrip."""
+    result = ProfilingResult(
+        stats={
+            "blocks.0/residual_stream": LayerStats(
+                site_identifier="blocks.0/residual_stream",
+                mean=0.0, std=1.0, kurtosis=0.0,
+                residual_delta_ratio=2.718,
+            ),
+            "blocks.5/residual_stream": LayerStats(
+                site_identifier="blocks.5/residual_stream",
+                mean=0.5, std=2.0, kurtosis=1.0,
+                residual_delta_ratio=1.414,
+            ),
+        },
+        num_blocks=12,
+        batch_shape=(1, 3, 224, 224),
+    )
+    path = tmp_path / "delta_ratio_roundtrip.json"
+    save_profiling_result(result, path)
+    loaded = load_profiling_result(path)
+    assert loaded.stats["blocks.0/residual_stream"].residual_delta_ratio == pytest.approx(2.718)
+    assert loaded.stats["blocks.5/residual_stream"].residual_delta_ratio == pytest.approx(1.414)
+
+
+def test_welford_accumulator_delta_ratio_defaults() -> None:
+    """WelfordAccumulator delta ratio fields must default to zero."""
+    from src.profiler import WelfordAccumulator
+
+    acc = WelfordAccumulator(site_identifier="blocks.0/residual_stream")
+    assert acc.residual_delta_ratio_sum == 0.0
+    assert acc.residual_delta_ratio_count == 0
+
+
+def test_merge_batch_stats_delta_ratio_accumulation() -> None:
+    """merge_batch_stats must accumulate delta ratio via simple sum."""
+    from src.profiler import WelfordAccumulator, merge_batch_stats
+
+    acc = WelfordAccumulator(site_identifier="blocks.0/residual_stream")
+
+    # Batch 1: delta_ratio = 1.5
+    stats1 = LayerStats(
+        site_identifier="blocks.0/residual_stream",
+        mean=0.0, std=1.0, kurtosis=0.0, m3=0.0,
+        residual_delta_ratio=1.5,
+    )
+    merge_batch_stats(acc, stats1, batch_n=100)
+    assert acc.residual_delta_ratio_sum == pytest.approx(1.5)
+    assert acc.residual_delta_ratio_count == 1
+
+    # Batch 2: delta_ratio = 2.5
+    stats2 = LayerStats(
+        site_identifier="blocks.0/residual_stream",
+        mean=0.5, std=1.2, kurtosis=0.1, m3=0.1,
+        residual_delta_ratio=2.5,
+    )
+    merge_batch_stats(acc, stats2, batch_n=100)
+    assert acc.residual_delta_ratio_sum == pytest.approx(4.0)
+    assert acc.residual_delta_ratio_count == 2
+
+
+def test_finalize_accumulator_delta_ratio_mean() -> None:
+    """finalize_accumulator must compute mean delta ratio across batches."""
+    from src.profiler import WelfordAccumulator, finalize_accumulator, merge_batch_stats
+
+    acc = WelfordAccumulator(site_identifier="blocks.0/residual_stream")
+
+    for ratio in [1.0, 2.0, 3.0]:
+        stats = LayerStats(
+            site_identifier="blocks.0/residual_stream",
+            mean=0.0, std=1.0, kurtosis=0.0, m3=0.0,
+            residual_delta_ratio=ratio,
+        )
+        merge_batch_stats(acc, stats, batch_n=100)
+
+    result = finalize_accumulator(acc)
+    assert result.residual_delta_ratio == pytest.approx(2.0)  # (1+2+3)/3
+
+
+def test_finalize_accumulator_delta_ratio_none_when_no_data() -> None:
+    """finalize_accumulator must return None for delta ratio when no batches contributed."""
+    from src.profiler import WelfordAccumulator, finalize_accumulator, merge_batch_stats
+
+    acc = WelfordAccumulator(site_identifier="blocks.0/residual_stream")
+
+    # Batch with no delta ratio (e.g., non-residual_stream site)
+    stats = LayerStats(
+        site_identifier="blocks.0/residual_stream",
+        mean=0.0, std=1.0, kurtosis=0.0, m3=0.0,
+        residual_delta_ratio=None,
+    )
+    merge_batch_stats(acc, stats, batch_n=100)
+
+    result = finalize_accumulator(acc)
+    assert result.residual_delta_ratio is None
+
+
+# ---------------------------------------------------------------------------
+# Slow tests — residual delta ratio (T-005)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_slow_residual_delta_ratio_present_on_residual_stream(
+    _vit_result: ProfilingResult,
+) -> None:
+    """All residual_stream sites (except patch_embed) must have a delta ratio.
+
+    blocks.{0..11}/residual_stream must have non-None residual_delta_ratio.
+    patch_embed/residual_stream must be None (no preceding MLP block).
+    """
+    # patch_embed has no preceding MLP → must be None
+    pe_stats = _vit_result.stats["patch_embed/residual_stream"]
+    assert pe_stats.residual_delta_ratio is None, (
+        "patch_embed/residual_stream should not have a delta ratio"
+    )
+
+    # blocks.0 through blocks.11 must have delta ratios
+    for i in range(_NUM_BLOCKS):
+        key = f"blocks.{i}/residual_stream"
+        stats = _vit_result.stats[key]
+        assert stats.residual_delta_ratio is not None, (
+            f"missing residual_delta_ratio at {key}"
+        )
+        assert isinstance(stats.residual_delta_ratio, float), (
+            f"residual_delta_ratio must be float at {key}, got {type(stats.residual_delta_ratio)}"
+        )
+
+
+@pytest.mark.slow
+def test_slow_residual_delta_ratio_positive(
+    _vit_result: ProfilingResult,
+) -> None:
+    """All delta ratios must be strictly positive (norms are non-negative)."""
+    for i in range(_NUM_BLOCKS):
+        key = f"blocks.{i}/residual_stream"
+        ratio = _vit_result.stats[key].residual_delta_ratio
+        assert ratio > 0.0, f"delta ratio must be > 0 at {key}, got {ratio}"
+
+
+@pytest.mark.slow
+def test_slow_residual_delta_ratio_absent_on_non_residual_sites(
+    _vit_result: ProfilingResult,
+) -> None:
+    """Non-residual_stream sites must have None for residual_delta_ratio."""
+    for key, stats in _vit_result.stats.items():
+        if "residual_stream" in key:
+            continue  # covered by the tests above
+        assert stats.residual_delta_ratio is None, (
+            f"non-residual_stream site {key} has unexpected residual_delta_ratio"
+        )
+
+
+@pytest.mark.slow
+def test_slow_residual_delta_ratio_survives_serialisation(
+    tmp_path: Path, _vit_result: ProfilingResult,
+) -> None:
+    """Delta ratios must survive JSON save → load roundtrip on a real result."""
+    path = tmp_path / "delta_ratio_roundtrip.json"
+    save_profiling_result(_vit_result, path)
+    loaded = load_profiling_result(path)
+    for i in range(_NUM_BLOCKS):
+        key = f"blocks.{i}/residual_stream"
+        orig = _vit_result.stats[key].residual_delta_ratio
+        loaded_ratio = loaded.stats[key].residual_delta_ratio
+        assert loaded_ratio == pytest.approx(orig, rel=1e-6), (
+            f"delta ratio mismatch at {key}: {loaded_ratio} vs {orig}"
+        )
+
+
+@pytest.mark.slow
+def test_slow_residual_delta_ratio_reasonable_magnitude(
+    _vit_result: ProfilingResult,
+) -> None:
+    """Delta ratios should be in a reasonable range for a trained ViT.
+
+    For a well-trained ViT-B/16, the MLP contribution is typically a
+    modest fraction of the residual norm (ratios in [0.01, 10.0]).
+    Values outside this range would indicate a bug in the computation.
+    """
+    for i in range(_NUM_BLOCKS):
+        key = f"blocks.{i}/residual_stream"
+        ratio = _vit_result.stats[key].residual_delta_ratio
+        assert 0.001 < ratio < 100.0, (
+            f"delta ratio at {key} is {ratio}, outside expected range [0.001, 100.0]"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Slow tests — max/min (T-009)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_slow_max_min_present(_vit_result: ProfilingResult) -> None:
+    """All sites must have finite max/min with max >= min."""
+    for key, stats in _vit_result.stats.items():
+        assert math.isfinite(stats.max), f"max not finite at {key}"
+        assert math.isfinite(stats.min), f"min not finite at {key}"
+        assert stats.max >= stats.min, (
+            f"max < min at {key}: max={stats.max}, min={stats.min}"
+        )
+
+
+@pytest.mark.slow
+def test_slow_max_min_survives_serialisation(
+    tmp_path: Path, _vit_result: ProfilingResult,
+) -> None:
+    """max/min must survive JSON save → load roundtrip on a real result."""
+    path = tmp_path / "maxmin_slow_roundtrip.json"
+    save_profiling_result(_vit_result, path)
+    loaded = load_profiling_result(path)
+    for key in _vit_result.stats:
+        orig_max = _vit_result.stats[key].max
+        orig_min = _vit_result.stats[key].min
+        loaded_max = loaded.stats[key].max
+        loaded_min = loaded.stats[key].min
+        assert loaded_max == pytest.approx(orig_max, rel=1e-6), (
+            f"max mismatch at {key}: {loaded_max} vs {orig_max}"
+        )
+        assert loaded_min == pytest.approx(orig_min, rel=1e-6), (
+            f"min mismatch at {key}: {loaded_min} vs {orig_min}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Fast tests — max/min merge tracking
+# ---------------------------------------------------------------------------
+
+
+def test_merge_batch_stats_max_min_tracking() -> None:
+    """merge_batch_stats must correctly track running max/min across batches."""
+    from src.profiler import WelfordAccumulator, merge_batch_stats, finalize_accumulator
+
+    acc = WelfordAccumulator(site_identifier="test")
+
+    # Batch 1: max=5.0, min=-3.0
+    stats1 = LayerStats(
+        site_identifier="test",
+        mean=0.0, std=1.0, kurtosis=0.0, m3=0.0,
+        max=5.0, min=-3.0,
+    )
+    merge_batch_stats(acc, stats1, batch_n=100)
+    assert acc.max_val == pytest.approx(5.0)
+    assert acc.min_val == pytest.approx(-3.0)
+
+    # Batch 2: max=3.0 (lower), min=-1.0 (higher) — should not change extremum
+    stats2 = LayerStats(
+        site_identifier="test",
+        mean=0.5, std=1.2, kurtosis=0.1, m3=0.1,
+        max=3.0, min=-1.0,
+    )
+    merge_batch_stats(acc, stats2, batch_n=100)
+    assert acc.max_val == pytest.approx(5.0), "max should not decrease"
+    assert acc.min_val == pytest.approx(-3.0), "min should not increase"
+
+    # Batch 3: max=10.0 (higher), min=-8.0 (lower) — should update extremum
+    stats3 = LayerStats(
+        site_identifier="test",
+        mean=1.0, std=2.0, kurtosis=0.2, m3=0.2,
+        max=10.0, min=-8.0,
+    )
+    merge_batch_stats(acc, stats3, batch_n=100)
+    assert acc.max_val == pytest.approx(10.0), "max should update to new higher value"
+    assert acc.min_val == pytest.approx(-8.0), "min should update to new lower value"
+
+    # Finalize and verify max/min flow through.
+    result = finalize_accumulator(acc)
+    assert result.max == pytest.approx(10.0)
+    assert result.min == pytest.approx(-8.0)

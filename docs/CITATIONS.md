@@ -79,7 +79,7 @@ Each entry includes:
 - **Used in:**
   - `src/profiler.py` — `WelfordAccumulator` class name and the running
     mean/variance tracking pattern.
-  - `src/hooks.py` — Legacy `WelfordAccumulator` (3-site pipeline).
+  - `src/hooks.py` — Legacy Welford accumulator (3-site pipeline; LayerStats deleted 2026-07-30).
   - `docs/vit_profiling_framework.md` — §Per-Site Metrics.
 - **Verification:** ✅ Classic paper; the Pébay (2008) parallel merge
   generalises Welford's serial algorithm to the multi-batch setting.

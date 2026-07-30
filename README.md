@@ -37,7 +37,7 @@ dominated by a small number of massive outliers. This project answers three ques
 │   ├── config.py                # frozen dataclasses for all experiment configs
 │   ├── model.py                 # load ViT-B/16, evaluate top-1/top-5 accuracy
 │   ├── data_loader.py           # ImageFolder DataLoader with auto-shuffle
-│   ├── hooks.py                 # forward hook machinery (legacy, retained for reference)
+│   ├── hooks.py                 # forward hook machinery (legacy, LayerStats deleted 2026-07-30)
 │   ├── profiler.py              # nnsight-based profiler (primary, 6-site + Welford multi-batch)
 │   ├── ablation.py              # outlier zeroing, % zeroed, AblationResult (stub)
 │   ├── integer_gelu.py          # LUT construction + FP32 comparison (stub)
@@ -53,8 +53,7 @@ dominated by a small number of massive outliers. This project answers three ques
 │   ├── test_exceptions.py
 │   ├── test_utils.py
 │   ├── test_config.py
-│   ├── test_hooks.py
-│   ├── test_profiler.py         # 82 fast + 22 slow tests
+│   ├── test_profiler.py         # 88 fast + 34 slow tests
 │   ├── test_ablation.py
 │   ├── test_integer_gelu.py
 │   ├── test_data_loader.py

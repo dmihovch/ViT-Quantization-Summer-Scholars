@@ -14,7 +14,7 @@ nnsight trace context. Tested with PyTorch 2.12.1, nnsight 0.7.0, NVIDIA RTX 307
 | `src/utils.py` | ✅ Done | `test_utils.py` 3/3 | — |
 | `src/model.py` | ✅ Done | — (weights required) | — |
 | `src/data_loader.py` | ✅ Done | `test_data_loader.py` 2/2 | — |
-| `src/hooks.py` | ✅ Kept (legacy) | `test_hooks.py` 26/26 | — |
+| `src/hooks.py` | ✅ Kept (legacy, LayerStats deleted 2026-07-30) | — (tests deleted) | — |
 | `src/profiler.py` — single-pass API | ✅ Done | `test_profiler.py` 11/11 | 13 slow |
 | `src/profiler.py` — Welford multi-batch | ✅ Done | `test_profiler.py` 21 fast | 7 slow |
 | `src/profiler.py` — `histogram_profile_vit` | ✅ Done (Step 6b) | 2 fast | 2 slow |
@@ -160,7 +160,7 @@ class LayerStats:
     kurtosis: float               # excess kurtosis: E[(x−μ)⁴]/σ⁴ − 3 (exact, Pébay 2008)
     m3: float = 0.0               # Σ(x−μ)³ for cross-batch merge
     outlier_fractions: dict[str, float]
-    # keys: "3.0_sigma", "5.0_sigma", "8.0_sigma"
+    # keys: "3.0_sigma", "4.0_sigma", "6.0_sigma"
     n_samples: int = 0            # total scalar elements
     per_channel_std: list[float] | None = None  # per-channel population σ
     per_channel_sum: list[float] | None = None   # per-channel sum for merge
@@ -172,7 +172,7 @@ class LayerStats:
 - **mean, std** — global over all tensor elements (population, ddof=0).
 - **kurtosis** — excess kurtosis; Gaussian ≈ 0, heavy-tailed > 0. Exact via Pébay (2008) M3/M4 parallel merge.
 - **m3** — third central moment sum Σ(x−μ)³; used internally for cross-batch kurtosis merge.
-- **outlier_fractions** — fraction of |x| > k·σ for k ∈ {3.0, 5.0, 8.0}.
+- **outlier_fractions** — fraction of |x| > k·σ for k ∈ {3.0, 4.0, 6.0}.
 - **per_channel_std** — per-channel population σ (pre_gelu, post_layernorm_1/2 only).
 - **n_samples** — total scalar elements processed.
 
