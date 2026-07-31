@@ -86,3 +86,49 @@ def log_system_info() -> None:
         logger.info("nnsight %s", ver)
     except ImportError:
         logger.info("nnsight not installed")
+
+
+def collect_system_metadata() -> dict[str, object]:
+    """Collect hardware and software metadata as a dict for JSON serialisation.
+
+    Returns a dict suitable for constructing a :class:`profiler.RunMetadata`
+    instance.  All values are JSON-serialisable primitives.
+
+    Returns:
+        Dict with keys: python_version, pytorch_version, timm_version,
+        nnsight_version, cuda_available, cuda_version, gpu_name,
+        gpu_memory_gb.
+    """
+    import sys
+
+    metadata: dict[str, object] = {
+        "python_version": sys.version.split()[0],
+        "pytorch_version": torch.__version__,
+        "cuda_available": torch.cuda.is_available(),
+        "cuda_version": None,
+        "gpu_name": None,
+        "gpu_memory_gb": None,
+        "nnsight_version": "unknown",
+        "timm_version": "unknown",
+    }
+
+    if torch.cuda.is_available():
+        metadata["cuda_version"] = torch.version.cuda
+        metadata["gpu_name"] = torch.cuda.get_device_name(0)
+        metadata["gpu_memory_gb"] = (
+            torch.cuda.get_device_properties(0).total_memory / 1e9
+        )
+
+    try:
+        import nnsight
+        metadata["nnsight_version"] = getattr(nnsight, "__version__", "unknown")
+    except ImportError:
+        pass
+
+    try:
+        import timm
+        metadata["timm_version"] = getattr(timm, "__version__", "unknown")
+    except ImportError:
+        pass
+
+    return metadata

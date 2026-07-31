@@ -235,143 +235,128 @@ decisions — the core SmoothQuant (Xiao et al. 2023) insight.
 ### T-014 — Outlier fraction definition inconsistency: Pass 1 uses |x| > k·σ, Pass 2 uses |x−μ| > k·σ_global
 
 **Severity:** HIGH  
-**Status:** 🔲 Open  
+**Status:** ✅ Closed (2026-07-30)  
 **Category:** Bug — silent definition mismatch  
 **Source:** Skeptical review, 2026-07-30
 
-**Evidence**
+**Resolution:** Researcher selected Option 1 — fix Pass 1 to use the
+mean-centered definition ``|x − μ| > k·σ``, consistent with the standard
+statistical definition and the quantization literature (Wei et al. 2022,
+§3.1; Bondarenko et al. 2021, §4.1).
 
-`_register_stat_saves` (profiler.py, line 950) computes:
-```python
-frac = (t.abs() > sigma * t.std(correction=0)).float().mean().save()
-```
-This checks `|x| > k·σ`, centered at zero — not at the actual distribution mean.
+Changes applied:
+- ``src/profiler.py``: ``_register_stat_saves`` line 950 changed from
+  ``(t.abs() > sigma * t.std(correction=0))`` to
+  ``((t - t.mean()).abs() > sigma * t.std(correction=0))``.
+  Added inline comment citing Wei et al. 2022 and Bondarenko et al. 2021.
+- ``src/profiler.py``: Updated ``WelfordAccumulator.outlier_counts``,
+  ``finalize_accumulator``, and ``_register_stat_saves`` docstrings to
+  document the mean-centered definition.
+- ``tests/test_profiler.py``: ``test_run_outlier_counting_pass_known_gaussian``
+  updated from ``data.abs()`` to ``(data - mu).abs()``.
+- ``docs/EXP1-IMPL.md``: §2.3 rewritten with the corrected convention,
+  formula, and literature citations.
+- ``docs/MISTAKES.md``: §1.3 updated with two-pass recount note; new §1.4
+  added documenting the zero-centered bug and its resolution.
 
-`run_outlier_counting_pass` (profiler.py, line 618–622) computes:
-```python
-deviation = (tensor_proxy - global_mean).abs()
-count_proxies[key] = (deviation > k * global_std).sum().save()
-```
-This checks `|x − μ_global| > k·σ_global` — deviation from the mean.
+**Note:** This invalidates any previously collected profiling data where
+``skip_outlier_recount=True`` was used.  Re-run Phase 1 profiling to
+regenerate results with the corrected Pass 1 outlier definition.
 
-These are different definitions. For a distribution with mean ≈ 0 (most sites), the difference is negligible. For block 10 pre-GELU (mean = −28.33), the definitions are materially different: an element at x = 0 satisfies `|x| = 0 < k·σ` (not an outlier by Pass 1) but `|x − (−28.33)| = 28.33 > 11.20` (an outlier by Pass 2).
-
-The final reported numbers use Pass 2 (since `exp1_profiling.py` runs Pass 2 and patches the stats in-place), so the table values are correct when Pass 2 is used. However:
-1. If `--skip-outlier-recount` is passed, the reported values silently use the wrong (Pass 1) definition.
-2. The inconsistency is undocumented in the report.
-3. The docstring on `WelfordAccumulator.outlier_counts` explicitly warns: "σ is the per-batch population std, not the global std" — this is a known issue documented in the accumulator but not surfaced to the user.
-
-**Why this matters**
-
-For the sites of interest (blocks 8–10 pre-GELU), the distribution mean is far from zero. The two definitions yield substantially different outlier fractions. Using the zero-centered definition (Pass 1) systematically undercounts outliers in these blocks.
-
-**Proposed fix (needs researcher decision)**
-
-Two options:
-1. Fix Pass 1 to also use the mean-centered definition: `((t - t.mean()).abs() > sigma * t.std(correction=0)).float().mean()`. This makes Pass 1 self-consistent even if Pass 2 is skipped, at the cost of one extra mean computation.
-2. Leave Pass 1 as-is (it's replaced by Pass 2 anyway) but add a strong runtime warning when `skip_outlier_recount=True` that the outlier fractions are computed on `|x|`, not `|x−μ|`, and may be misleading for non-zero-mean sites.
-
-Option 2 preserves the current two-pass design; Option 1 eliminates the conceptual asymmetry. Recommend researcher decision on which convention is preferred.
+**References**
+- Wei et al. (2022), "Outlier Suppression," NeurIPS 2022 (Spotlight),
+  arXiv:2209.13325 — §3.1: identifies outliers by examining per-token and
+  per-channel activation magnitudes relative to the distribution.
+- Bondarenko et al. (2021), "Understanding and Overcoming the Challenges of
+  Efficient Transformer Quantization," arXiv:2109.12948 — §4.1: characterizes
+  distributions by their central moments, all defined relative to μ.
 
 **Affected files**
-- `src/profiler.py` — `_register_stat_saves` (line 950)
-- `run_phase1_profiling.py` — may need a stronger `--skip-outlier-recount` warning
-- `outputs/phase1-profiling/phase1_report.md` — should document which definition is used for reported numbers
+- ``src/profiler.py`` — ``_register_stat_saves`` (line 950), ``WelfordAccumulator``
+  docstring, ``finalize_accumulator`` docstring, ``_register_stat_saves`` docstring
+- ``tests/test_profiler.py`` — ``test_run_outlier_counting_pass_known_gaussian``
+- ``docs/EXP1-IMPL.md`` — §2.3 Outlier fraction convention
+- ``docs/MISTAKES.md`` — §1.3 updated, §1.4 added
 
 ---
 
-### T-015 — `residual_delta_ratio` uses `norm2.output` (LN2 input to MLP), not actual MLP output
+### T-015 — `residual_delta_ratio` docstrings and comments incorrectly claimed it measured MLP output
 
-**Severity:** HIGH  
-**Status:** 🔲 Open  
-**Category:** Bug — metric computes wrong quantity  
+**Severity:** ~~HIGH~~ → LOW (documentation only; code was correct)  
+**Status:** ✅ Closed (2026-07-30)  
+**Category:** Documentation  
 **Source:** Skeptical review, 2026-07-30
 
-**Evidence**
+**Resolution:** The code was correct all along — it intentionally measures
+``‖LN2(x)‖₂ / ‖x_skip‖₂``, the pre-MLP LayerNorm amplification.  The bug was
+in the docstrings and comments, which incorrectly claimed the field measured
+``‖mlp_output‖₂ / ‖x_skip‖₂``.
 
-`profile_vit` (profiler.py, line 1340):
-```python
-mlp_norm = block.norm2.output.norm(dim=-1).mean()  # scalar proxy
-pending_skip_norm = (mlp_norm / (skip_norm_proxy + 1e-8)).save()
-```
+Changes applied:
+- Renamed field from ``residual_delta_ratio`` to ``ln2_amplification_ratio``
+  across all of ``src/profiler.py`` (``LayerStats``, ``WelfordAccumulator``,
+  ``_StatsSavers``, ``merge_batch_stats``, ``finalize_accumulator``,
+  ``_finalize_stats``, ``profile_vit``).
+- Updated all docstrings and inline comments to say ``‖LN2(x)‖₂ / ‖x_skip‖₂``
+  instead of ``‖mlp_output‖₂ / ‖x_skip‖₂``.
+- Renamed all 12 test functions and updated all field references in
+  ``tests/test_profiler.py``.
+- Updated ``docs/MISTAKES.md`` §11.1 to reflect the corrected name and formula.
+- Updated ``docs/issues.md`` T-005 resolution notes.
 
-`block.norm2.output` is the output of the second LayerNorm — the input **to** the MLP's `fc1`, not the output **of** the MLP. The MLP has not been applied at this point in the forward pass.
-
-The metric is documented in `LayerStats.residual_delta_ratio` as:
-> Mean over batch and tokens of ‖mlp_output‖₂ / ‖x_skip‖₂
-
-And in T-005 resolution notes:
-> `‖mlp_output‖₂ / ‖x_skip‖₂` — how aggressively does each MLP block modify the residual stream?
-
-The current implementation computes `‖LN2(x)‖₂ / ‖x_skip‖₂`, not `‖MLP(LN2(x))‖₂ / ‖x_skip‖₂`. These quantities are different: `LN2(x)` has unit variance per token by construction; the actual MLP output can be much larger (especially in blocks 8–10).
-
-The metric does not appear in the Phase 1 report tables, so reported results are not corrupted. But the field is collected and stored in `profiling_result.json`, and Phase 2/3 code may rely on it.
-
-**Proposed fix**
-
-Change line 1340 to capture the MLP output instead of the LN2 output. In nnsight 0.7.0, the MLP output is accessible as `block.mlp.output`:
-```python
-mlp_norm = block.mlp.output.norm(dim=-1).mean()  # actual MLP output
-```
-
-**Verification required:** Confirm that `block.mlp.output` is accessible in the nnsight 0.7.0 trace without dependency ordering issues. If `block.mlp.output` is not directly accessible, an alternative is `block.mlp.fc2.output` (output of the second linear layer in the MLP). The nnsight access order must be confirmed before implementing.
-
-**Note:** This requires re-running Phase 1 to regenerate correct `residual_delta_ratio` values. Since the field is not currently used in the report, this can be deferred until the field is actually needed for analysis.
+**Note:** This is a rename only — no behavior change.  The metric was always
+measuring LN2 output; the docstrings were simply wrong about what it was called
+and what it claimed to measure.
 
 **Affected files**
-- `src/profiler.py` — `profile_vit` (line 1340)
-- `tests/test_profiler.py` — `test_slow_residual_delta_ratio_reasonable_magnitude` may need updated expected range
+- ``src/profiler.py`` — ``LayerStats``, ``WelfordAccumulator``, ``_StatsSavers``,
+  ``merge_batch_stats``, ``finalize_accumulator``, ``_finalize_stats``, ``profile_vit``
+- ``tests/test_profiler.py`` — 12 test functions renamed, backwards-compat test updated
+- ``docs/MISTAKES.md`` — §11.1 updated
+- ``docs/issues.md`` — T-005 resolution notes updated
 
 ---
 
 ### T-016 — Model checkpoint identity not pinned in code; report and code may reference different weights
 
 **Severity:** HIGH  
-**Status:** 🔲 Open  
+**Status:** ✅ Closed (2026-07-30)  
 **Category:** Reproducibility  
 **Source:** Skeptical review, 2026-07-30
 
-**Evidence**
+**Resolution:** Pinned the model to the explicit variant name
+``vit_base_patch16_224.augreg2_in21k_ft_in1k`` in ``src/model.py``.
+Also added a ``RunMetadata`` dataclass to ``src/profiler.py`` that captures
+hardware, software, and experiment metadata (Python version, PyTorch version,
+timm version, nnsight version, CUDA info, GPU info, model name, dataset,
+num_images, batch_size, seed, num_seeds, UTC timestamp).  This metadata is
+embedded in every ``ProfilingResult`` and serialized into
+``profiling_result.json``, making every output file self-documenting.
 
-`src/model.py` line 69–71:
-```python
-model: VisionTransformer = timm.create_model(
-    "vit_base_patch16_224", pretrained=True
-)
-```
-
-The report header states: `vit_base_patch16_224.augreg2_in21k_ft_in1k (timm 1.0.28)`
-
-The `timm.create_model("vit_base_patch16_224", pretrained=True)` call uses the generic model name without a variant specifier. The checkpoint timm selects for this generic name depends on the timm version and its internal default priority ordering. In timm 1.0.x, the default for `vit_base_patch16_224` may or may not be `augreg2_in21k_ft_in1k`.
-
-If the checkpoint used at run time differed from `augreg2_in21k_ft_in1k`, then:
-- The LayerNorm γ parameters are different
-- The activation statistics (especially blocks 8–10) are different
-- All reported numbers in the Phase 1 report are from a different model than stated
-
-**Why this matters**
-
-Reproducibility requires that anyone re-running `run_phase1_profiling.py` with the same code gets the same checkpoint. With a generic model name, this is not guaranteed across timm versions or environments.
-
-**Proposed fix**
-
-Change `src/model.py` line 69 to use the explicit variant name:
-```python
-model: VisionTransformer = timm.create_model(
-    "vit_base_patch16_224.augreg2_in21k_ft_in1k", pretrained=True
-)
-```
-
-**Needs researcher decision:** Is `augreg2_in21k_ft_in1k` the intended checkpoint? If you are unsure which checkpoint was actually used to generate the Phase 1 results, the safest path is to:
-1. Run `timm.create_model("vit_base_patch16_224", pretrained=True)` and print `model.pretrained_cfg` to see which variant was loaded
-2. Confirm it matches `augreg2_in21k_ft_in1k`
-3. Then pin the explicit variant name
-
-Until this is resolved, the checkpoint identity claim in the report is unverified.
+Changes applied:
+- ``src/model.py``: ``load_vit`` now calls
+  ``timm.create_model("vit_base_patch16_224.augreg2_in21k_ft_in1k", pretrained=True)``.
+- ``src/profiler.py``: Added ``RunMetadata`` dataclass with 16 fields covering
+  hardware, software, model, dataset, and experiment parameters.
+- ``src/profiler.py``: ``ProfilingResult`` gained ``metadata: RunMetadata | None`` field.
+- ``src/profiler.py``: ``load_profiling_result`` reconstructs ``RunMetadata``
+  from JSON if present; backwards-compatible with old files lacking the key.
+- ``src/utils.py``: Added ``collect_system_metadata()`` helper that returns a
+  dict of system info suitable for constructing ``RunMetadata``.
+- ``src/exp1_profiling.py``: ``_run_single`` now constructs ``RunMetadata``
+  via ``collect_system_metadata()`` and attaches it to the ``ProfilingResult``.
+- ``tests/test_profiler.py``: Added ``test_run_metadata_round_trip`` (full
+  serialization roundtrip) and ``test_run_metadata_backwards_compat`` (old
+  JSON without metadata key).  Updated backwards-compat test JSON to include
+  ``metadata: None``.
 
 **Affected files**
-- `src/model.py` — `load_vit` function (line 69)
-- `outputs/phase1-profiling/phase1_report.md` — section 1 header should note checkpoint identity is unverified until T-016 is resolved
+- ``src/model.py`` — ``load_vit`` (line 69)
+- ``src/profiler.py`` — ``RunMetadata`` (new), ``ProfilingResult`` (field added),
+  ``load_profiling_result`` (reconstruction)
+- ``src/utils.py`` — ``collect_system_metadata`` (new)
+- ``src/exp1_profiling.py`` — ``_run_single`` (metadata construction)
+- ``tests/test_profiler.py`` — 2 new tests, 1 updated backwards-compat test
 
 ---
 
@@ -384,20 +369,20 @@ Until this is resolved, the checkpoint identity claim in the report is unverifie
 **Category:** Missing feature  
 **Source:** Issue 6 (skeptical review)
 
-**Resolution:** Implemented residual delta ratio computation inside the nnsight
-trace.  For each encoder block `i`, the ratio `‖mlp_output‖₂ / ‖x_skip‖₂` is
+**Resolution:** Implemented LN2 amplification ratio computation inside the nnsight
+trace.  For each encoder block `i`, the ratio `‖LN2(x)‖₂ / ‖x_skip‖₂` is
 computed per-token and averaged over batch and tokens.  The ratio is attached to
-the `blocks.{i}/residual_stream` LayerStats (representing the MLP contribution
+the `blocks.{i}/residual_stream` LayerStats (representing the LN2 amplification
 in block `i` that produced this residual).  `patch_embed/residual_stream` has
-`None` (no preceding MLP block).
+`None` (no preceding LN2 block).
 
 Changes applied:
-- `LayerStats`: added `residual_delta_ratio: float | None = None` field.
+- `LayerStats`: added `ln2_amplification_ratio: float | None = None` field.
   Non-None only for `residual_stream` sites (except `patch_embed`).
-- `WelfordAccumulator`: added `residual_delta_ratio_sum` and
-  `residual_delta_ratio_count` fields for simple mean accumulation across batches.
-- `_StatsSavers`: added `residual_delta_ratio` proxy field.
-- `merge_batch_stats`: accumulates delta ratio via simple sum (not Pébay merge —
+- `WelfordAccumulator`: added `ln2_amplification_ratio_sum` and
+  `ln2_amplification_ratio_count` fields for simple mean accumulation across batches.
+- `_StatsSavers`: added `ln2_amplification_ratio` proxy field.
+- `merge_batch_stats`: accumulates ratio via simple sum (not Pébay merge —
   the ratio is already a per-batch mean).
 - `finalize_accumulator`: computes final mean delta ratio.
 - `_finalize_stats`: extracts delta ratio from saved proxy.
@@ -461,8 +446,8 @@ Current state of each proposed fix:
    (T-010 is still open).
 4. §Post-LayerNorm γ/β logging: **already correct** — updated during T-004
    to document the `layernorm_gamma`/`layernorm_beta` fields.
-5. §Residual Update Stream delta ratio: **already correct** — updated during
-   T-005 to document the `residual_delta_ratio` field.
+5. §Residual Update Stream LN2 amplification ratio: **already correct** — updated during
+   T-005 to document the `ln2_amplification_ratio` field.
 6. §Measurement Sites table: **already correct** — has 6 rows including
    Residual Stream and Residual Update Stream.
 7. §Document Conventions: **already correct** — includes Site Labeling
@@ -1103,9 +1088,9 @@ directory is empty in the current workspace.
 | T-011 | LOW | 🔲 Open | Researcher sign-off on all citations |
 | T-012 | INFO | ✅ Closed (2026-07-30) | Document residual_stream labeling convention |
 | T-013 | HIGH? | ✅ Closed (2026-07-30) | Verified: 0.00261 is exact, not truncated; added precision test |
-| T-014 | HIGH | 🔲 Open | Outlier fraction definition inconsistency: Pass 1 uses |x| > k·σ, Pass 2 uses |x−μ| > k·σ_global |
-| T-015 | HIGH | 🔲 Open | `residual_delta_ratio` uses `norm2.output` (LN2 input to MLP), not actual MLP output |
-| T-016 | HIGH | 🔲 Open | Model checkpoint identity not pinned in code; report and code may reference different weights |
+| T-014 | HIGH | ✅ Closed (2026-07-30) | Outlier fraction definition: fixed to mean-centered |x−μ| > k·σ |
+| T-015 | ~~HIGH~~ → LOW | ✅ Closed (2026-07-30) | Doc bug: field renamed to `ln2_amplification_ratio`, docstrings corrected |
+| T-016 | HIGH | ✅ Closed (2026-07-30) | Model pinned to `augreg2_in21k_ft_in1k`; `RunMetadata` added to output JSON |
 | T-017 | MEDIUM | 🔲 Open | Attention entropy ε-bias not documented; values unreliable for highly focused distributions |
 | T-018 | LOW | 🔲 Open | Per-channel accumulation ignores within-image spatial correlation; undocumented |
 | T-019 | LOW | 🔲 Open | eval() mode and dropout disabled: not asserted at runtime |

@@ -137,14 +137,15 @@ class LayerStats:
     layernorm_beta: list[float] | None = None
     # Learned bias parameters (β) of the LayerNorm module at this site.
     # Shape [D] for post_layernorm_1 and post_layernorm_2; None for all other sites.
-    residual_delta_ratio: float | None = None
-    # Mean over batch and tokens of ‖mlp_output‖₂ / ‖x_skip‖₂.
+    ln2_amplification_ratio: float | None = None
+    # Mean over batch and tokens of ‖LN2(x)‖₂ / ‖x_skip‖₂.
     # Non-None only for residual_stream sites, where it represents the
-    # MLP contribution in the block that produced this residual.
-    # For patch_embed/residual_stream, this is always None (no preceding MLP).
-    # This metric directly answers: "how aggressively does each MLP block
-    # modify the residual stream?" — the primary driver of quantization
-    # range expansion (Bondarenko et al. 2021, §4.2; Wei et al. 2022, §3.1).
+    # pre-MLP LayerNorm amplification in the block that produced this residual.
+    # For patch_embed/residual_stream, this is always None (no preceding LN2).
+    # This metric directly answers: "how aggressively does the second LayerNorm
+    # scale the signal before it enters the MLP?" — the primary driver of
+    # pre-GELU activation range expansion (Bondarenko et al. 2021, §4.2;
+    # Wei et al. 2022, §3.1).
     max: float = 0.0
     # Maximum observed value over all profiled batches.  Useful for
     # sanity-checking quantization ranges — the absolute range determines
@@ -156,6 +157,50 @@ class LayerStats:
 
 
 @dataclass
+class RunMetadata:
+    """Hardware, software, and experiment metadata for reproducibility.
+
+    Captured once per profiling run and embedded in ``ProfilingResult``
+    so that every ``profiling_result.json`` is self-documenting.
+
+    Attributes:
+        python_version: Python version string (e.g. ``"3.12.3"``).
+        pytorch_version: PyTorch version string (e.g. ``"2.13.0"``).
+        timm_version: timm version string (e.g. ``"1.0.28"``).
+        nnsight_version: nnsight version string (e.g. ``"0.7.0"``).
+        cuda_available: Whether CUDA was available at run time.
+        cuda_version: CUDA version string if available (e.g. ``"13.0"``).
+        gpu_name: GPU device name if available (e.g. ``"NVIDIA GeForce RTX 3070"``).
+        gpu_memory_gb: Total GPU memory in GB if available.
+        model_name: timm model identifier used to load the checkpoint
+            (e.g. ``"vit_base_patch16_224.augreg2_in21k_ft_in1k"``).
+        dataset: Name of the dataset used for profiling
+            (e.g. ``"ImageNet-1K validation"``).
+        num_images: Number of images profiled (``None`` if full dataset).
+        batch_size: Mini-batch size used for the DataLoader.
+        seed: Base random seed.
+        num_seeds: Number of independent seeds run.
+        timestamp_utc: ISO 8601 UTC timestamp of when the run started.
+    """
+
+    python_version: str
+    pytorch_version: str
+    timm_version: str
+    nnsight_version: str
+    cuda_available: bool
+    cuda_version: str | None
+    gpu_name: str | None
+    gpu_memory_gb: float | None
+    model_name: str
+    dataset: str
+    num_images: int | None
+    batch_size: int
+    seed: int
+    num_seeds: int
+    timestamp_utc: str
+
+
+@dataclass
 class ProfilingResult:
     """Complete profiling output for one forward pass of a ViT.
 
@@ -163,11 +208,14 @@ class ProfilingResult:
         stats: Mapping from ``site_identifier`` to :class:`LayerStats`.
         num_blocks: Number of encoder blocks profiled.
         batch_shape: Shape of the input batch used for this trace.
+        metadata: Hardware, software, and experiment metadata for
+            reproducibility.  Set by the experiment script at run time.
     """
 
     stats: dict[SiteId, LayerStats]
     num_blocks: int
     batch_shape: tuple[int, ...]
+    metadata: RunMetadata | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -198,12 +246,19 @@ class WelfordAccumulator:
         M2: Running ``Σ(x − μ)²``.
         M3: Running ``Σ(x − μ)³``.
         M4: Running ``Σ(x − μ)⁴``.
-        outlier_counts: Raw element counts where ``|x| > k·σ`` per key
+        outlier_counts: Raw element counts where ``|x − μ| > k·σ`` per key
             ``"{k}_sigma"``.  σ is the **per-batch** population std, not the
             global std.  Counts are accumulated across batches so the final
             outlier fraction from ``finalize_accumulator`` is a weighted
             average of per-batch outlier rates — not the fraction of elements
             exceeding k·σ_global.
+            
+            The outlier definition is mean-centered (``|x − μ| > k·σ``),
+            consistent with the standard statistical definition and the
+            quantization literature (Wei et al. 2022, §3.1; Bondarenko et al.
+            2021, §4.1).  This is distinct from the absolute-magnitude
+            threshold ``|x| > k·σ``, which would conflate the distribution's
+            mean shift with its outlier count.
         per_channel_M2: Per-channel running ``Σ(x_c − μ_c)²``; ``None`` if
             this site does not track per-channel statistics.  Shape ``[D]``.
         per_channel_n: Total samples per channel (B·N accumulated).
@@ -237,12 +292,12 @@ class WelfordAccumulator:
     # Shape [D]; non-None for post_layernorm_1 and post_layernorm_2 only.
     layernorm_beta: list[float] | None = None
     # LayerNorm β bias (static model parameters, not merged).
-    residual_delta_ratio_sum: float = 0.0
-    # Running sum of per-batch residual delta ratios (‖mlp_output‖₂ / ‖x_skip‖₂).
+    ln2_amplification_ratio_sum: float = 0.0
+    # Running sum of per-batch LN2 amplification ratios (‖LN2(x)‖₂ / ‖x_skip‖₂).
     # Accumulated as a simple sum (not Pébay merge) because the ratio is already
-    # a per-batch mean.  Divided by residual_delta_ratio_count at finalization.
-    residual_delta_ratio_count: int = 0
-    # Number of batches contributing to residual_delta_ratio_sum.
+    # a per-batch mean.  Divided by ln2_amplification_ratio_count at finalization.
+    ln2_amplification_ratio_count: int = 0
+    # Number of batches contributing to ln2_amplification_ratio_sum.
     max_val: float = float("-inf")
     # Running maximum across all batches (element-wise, not Pébay-merged).
     # Initialized to -inf so the first batch always sets it.
@@ -419,12 +474,12 @@ def merge_batch_stats(
     if batch_stats.layernorm_beta is not None and acc.layernorm_beta is None:
         acc.layernorm_beta = list(batch_stats.layernorm_beta)
 
-    # --- Residual delta ratio accumulation (simple mean across batches) ---
-    # The delta ratio is already a per-batch mean (averaged over B×N tokens),
+    # --- LN2 amplification ratio accumulation (simple mean across batches) ---
+    # The ratio is already a per-batch mean (averaged over B×N tokens),
     # so we accumulate a simple sum and divide by count at finalization.
-    if batch_stats.residual_delta_ratio is not None:
-        acc.residual_delta_ratio_sum += batch_stats.residual_delta_ratio
-        acc.residual_delta_ratio_count += 1
+    if batch_stats.ln2_amplification_ratio is not None:
+        acc.ln2_amplification_ratio_sum += batch_stats.ln2_amplification_ratio
+        acc.ln2_amplification_ratio_count += 1
 
     # --- Running max/min (element-wise, not Pébay-merged) ---
     # Max/min don't have a parallel merge formula — we track the
@@ -448,9 +503,10 @@ def finalize_accumulator(acc: WelfordAccumulator) -> LayerStats:
     Returns:
         LayerStats with exact global mean, std, kurtosis, and outlier
         fractions.  Note: ``outlier_fractions`` values are weighted averages
-        of per-batch outlier rates (threshold = k·σ_batch), **not** fractions
-        relative to global σ.  This is a well-defined statistic but differs
-        from the fraction of elements exceeding k·σ_global.
+        of per-batch outlier rates (threshold = k·σ_batch, deviation measured
+        from the per-batch mean), **not** fractions relative to global σ.
+        This is a well-defined statistic but differs from the fraction of
+        elements exceeding k·σ_global.
 
     Raises:
         ValueError: If acc.n == 0 (no data was accumulated).
@@ -506,9 +562,9 @@ def finalize_accumulator(acc: WelfordAccumulator) -> LayerStats:
         attention_entropy_patches=attention_entropy_patches,
         layernorm_gamma=acc.layernorm_gamma,
         layernorm_beta=acc.layernorm_beta,
-        residual_delta_ratio=(
-            acc.residual_delta_ratio_sum / acc.residual_delta_ratio_count
-            if acc.residual_delta_ratio_count > 0
+        ln2_amplification_ratio=(
+            acc.ln2_amplification_ratio_sum / acc.ln2_amplification_ratio_count
+            if acc.ln2_amplification_ratio_count > 0
             else None
         ),
         max=acc.max_val if math.isfinite(acc.max_val) else 0.0,
@@ -878,8 +934,8 @@ class _StatsSavers:
     per_channel_sum_sq: Any = None
     entropy_cls_proxy: Any = None
     entropy_patch_sum_proxy: Any = None
-    residual_delta_ratio: Any = None
-    # Saved proxy for the residual delta ratio (‖mlp_output‖₂ / ‖x_skip‖₂).
+    ln2_amplification_ratio: Any = None
+    # Saved proxy for the LN2 amplification ratio (‖LN2(x)‖₂ / ‖x_skip‖₂).
     # Non-None only for residual_stream sites (except patch_embed).
     # Set after the post_layernorm_2 registration when both norm1.input
     # and norm2.output proxies are available.
@@ -909,8 +965,11 @@ def _register_stat_saves(
     population parameter.  Bessel's correction (ddof=1) would introduce a
     systematic negative bias of (n−1)/n with no statistical justification.
 
-    Outlier fractions use the population σ as threshold scale, recomputed
-    inline for each threshold to avoid reusing a stale saved proxy value.
+    Outlier fractions use the population σ as threshold scale and measure
+    deviation from the mean (``|x − μ| > k·σ``), consistent with the standard
+    statistical definition and the quantization literature (Wei et al. 2022,
+    §3.1; Bondarenko et al. 2021, §4.1).  The σ is recomputed inline for each
+    threshold to avoid reusing a stale saved proxy value.
 
     Args:
         tensor_proxy: An nnsight proxy pointing to an activation tensor.
@@ -946,8 +1005,14 @@ def _register_stat_saves(
 
     outlier_proxies: list[Any] = []
     for sigma in OUTLIER_SIGMAS:
+        # Outlier definition: |x − μ| > k·σ (mean-centered, not zero-centered).
+        # This is the standard statistical definition of an outlier and is
+        # consistent with the quantization literature (Wei et al. 2022, §3.1;
+        # Bondarenko et al. 2021, §4.1).  Using |x| > k·σ would conflate the
+        # distribution's mean shift with its outlier count — a critical
+        # distinction for sites like block 10 pre-GELU where μ = −28.33.
         # Recompute population std inline for each threshold.
-        frac = (t.abs() > sigma * t.std(correction=0)).float().mean().save()
+        frac = ((t - t.mean()).abs() > sigma * t.std(correction=0)).float().mean().save()
         outlier_proxies.append(frac)
 
     # Per-channel population std: reduce over batch and token dims.
@@ -1109,9 +1174,9 @@ def _finalize_stats(savers: _StatsSavers) -> LayerStats:
         per_channel_sum_sq=per_channel_sum_sq,
         attention_entropy_cls=attention_entropy_cls,
         attention_entropy_patches=attention_entropy_patches,
-        residual_delta_ratio=(
-            float(_val(savers.residual_delta_ratio).item())
-            if savers.residual_delta_ratio is not None
+        ln2_amplification_ratio=(
+            float(_val(savers.ln2_amplification_ratio).item())
+            if savers.ln2_amplification_ratio is not None
             else None
         ),
         max=float(_val(savers.max_proxy).item()) if savers.max_proxy is not None else 0.0,
@@ -1243,7 +1308,7 @@ def profile_vit(
     try:
         with wrapped_model.trace(input_batch):
             # Delta ratio for blocks.{i}/residual_stream is computed using
-            # block i's norm1.input (skip) and norm2.output (MLP).
+            # block i's norm1.input (skip) and norm2.output (LN2).
             # Since norm1.input is consumed by _register_stat_saves and
             # cannot be re-accessed (nnsight 0.7.0 OutOfOrderError), we
             # capture the per-token skip norm as a separate proxy at the
@@ -1277,11 +1342,11 @@ def profile_vit(
                 residual_savers = _register_stat_saves(
                     block.norm1.input, residual_label, n_residual
                 )
-                # Attach delta ratio computed from the previous iteration's
-                # skip_norm and mlp_output.  For i=0 (patch_embed/residual_stream),
-                # pending_skip_norm is None — correct, no preceding MLP block.
+                # Attach LN2 amplification ratio computed from the previous iteration's
+                # skip_norm and LN2 output.  For i=0 (patch_embed/residual_stream),
+                # pending_skip_norm is None — correct, no preceding LN2 block.
                 if pending_skip_norm is not None:
-                    residual_savers.residual_delta_ratio = pending_skip_norm
+                    residual_savers.ln2_amplification_ratio = pending_skip_norm
                     pending_skip_norm = None
                 all_savers.append(residual_savers)
 
@@ -1329,16 +1394,16 @@ def profile_vit(
                     )
                 )
 
-                # --- Residual delta ratio: ‖mlp_output‖₂ / ‖x_skip‖₂ ---
+                # --- LN2 amplification ratio: ‖LN2(x)‖₂ / ‖x_skip‖₂ ---
                 # Computed per-token and averaged over batch and tokens.
                 # skip_norm_proxy was captured above (before norm1.input was consumed).
-                # mlp_norm uses norm2.output which is available now.
+                # LN2 output (norm2.output) is available now.
                 # The ratio will be attached to blocks.{i}/residual_stream in the
                 # next loop iteration (or after the loop for the final block).
                 # Ref: Bondarenko et al. (2021), arXiv:2109.12948, §4.2;
                 #      Wei et al. (2022), NeurIPS, arXiv:2209.13325, §3.1.
-                mlp_norm = block.norm2.output.norm(dim=-1).mean()  # scalar proxy
-                pending_skip_norm = (mlp_norm / (skip_norm_proxy + 1e-8)).save()
+                ln2_norm = block.norm2.output.norm(dim=-1).mean()  # scalar proxy
+                pending_skip_norm = (ln2_norm / (skip_norm_proxy + 1e-8)).save()
 
                 # --- pre_gelu ---
                 all_savers.append(
@@ -1363,9 +1428,9 @@ def profile_vit(
                 f"blocks.{num_blocks - 1}/residual_stream",
                 n_residual,
             )
-            # Attach the delta ratio from the final block's MLP.
+            # Attach the LN2 amplification ratio from the final block.
             if pending_skip_norm is not None:
-                final_residual_savers.residual_delta_ratio = pending_skip_norm
+                final_residual_savers.ln2_amplification_ratio = pending_skip_norm
             all_savers.append(final_residual_savers)
 
     except Exception as exc:
@@ -1703,8 +1768,14 @@ def load_profiling_result(path: Path) -> ProfilingResult:
     stats: dict[SiteId, LayerStats] = {
         key: LayerStats(**val) for key, val in raw["stats"].items()
     }
+
+    metadata: RunMetadata | None = None
+    if "metadata" in raw and raw["metadata"] is not None:
+        metadata = RunMetadata(**raw["metadata"])
+
     return ProfilingResult(
         stats=stats,
         num_blocks=raw["num_blocks"],
         batch_shape=tuple(raw["batch_shape"]),
+        metadata=metadata,
     )

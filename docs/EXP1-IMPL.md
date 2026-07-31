@@ -24,7 +24,7 @@ produces (single seed):
 ```
 outputs/phase1-profiling/
 ├── profiling_result.json          # 6 sites × 12 blocks + patch_embed + final residual = 73 sites
-│                                     # Each residual_stream site includes residual_delta_ratio
+│                                     # Each residual_stream site includes ln2_amplification_ratio
 ├── summary_table.csv              # 73 rows × (5 + num_sigma_thresholds) columns
 ├── histograms/
 │   ├── blocks.0_pre_gelu.png      # real activations — blocks 0, 5, 11 only
@@ -161,11 +161,28 @@ M4_batch = (batch_stats.kurtosis + 3) * (batch_stats.std ** 4) * batch_n
 
 ### 2.3 Outlier fraction convention
 
-`outlier_fractions` in `LayerStats` are fractions relative to **per-batch σ**,
-accumulated across batches. The final reported value is a weighted average of
-per-batch outlier rates — not the fraction of elements exceeding k·σ_global.
-This is documented in the `WelfordAccumulator.outlier_counts` and
-`finalize_accumulator` docstrings in `src/profiler.py`.
+Outlier fractions are computed using the **mean-centered** definition:
+
+$$\text{fraction} = \frac{|\{x : |x - \mu| > k \cdot \sigma\}|}{n}$$
+
+This is the standard statistical definition of an outlier and is consistent
+with the quantization literature (Wei et al. 2022, §3.1; Bondarenko et al.
+2021, §4.1).  The deviation is measured from the distribution mean μ, not
+from zero — a critical distinction for sites with large mean shifts (e.g.,
+block 10 pre-GELU where μ = −28.33).
+
+In Pass 1 (``_register_stat_saves``), outlier fractions are computed relative
+to **per-batch μ and σ**, then accumulated across batches.  The final reported
+value from ``finalize_accumulator`` is a weighted average of per-batch outlier
+rates — not the fraction of elements exceeding k·σ_global.  This is documented
+in the ``WelfordAccumulator.outlier_counts`` and ``finalize_accumulator``
+docstrings in ``src/profiler.py``.
+
+Pass 2 (``run_outlier_counting_pass``) recomputes outlier fractions relative
+to the **global μ and σ** from Pass 1, producing the corrected fractions that
+appear in the Phase 1 report tables.  This two-pass methodology follows
+standard practice in the quantization literature (Bondarenko et al. 2021;
+Dettmers et al. 2022).
 
 ---
 
@@ -234,8 +251,8 @@ class WelfordAccumulator:
         per_channel_n: Total per-channel sample count (B·N accumulated).
         layernorm_gamma: LayerNorm γ weights (static, first batch stored).
         layernorm_beta: LayerNorm β biases (static, first batch stored).
-        residual_delta_ratio_sum: Running sum of per-batch delta ratios.
-        residual_delta_ratio_count: Number of batches contributing.
+        ln2_amplification_ratio_sum: Running sum of per-batch LN2 amplification ratios.
+        ln2_amplification_ratio_count: Number of batches contributing.
     """
 
     site_identifier: SiteId
@@ -252,8 +269,9 @@ class WelfordAccumulator:
     per_channel_n: int = 0
     layernorm_gamma: list[float] | None = None
     layernorm_beta: list[float] | None = None
-    residual_delta_ratio_sum: float = 0.0
-    residual_delta_ratio_count: int = 0
+    ln2_amplification_ratio_sum: float = 0.0
+    ln2_amplification_ratio_count: int = 0
+"""
 ```
 
 ### 3.3 `merge_batch_stats`
@@ -378,9 +396,9 @@ def finalize_accumulator(acc: WelfordAccumulator) -> LayerStats:
         per_channel_std=per_channel_std,
         layernorm_gamma=acc.layernorm_gamma,
         layernorm_beta=acc.layernorm_beta,
-        residual_delta_ratio=(
-            acc.residual_delta_ratio_sum / acc.residual_delta_ratio_count
-            if acc.residual_delta_ratio_count > 0
+        ln2_amplification_ratio=(
+            acc.ln2_amplification_ratio_sum / acc.ln2_amplification_ratio_count
+            if acc.ln2_amplification_ratio_count > 0
             else None
         ),
     )
@@ -997,18 +1015,18 @@ Tested on: Python 3.13.13, PyTorch 2.12.1+cu130, nnsight 0.7.0, NVIDIA RTX 3070 
 | `test_slow_histogram_profile_vit_shapes` | `test_profiler.py` | Slow | ✅ Pass |
 | `test_slow_pre_softmax_reconstruction_matches_manual` | `test_profiler.py` | Slow | ✅ Pass |
 | `test_slow_per_channel_std_matches_numpy` | `test_profiler.py` | Slow | ✅ Pass |
-| `test_layer_stats_residual_delta_ratio_default_none` | `test_profiler.py` | Fast | ✅ Pass |
-| `test_layer_stats_residual_delta_ratio_stores_value` | `test_profiler.py` | Fast | ✅ Pass |
-| `test_layer_stats_residual_delta_ratio_serialization_roundtrip` | `test_profiler.py` | Fast | ✅ Pass |
-| `test_welford_accumulator_delta_ratio_defaults` | `test_profiler.py` | Fast | ✅ Pass |
-| `test_merge_batch_stats_delta_ratio_accumulation` | `test_profiler.py` | Fast | ✅ Pass |
-| `test_finalize_accumulator_delta_ratio_mean` | `test_profiler.py` | Fast | ✅ Pass |
-| `test_finalize_accumulator_delta_ratio_none_when_no_data` | `test_profiler.py` | Fast | ✅ Pass |
-| `test_slow_residual_delta_ratio_present_on_residual_stream` | `test_profiler.py` | Slow | ✅ Pass |
-| `test_slow_residual_delta_ratio_positive` | `test_profiler.py` | Slow | ✅ Pass |
-| `test_slow_residual_delta_ratio_absent_on_non_residual_sites` | `test_profiler.py` | Slow | ✅ Pass |
-| `test_slow_residual_delta_ratio_survives_serialisation` | `test_profiler.py` | Slow | ✅ Pass |
-| `test_slow_residual_delta_ratio_reasonable_magnitude` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_layer_stats_ln2_amplification_ratio_default_none` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_layer_stats_ln2_amplification_ratio_stores_value` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_layer_stats_ln2_amplification_ratio_serialization_roundtrip` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_welford_accumulator_ln2_amplification_ratio_defaults` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_merge_batch_stats_ln2_amplification_ratio_accumulation` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_finalize_accumulator_ln2_amplification_ratio_mean` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_finalize_accumulator_ln2_amplification_ratio_none_when_no_data` | `test_profiler.py` | Fast | ✅ Pass |
+| `test_slow_ln2_amplification_ratio_present_on_residual_stream` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_ln2_amplification_ratio_positive` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_ln2_amplification_ratio_absent_on_non_residual_sites` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_ln2_amplification_ratio_survives_serialisation` | `test_profiler.py` | Slow | ✅ Pass |
+| `test_slow_ln2_amplification_ratio_reasonable_magnitude` | `test_profiler.py` | Slow | ✅ Pass |
 | `test_slow_run_outlier_counting_pass_correctness` | `test_profiler.py` | Slow | ✅ Pass |
 | `test_slow_run_outlier_counting_pass_multiple_sites_correctness` | `test_profiler.py` | Slow | ✅ Pass |
 | `test_layer_stats_max_min_defaults` | `test_profiler.py` | Fast | ✅ Pass |

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -51,6 +52,7 @@ from src.plotting import (
 from src.profiler import (
     LayerStats,
     ProfilingResult,
+    RunMetadata,
     SiteId,
     generate_summary_table,
     histogram_profile_vit,
@@ -59,7 +61,7 @@ from src.profiler import (
     save_profiling_result,
     save_summary_table,
 )
-from src.utils import ensure_dir, seed_everything
+from src.utils import collect_system_metadata, ensure_dir, seed_everything
 
 logger = logging.getLogger(__name__)
 
@@ -173,10 +175,32 @@ def _run_single(
     actual_batch_shape = tuple(first_images.shape)
 
     inner = wrapped._model
+
+    # Collect system metadata for reproducibility.
+    sys_meta = collect_system_metadata()
+    metadata = RunMetadata(
+        python_version=str(sys_meta["python_version"]),
+        pytorch_version=str(sys_meta["pytorch_version"]),
+        timm_version=str(sys_meta["timm_version"]),
+        nnsight_version=str(sys_meta["nnsight_version"]),
+        cuda_available=bool(sys_meta["cuda_available"]),
+        cuda_version=str(sys_meta["cuda_version"]) if sys_meta["cuda_version"] is not None else None,
+        gpu_name=str(sys_meta["gpu_name"]) if sys_meta["gpu_name"] is not None else None,
+        gpu_memory_gb=float(sys_meta["gpu_memory_gb"]) if sys_meta["gpu_memory_gb"] is not None else None,
+        model_name="vit_base_patch16_224.augreg2_in21k_ft_in1k",
+        dataset="ImageNet-1K validation",
+        num_images=config.num_images,
+        batch_size=config.batch_size,
+        seed=config.seed,
+        num_seeds=config.num_seeds,
+        timestamp_utc=datetime.now(timezone.utc).isoformat(),
+    )
+
     result = ProfilingResult(
         stats=stats,
         num_blocks=len(inner.blocks),
         batch_shape=actual_batch_shape,
+        metadata=metadata,
     )
     json_path = output_dir / "profiling_result.json"
     save_profiling_result(result, json_path)

@@ -70,19 +70,54 @@ Sandia SAND2008-6212, Eq. 3.1–3.4.
 ### 1.3 — Outlier fractions are not relative to global σ
 
 **What happened:** This is not an outright mistake but a subtle definitional
-trap. `outlier_fractions` in `LayerStats` and `WelfordAccumulator` are computed
-relative to **per-batch σ**, then accumulated. The final fraction is a weighted
-average of per-batch outlier rates — it is **not** the fraction of elements
-that exceed `k · σ_global`.
+trap.  ``outlier_fractions`` in ``LayerStats`` and ``WelfordAccumulator`` are
+computed relative to **per-batch μ and σ**, then accumulated.  The final
+fraction is a weighted average of per-batch outlier rates — it is **not** the
+fraction of elements that exceed ``k · σ_global``.
 
 **Why it matters:** A reader who does not know this will assume the outlier
-fractions are relative to the global std. They are not. If per-batch σ varies
+fractions are relative to the global std.  They are not.  If per-batch σ varies
 meaningfully across batches, the two statistics can differ noticeably.
 
-**What to do instead:** This is documented in `WelfordAccumulator.outlier_counts`
-and `finalize_accumulator` docstrings. Do not change the implementation — the
+**What to do instead:** This is documented in ``WelfordAccumulator.outlier_counts``
+and ``finalize_accumulator`` docstrings.  Do not change the implementation — the
 per-batch convention is well-defined and appropriate for per-layer quantization
-calibration. Just be aware of what the number means.
+calibration.  Just be aware of what the number means.  The two-pass recount
+(``run_outlier_counting_pass``) produces the global-σ fractions used in the
+Phase 1 report.
+
+---
+
+### 1.4 — Outlier fractions used zero-centered definition (|x| > k·σ) instead of mean-centered (|x − μ| > k·σ)
+
+**What happened:** The original ``_register_stat_saves`` (profiler.py, line 950)
+computed outlier fractions as ``(t.abs() > sigma * t.std(correction=0))`` —
+measuring deviation from zero, not from the distribution mean.
+
+**Why it's wrong:** The standard statistical definition of an outlier is
+``|x − μ| > k·σ`` — deviation from the central tendency of the distribution.
+The zero-centered definition ``|x| > k·σ`` conflates the distribution's mean
+shift with its outlier count.  For a distribution with μ ≈ 0 (most ViT sites),
+the difference is negligible.  For block 10 pre-GELU (μ = −28.33, σ = 11.20),
+the two definitions are materially different: an element at x = 0 satisfies
+``|x| = 0 < 3·11.20`` (not an outlier by the zero-centered definition) but
+``|x − (−28.33)| = 28.33 > 3·11.20`` (is an outlier by the mean-centered
+definition).
+
+The quantization literature uses the mean-centered definition consistently:
+Wei et al. (2022, §3.1) identify outliers by examining per-token and per-channel
+activation magnitudes relative to the distribution; Bondarenko et al. (2021,
+§4.1) characterize distributions by their central moments, all defined relative
+to μ.
+
+**What to do instead:** Use ``((t - t.mean()).abs() > sigma * t.std(correction=0))``.
+This is the standard statistical definition and is self-consistent: the threshold
+``k·σ`` uses σ measured around μ, and the deviation is also measured from μ.
+
+**Resolution (2026-07-30):** Fixed in ``_register_stat_saves``.  Updated
+``WelfordAccumulator.outlier_counts``, ``finalize_accumulator``, and
+``_register_stat_saves`` docstrings.  Updated ``EXP1-IMPL.md §2.3``.
+See ``docs/issues.md`` T-014.
 
 ---
 
@@ -566,9 +601,9 @@ variance) before making per-channel quantization decisions.
 ### 11.1 — Residual update delta ‖Δ‖/‖x_skip‖ never computed (spec required it)
 
 **What happened:** The framework spec (`docs/scispace-docs/vit_profiling_framework.md`,
-§Residual Update Stream) explicitly specified computing the MLP update magnitude
-relative to the skip connection: `‖mlp_output‖ / ‖x_skip‖`.  This was never
-implemented — `LayerStats` had no field for it, and `profile_vit` never computed
+§Residual Update Stream) explicitly specified computing the LN2 amplification
+magnitude relative to the skip connection: ``‖LN2(x)‖ / ‖x_skip‖``.  This was never
+implemented — ``LayerStats`` had no field for it, and ``profile_vit`` never computed
 the ratio inside the trace.
 
 **Why it's wrong:** Without this metric, we know *that* the residual stream has
@@ -578,11 +613,11 @@ range expansion.  This is directly actionable for Phase 2: blocks with large del
 ratios are where MLP outlier ablation will have the most impact (Wei et al. 2022,
 §3.1).
 
-**Resolution (2026-07-30):** Added `residual_delta_ratio: float | None` field to
-`LayerStats`.  The ratio `‖mlp_output‖₂ / ‖x_skip‖₂` is computed per-token inside
+**Resolution (2026-07-30):** Added ``ln2_amplification_ratio: float | None`` field to
+``LayerStats``.  The ratio ``‖LN2(x)‖₂ / ‖x_skip‖₂`` is computed per-token inside
 the nnsight trace and averaged over batch and tokens.  It is attached to
-`blocks.{i}/residual_stream` (representing the MLP contribution in block `i`).
-`patch_embed/residual_stream` has `None` (no preceding MLP).
+``blocks.{i}/residual_stream`` (representing the LN2 amplification in block ``i``).
+``patch_embed/residual_stream`` has ``None`` (no preceding LN2).
 
 A key implementation challenge was nnsight 0.7.0's `OutOfOrderError`: once
 `block.norm1.input` is consumed by `_register_stat_saves` (which calls

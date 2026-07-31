@@ -65,9 +65,9 @@ def load_vit(device: torch.device) -> tuple[VisionTransformer, Callable]:
     RuntimeError
         If ``timm`` cannot locate the pretrained weights.
     """
-    logger.info("Loading vit_base_patch16_224 pretrained weights...")
+    logger.info("Loading vit_base_patch16_224.augreg2_in21k_ft_in1k pretrained weights...")
     model: VisionTransformer = timm.create_model(
-        "vit_base_patch16_224", pretrained=True
+        "vit_base_patch16_224.augreg2_in21k_ft_in1k", pretrained=True
     )
     model.eval()
     disable_fused_attn(model)

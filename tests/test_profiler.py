@@ -218,11 +218,12 @@ def test_layer_stats_max_min_backwards_compat(tmp_path: Path) -> None:
                 "attention_entropy_patches": None,
                 "layernorm_gamma": None,
                 "layernorm_beta": None,
-                "residual_delta_ratio": None,
+                "ln2_amplification_ratio": None,
             }
         },
         "num_blocks": 12,
         "batch_shape": [1, 3, 224, 224],
+        "metadata": None,
     }
     path = tmp_path / "old_no_maxmin.json"
     path.write_text(json.dumps(raw))
@@ -313,6 +314,69 @@ def test_saved_json_schema(tmp_path: Path) -> None:
     sample = next(iter(raw["stats"].values()))
     for field in ("site_identifier", "mean", "std", "kurtosis", "outlier_fractions"):
         assert field in sample, f"Missing JSON field: {field!r}"
+
+
+def test_run_metadata_round_trip(tmp_path: Path) -> None:
+    """RunMetadata must survive JSON save → load roundtrip."""
+    from src.profiler import RunMetadata
+
+    metadata = RunMetadata(
+        python_version="3.12.3",
+        pytorch_version="2.13.0",
+        timm_version="1.0.28",
+        nnsight_version="0.7.0",
+        cuda_available=True,
+        cuda_version="13.0",
+        gpu_name="NVIDIA GeForce RTX 3070",
+        gpu_memory_gb=8.0,
+        model_name="vit_base_patch16_224.augreg2_in21k_ft_in1k",
+        dataset="ImageNet-1K validation",
+        num_images=50000,
+        batch_size=64,
+        seed=42,
+        num_seeds=3,
+        timestamp_utc="2026-07-30T00:00:00+00:00",
+    )
+    result = ProfilingResult(
+        stats={},
+        num_blocks=12,
+        batch_shape=(1, 3, 224, 224),
+        metadata=metadata,
+    )
+    path = tmp_path / "with_metadata.json"
+    save_profiling_result(result, path)
+    loaded = load_profiling_result(path)
+    assert loaded.metadata is not None
+    assert loaded.metadata.python_version == "3.12.3"
+    assert loaded.metadata.pytorch_version == "2.13.0"
+    assert loaded.metadata.timm_version == "1.0.28"
+    assert loaded.metadata.nnsight_version == "0.7.0"
+    assert loaded.metadata.cuda_available is True
+    assert loaded.metadata.cuda_version == "13.0"
+    assert loaded.metadata.gpu_name == "NVIDIA GeForce RTX 3070"
+    assert loaded.metadata.gpu_memory_gb == pytest.approx(8.0)
+    assert loaded.metadata.model_name == "vit_base_patch16_224.augreg2_in21k_ft_in1k"
+    assert loaded.metadata.dataset == "ImageNet-1K validation"
+    assert loaded.metadata.num_images == 50000
+    assert loaded.metadata.batch_size == 64
+    assert loaded.metadata.seed == 42
+    assert loaded.metadata.num_seeds == 3
+    assert loaded.metadata.timestamp_utc == "2026-07-30T00:00:00+00:00"
+
+
+def test_run_metadata_backwards_compat(tmp_path: Path) -> None:
+    """Old JSON without metadata key must deserialize with metadata=None."""
+    import json
+
+    raw = {
+        "stats": {},
+        "num_blocks": 12,
+        "batch_shape": [1, 3, 224, 224],
+    }
+    path = tmp_path / "old_no_metadata.json"
+    path.write_text(json.dumps(raw))
+    loaded = load_profiling_result(path)
+    assert loaded.metadata is None
 
 
 def test_site_identifier_survives_serialisation(tmp_path: Path) -> None:
@@ -2055,9 +2119,11 @@ def test_run_outlier_counting_pass_known_gaussian() -> None:
     mu = data.mean().item()
     sigma = data.std(correction=0).item()
 
-    # Count outliers using global μ and σ.
+    # Count outliers using the mean-centered definition: |x − μ| > k·σ.
+    # For N(0,1) data, μ ≈ 0 so this is nearly identical to |x| > k·σ,
+    # but we use the correct definition for consistency with the codebase.
     for k in OUTLIER_SIGMAS:
-        frac = (data.abs() > k * sigma).float().mean().item()
+        frac = ((data - mu).abs() > k * sigma).float().mean().item()
         if k == 3.0:
             # Theoretical: 2 * Φ(-3) ≈ 0.0027.  Allow ±0.002 for finite sample.
             assert 0.0007 <= frac <= 0.0047, (
@@ -2741,87 +2807,87 @@ def test_generate_summary_table_full_profiling_result() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_layer_stats_residual_delta_ratio_default_none() -> None:
-    """residual_delta_ratio must default to None."""
+def test_layer_stats_ln2_amplification_ratio_default_none() -> None:
+    """ln2_amplification_ratio must default to None."""
     stats = LayerStats(site_identifier="blocks.0/residual_stream", mean=0.0, std=1.0, kurtosis=0.0)
-    assert stats.residual_delta_ratio is None
+    assert stats.ln2_amplification_ratio is None
 
 
-def test_layer_stats_residual_delta_ratio_stores_value() -> None:
-    """residual_delta_ratio must accept and store a float value."""
+def test_layer_stats_ln2_amplification_ratio_stores_value() -> None:
+    """ln2_amplification_ratio must accept and store a float value."""
     stats = LayerStats(
         site_identifier="blocks.3/residual_stream",
         mean=0.0, std=1.0, kurtosis=0.0,
-        residual_delta_ratio=1.234,
+        ln2_amplification_ratio=1.234,
     )
-    assert stats.residual_delta_ratio == pytest.approx(1.234)
+    assert stats.ln2_amplification_ratio == pytest.approx(1.234)
 
 
-def test_layer_stats_residual_delta_ratio_serialization_roundtrip(
+def test_layer_stats_ln2_amplification_ratio_serialization_roundtrip(
     tmp_path: Path,
 ) -> None:
-    """residual_delta_ratio must survive JSON save → load roundtrip."""
+    """ln2_amplification_ratio must survive JSON save → load roundtrip."""
     result = ProfilingResult(
         stats={
             "blocks.0/residual_stream": LayerStats(
                 site_identifier="blocks.0/residual_stream",
                 mean=0.0, std=1.0, kurtosis=0.0,
-                residual_delta_ratio=2.718,
+                ln2_amplification_ratio=2.718,
             ),
             "blocks.5/residual_stream": LayerStats(
                 site_identifier="blocks.5/residual_stream",
                 mean=0.5, std=2.0, kurtosis=1.0,
-                residual_delta_ratio=1.414,
+                ln2_amplification_ratio=1.414,
             ),
         },
         num_blocks=12,
         batch_shape=(1, 3, 224, 224),
     )
-    path = tmp_path / "delta_ratio_roundtrip.json"
+    path = tmp_path / "ln2_amplification_ratio_roundtrip.json"
     save_profiling_result(result, path)
     loaded = load_profiling_result(path)
-    assert loaded.stats["blocks.0/residual_stream"].residual_delta_ratio == pytest.approx(2.718)
-    assert loaded.stats["blocks.5/residual_stream"].residual_delta_ratio == pytest.approx(1.414)
+    assert loaded.stats["blocks.0/residual_stream"].ln2_amplification_ratio == pytest.approx(2.718)
+    assert loaded.stats["blocks.5/residual_stream"].ln2_amplification_ratio == pytest.approx(1.414)
 
 
-def test_welford_accumulator_delta_ratio_defaults() -> None:
-    """WelfordAccumulator delta ratio fields must default to zero."""
+def test_welford_accumulator_ln2_amplification_ratio_defaults() -> None:
+    """WelfordAccumulator LN2 amplification ratio fields must default to zero."""
     from src.profiler import WelfordAccumulator
 
     acc = WelfordAccumulator(site_identifier="blocks.0/residual_stream")
-    assert acc.residual_delta_ratio_sum == 0.0
-    assert acc.residual_delta_ratio_count == 0
+    assert acc.ln2_amplification_ratio_sum == 0.0
+    assert acc.ln2_amplification_ratio_count == 0
 
 
-def test_merge_batch_stats_delta_ratio_accumulation() -> None:
-    """merge_batch_stats must accumulate delta ratio via simple sum."""
+def test_merge_batch_stats_ln2_amplification_ratio_accumulation() -> None:
+    """merge_batch_stats must accumulate LN2 amplification ratio via simple sum."""
     from src.profiler import WelfordAccumulator, merge_batch_stats
 
     acc = WelfordAccumulator(site_identifier="blocks.0/residual_stream")
 
-    # Batch 1: delta_ratio = 1.5
+    # Batch 1: ratio = 1.5
     stats1 = LayerStats(
         site_identifier="blocks.0/residual_stream",
         mean=0.0, std=1.0, kurtosis=0.0, m3=0.0,
-        residual_delta_ratio=1.5,
+        ln2_amplification_ratio=1.5,
     )
     merge_batch_stats(acc, stats1, batch_n=100)
-    assert acc.residual_delta_ratio_sum == pytest.approx(1.5)
-    assert acc.residual_delta_ratio_count == 1
+    assert acc.ln2_amplification_ratio_sum == pytest.approx(1.5)
+    assert acc.ln2_amplification_ratio_count == 1
 
-    # Batch 2: delta_ratio = 2.5
+    # Batch 2: ratio = 2.5
     stats2 = LayerStats(
         site_identifier="blocks.0/residual_stream",
         mean=0.5, std=1.2, kurtosis=0.1, m3=0.1,
-        residual_delta_ratio=2.5,
+        ln2_amplification_ratio=2.5,
     )
     merge_batch_stats(acc, stats2, batch_n=100)
-    assert acc.residual_delta_ratio_sum == pytest.approx(4.0)
-    assert acc.residual_delta_ratio_count == 2
+    assert acc.ln2_amplification_ratio_sum == pytest.approx(4.0)
+    assert acc.ln2_amplification_ratio_count == 2
 
 
-def test_finalize_accumulator_delta_ratio_mean() -> None:
-    """finalize_accumulator must compute mean delta ratio across batches."""
+def test_finalize_accumulator_ln2_amplification_ratio_mean() -> None:
+    """finalize_accumulator must compute mean LN2 amplification ratio across batches."""
     from src.profiler import WelfordAccumulator, finalize_accumulator, merge_batch_stats
 
     acc = WelfordAccumulator(site_identifier="blocks.0/residual_stream")
@@ -2830,120 +2896,120 @@ def test_finalize_accumulator_delta_ratio_mean() -> None:
         stats = LayerStats(
             site_identifier="blocks.0/residual_stream",
             mean=0.0, std=1.0, kurtosis=0.0, m3=0.0,
-            residual_delta_ratio=ratio,
+            ln2_amplification_ratio=ratio,
         )
         merge_batch_stats(acc, stats, batch_n=100)
 
     result = finalize_accumulator(acc)
-    assert result.residual_delta_ratio == pytest.approx(2.0)  # (1+2+3)/3
+    assert result.ln2_amplification_ratio == pytest.approx(2.0)  # (1+2+3)/3
 
 
-def test_finalize_accumulator_delta_ratio_none_when_no_data() -> None:
-    """finalize_accumulator must return None for delta ratio when no batches contributed."""
+def test_finalize_accumulator_ln2_amplification_ratio_none_when_no_data() -> None:
+    """finalize_accumulator must return None for LN2 amplification ratio when no batches contributed."""
     from src.profiler import WelfordAccumulator, finalize_accumulator, merge_batch_stats
 
     acc = WelfordAccumulator(site_identifier="blocks.0/residual_stream")
 
-    # Batch with no delta ratio (e.g., non-residual_stream site)
+    # Batch with no LN2 amplification ratio (e.g., non-residual_stream site)
     stats = LayerStats(
         site_identifier="blocks.0/residual_stream",
         mean=0.0, std=1.0, kurtosis=0.0, m3=0.0,
-        residual_delta_ratio=None,
+        ln2_amplification_ratio=None,
     )
     merge_batch_stats(acc, stats, batch_n=100)
 
     result = finalize_accumulator(acc)
-    assert result.residual_delta_ratio is None
+    assert result.ln2_amplification_ratio is None
 
 
 # ---------------------------------------------------------------------------
-# Slow tests — residual delta ratio (T-005)
+# Slow tests — LN2 amplification ratio (T-005)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.slow
-def test_slow_residual_delta_ratio_present_on_residual_stream(
+def test_slow_ln2_amplification_ratio_present_on_residual_stream(
     _vit_result: ProfilingResult,
 ) -> None:
-    """All residual_stream sites (except patch_embed) must have a delta ratio.
+    """All residual_stream sites (except patch_embed) must have an LN2 amplification ratio.
 
-    blocks.{0..11}/residual_stream must have non-None residual_delta_ratio.
-    patch_embed/residual_stream must be None (no preceding MLP block).
+    blocks.{0..11}/residual_stream must have non-None ln2_amplification_ratio.
+    patch_embed/residual_stream must be None (no preceding LN2 block).
     """
-    # patch_embed has no preceding MLP → must be None
+    # patch_embed has no preceding LN2 → must be None
     pe_stats = _vit_result.stats["patch_embed/residual_stream"]
-    assert pe_stats.residual_delta_ratio is None, (
-        "patch_embed/residual_stream should not have a delta ratio"
+    assert pe_stats.ln2_amplification_ratio is None, (
+        "patch_embed/residual_stream should not have an LN2 amplification ratio"
     )
 
-    # blocks.0 through blocks.11 must have delta ratios
+    # blocks.0 through blocks.11 must have LN2 amplification ratios
     for i in range(_NUM_BLOCKS):
         key = f"blocks.{i}/residual_stream"
         stats = _vit_result.stats[key]
-        assert stats.residual_delta_ratio is not None, (
-            f"missing residual_delta_ratio at {key}"
+        assert stats.ln2_amplification_ratio is not None, (
+            f"missing ln2_amplification_ratio at {key}"
         )
-        assert isinstance(stats.residual_delta_ratio, float), (
-            f"residual_delta_ratio must be float at {key}, got {type(stats.residual_delta_ratio)}"
+        assert isinstance(stats.ln2_amplification_ratio, float), (
+            f"ln2_amplification_ratio must be float at {key}, got {type(stats.ln2_amplification_ratio)}"
         )
 
 
 @pytest.mark.slow
-def test_slow_residual_delta_ratio_positive(
+def test_slow_ln2_amplification_ratio_positive(
     _vit_result: ProfilingResult,
 ) -> None:
-    """All delta ratios must be strictly positive (norms are non-negative)."""
+    """All LN2 amplification ratios must be strictly positive (norms are non-negative)."""
     for i in range(_NUM_BLOCKS):
         key = f"blocks.{i}/residual_stream"
-        ratio = _vit_result.stats[key].residual_delta_ratio
-        assert ratio > 0.0, f"delta ratio must be > 0 at {key}, got {ratio}"
+        ratio = _vit_result.stats[key].ln2_amplification_ratio
+        assert ratio > 0.0, f"LN2 amplification ratio must be > 0 at {key}, got {ratio}"
 
 
 @pytest.mark.slow
-def test_slow_residual_delta_ratio_absent_on_non_residual_sites(
+def test_slow_ln2_amplification_ratio_absent_on_non_residual_sites(
     _vit_result: ProfilingResult,
 ) -> None:
-    """Non-residual_stream sites must have None for residual_delta_ratio."""
+    """Non-residual_stream sites must have None for ln2_amplification_ratio."""
     for key, stats in _vit_result.stats.items():
         if "residual_stream" in key:
             continue  # covered by the tests above
-        assert stats.residual_delta_ratio is None, (
-            f"non-residual_stream site {key} has unexpected residual_delta_ratio"
+        assert stats.ln2_amplification_ratio is None, (
+            f"non-residual_stream site {key} has unexpected ln2_amplification_ratio"
         )
 
 
 @pytest.mark.slow
-def test_slow_residual_delta_ratio_survives_serialisation(
+def test_slow_ln2_amplification_ratio_survives_serialisation(
     tmp_path: Path, _vit_result: ProfilingResult,
 ) -> None:
-    """Delta ratios must survive JSON save → load roundtrip on a real result."""
-    path = tmp_path / "delta_ratio_roundtrip.json"
+    """LN2 amplification ratios must survive JSON save → load roundtrip on a real result."""
+    path = tmp_path / "ln2_amplification_ratio_roundtrip.json"
     save_profiling_result(_vit_result, path)
     loaded = load_profiling_result(path)
     for i in range(_NUM_BLOCKS):
         key = f"blocks.{i}/residual_stream"
-        orig = _vit_result.stats[key].residual_delta_ratio
-        loaded_ratio = loaded.stats[key].residual_delta_ratio
+        orig = _vit_result.stats[key].ln2_amplification_ratio
+        loaded_ratio = loaded.stats[key].ln2_amplification_ratio
         assert loaded_ratio == pytest.approx(orig, rel=1e-6), (
-            f"delta ratio mismatch at {key}: {loaded_ratio} vs {orig}"
+            f"LN2 amplification ratio mismatch at {key}: {loaded_ratio} vs {orig}"
         )
 
 
 @pytest.mark.slow
-def test_slow_residual_delta_ratio_reasonable_magnitude(
+def test_slow_ln2_amplification_ratio_reasonable_magnitude(
     _vit_result: ProfilingResult,
 ) -> None:
-    """Delta ratios should be in a reasonable range for a trained ViT.
+    """LN2 amplification ratios should be in a reasonable range for a trained ViT.
 
-    For a well-trained ViT-B/16, the MLP contribution is typically a
-    modest fraction of the residual norm (ratios in [0.01, 10.0]).
+    For a well-trained ViT-B/16, the LN2 output norm relative to the skip
+    connection is typically modest (ratios in [0.01, 10.0]).
     Values outside this range would indicate a bug in the computation.
     """
     for i in range(_NUM_BLOCKS):
         key = f"blocks.{i}/residual_stream"
-        ratio = _vit_result.stats[key].residual_delta_ratio
+        ratio = _vit_result.stats[key].ln2_amplification_ratio
         assert 0.001 < ratio < 100.0, (
-            f"delta ratio at {key} is {ratio}, outside expected range [0.001, 100.0]"
+            f"LN2 amplification ratio at {key} is {ratio}, outside expected range [0.001, 100.0]"
         )
 
 
