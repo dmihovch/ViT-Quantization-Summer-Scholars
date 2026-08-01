@@ -116,3 +116,41 @@ def test_plot_attention_entropy_heatmap_empty_input(tmp_path: Path) -> None:
     assert not output_path.exists(), (
         "Empty input should not produce a file"
     )
+
+
+# ---------------------------------------------------------------------------
+# Sort key tests
+# ---------------------------------------------------------------------------
+
+
+def test_site_sort_key_patch_embed_first() -> None:
+    """patch_embed should sort before any block."""
+    from src.plotting import _site_sort_key
+    assert _site_sort_key("patch_embed/residual_stream") < _site_sort_key("blocks.0/pre_gelu")
+
+
+def test_site_sort_key_numeric_order() -> None:
+    """blocks.2 should sort before blocks.10 (numeric, not string)."""
+    from src.plotting import _site_sort_key
+    assert _site_sort_key("blocks.2/pre_gelu") < _site_sort_key("blocks.10/pre_gelu")
+
+
+def test_site_sort_key_full_sequence() -> None:
+    """Sorting should produce correct numeric order."""
+    from src.plotting import _site_sort_key
+    site_ids = [
+        "blocks.10/pre_gelu", "blocks.2/pre_gelu", "patch_embed/residual_stream",
+        "blocks.0/pre_gelu", "blocks.11/pre_gelu", "blocks.1/pre_gelu",
+    ]
+    sorted_ids = sorted(site_ids, key=_site_sort_key)
+    assert sorted_ids == [
+        "patch_embed/residual_stream",
+        "blocks.0/pre_gelu", "blocks.1/pre_gelu", "blocks.2/pre_gelu",
+        "blocks.10/pre_gelu", "blocks.11/pre_gelu",
+    ]
+
+
+def test_site_sort_key_unknown_sorts_last() -> None:
+    """Unknown prefixes should sort after all known ones."""
+    from src.plotting import _site_sort_key
+    assert _site_sort_key("blocks.11/residual_stream") < _site_sort_key("unknown/site")

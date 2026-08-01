@@ -20,6 +20,11 @@ class DataDirectoryError(FileNotFoundError):
 class HookRegistrationError(RuntimeError):
     """Raised when no ``nn.GELU`` modules are found to attach hooks to.
 
+    .. note::
+        This exception is part of the legacy ``hooks.py`` pipeline (raw
+        PyTorch hooks).  The current codebase uses nnsight-based profiling
+        and intervention.  Retained for backward compatibility.
+
     Examples
     --------
     Raised by ``hooks.register_profiling_hooks`` when iterating over a model

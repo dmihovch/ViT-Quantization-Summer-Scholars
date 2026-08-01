@@ -60,9 +60,9 @@ def _parse_args() -> argparse.Namespace:
         "--sigma-thresholds",
         type=float,
         nargs="+",
-        default=[2.0, 3.0, 4.0, 5.0],
+        default=[3.0, 4.0, 6.0],
         metavar="K",
-        help="Sigma multipliers k to sweep (e.g. --sigma-thresholds 2 3 4 5).",
+        help="Sigma multipliers k to sweep (default: 3 4 6, matching Phase 1 OUTLIER_SIGMAS).",
     )
     parser.add_argument(
         "--layer-stats",

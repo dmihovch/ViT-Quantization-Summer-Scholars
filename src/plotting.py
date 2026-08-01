@@ -9,6 +9,7 @@ headless/CI environments without a display server.  Every function calls
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import matplotlib
@@ -21,6 +22,46 @@ from src.ablation import AblationResult  # noqa: E402 — must follow matplotlib
 from src.integer_gelu import GELULut  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Sort key helpers
+#
+# Naive ``sorted(site_ids)`` gives string ordering:
+#   blocks.0, blocks.1, blocks.10, blocks.11, blocks.2, ...
+# which is wrong for heatmaps.  We extract the numeric block index.
+# ---------------------------------------------------------------------------
+
+_BLOCK_RE = re.compile(r"blocks\.(\d+)")
+
+
+def _site_sort_key(site_id: str) -> tuple[int, int]:
+    """Return a numeric sort key for a site identifier.
+
+    Sorts ``patch_embed/...`` first ``(0, 0)``, then ``blocks.{N}/...`` by
+    numeric N ``(1, N)``.  Unknown prefixes sort last ``(2, 0)``.
+
+    Parameters
+    ----------
+    site_id:
+        Site identifier string, e.g. ``"blocks.5/pre_gelu"``.
+
+    Returns
+    -------
+    tuple[int, int]
+        Sort key for use with ``sorted(key=...)``.
+    """
+    if site_id.startswith("patch_embed"):
+        return (0, 0)
+    m = _BLOCK_RE.search(site_id)
+    if m:
+        return (1, int(m.group(1)))
+    return (2, 0)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 plots
+# ---------------------------------------------------------------------------
 
 
 def plot_activation_histogram(
@@ -95,8 +136,8 @@ def plot_per_channel_std_heatmap(
         logger.warning("Empty per_channel_stds dict; skipping heatmap.")
         return
 
-    # Sort keys for deterministic layer ordering.
-    sorted_keys = sorted(per_channel_stds.keys())
+    # Numeric sort: blocks.0, blocks.1, ..., blocks.11 (not blocks.0, blocks.1, blocks.10, ...).
+    sorted_keys = sorted(per_channel_stds.keys(), key=_site_sort_key)
     data = np.array([per_channel_stds[k] for k in sorted_keys])  # (L, D)
 
     fig, ax = plt.subplots(figsize=(12, max(4, len(sorted_keys) * 0.4)))
@@ -141,8 +182,8 @@ def plot_attention_entropy_heatmap(
         logger.warning("Empty entropies dict; skipping attention entropy heatmap.")
         return
 
-    # Sort keys for deterministic block ordering.
-    sorted_keys = sorted(entropies.keys())
+    # Numeric sort: blocks.0, blocks.1, ..., blocks.11.
+    sorted_keys = sorted(entropies.keys(), key=_site_sort_key)
     data = np.array([entropies[k] for k in sorted_keys])  # (num_blocks, num_heads)
 
     fig, ax = plt.subplots(figsize=(10, max(4, len(sorted_keys) * 0.4)))
@@ -163,6 +204,11 @@ def plot_attention_entropy_heatmap(
     logger.debug("Saved attention entropy heatmap to %s", output_path)
 
 
+# ---------------------------------------------------------------------------
+# Phase 2 plots
+# ---------------------------------------------------------------------------
+
+
 def plot_accuracy_vs_threshold(
     results: list[AblationResult],
     output_path: Path,
@@ -170,16 +216,44 @@ def plot_accuracy_vs_threshold(
     """Save a line plot of top-1 accuracy against sigma threshold.
 
     Aggregates results across all layers for each unique
-    ``sigma_threshold`` value and plots the mean top-1 accuracy.
+    ``sigma_threshold`` value and plots the mean top-1 accuracy with
+    baseline shown as a horizontal reference line.
 
     Parameters
     ----------
     results:
-        Full list of :class:`~ablation.AblationResult` from Phase 2.
+        Full list of :class:`~ablation.AblationResult` from Phase 2
+        (all for a single site).
     output_path:
         Destination PNG path.
     """
-    raise NotImplementedError
+    if not results:
+        logger.warning("Empty results; skipping accuracy-vs-threshold plot.")
+        return
+
+    # Group by sigma_threshold, average top-1 across layers.
+    by_k: dict[float, list[float]] = {}
+    baseline = results[0].baseline_top1
+    for r in results:
+        by_k.setdefault(r.sigma_threshold, []).append(r.top1_accuracy)
+
+    ks = sorted(by_k.keys())
+    means = [np.mean(by_k[k]) for k in ks]
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(ks, means, "o-", color="steelblue", linewidth=2, markersize=6)
+    ax.axhline(baseline, color="gray", linestyle="--", linewidth=1,
+               label=f"Baseline ({baseline:.2f}%)")
+    ax.set_xlabel("Sigma threshold (k)")
+    ax.set_ylabel("Top-1 accuracy (%)")
+    ax.set_title(f"Accuracy vs outlier threshold — {results[0].site}")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    logger.debug("Saved accuracy-vs-threshold plot to %s", output_path)
 
 
 def plot_pct_zeroed_per_layer(
@@ -190,18 +264,49 @@ def plot_pct_zeroed_per_layer(
     """Save a bar chart of percentage zeroed for each layer at a single threshold.
 
     Filters ``results`` to rows matching ``sigma_k`` and plots one bar per
-    layer, sorted by layer name for reproducibility.
+    layer, sorted by site_identifier using numeric block ordering.
 
     Parameters
     ----------
     results:
-        Full list of :class:`~ablation.AblationResult` from Phase 2.
+        Full list of :class:`~ablation.AblationResult` from Phase 2
+        (all for a single site).
     sigma_k:
         Threshold multiplier to filter on (e.g. ``3.0`` for 3σ).
     output_path:
         Destination PNG path.
     """
-    raise NotImplementedError
+    filtered = [r for r in results if r.sigma_threshold == sigma_k]
+    if not filtered:
+        logger.warning(
+            "No results for sigma_k=%.1f; skipping pct-zeroed plot.", sigma_k
+        )
+        return
+
+    # Numeric sort: blocks.0, blocks.1, ..., blocks.11.
+    filtered.sort(key=lambda r: _site_sort_key(r.site_identifier))
+    labels = [r.site_identifier for r in filtered]
+    values = [r.pct_zeroed for r in filtered]
+
+    fig, ax = plt.subplots(figsize=(10, max(4, len(labels) * 0.3)))
+    y_pos = range(len(labels))
+    ax.barh(y_pos, values, color="steelblue", alpha=0.8)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels, fontsize=7)
+    ax.set_xlabel("% Zeroed")
+    ax.set_title(f"Percentage zeroed at k={sigma_k}σ — {filtered[0].site}")
+    ax.invert_yaxis()
+    ax.grid(True, alpha=0.3, axis="x")
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    logger.debug("Saved pct-zeroed plot to %s", output_path)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 plots (stubs)
+# ---------------------------------------------------------------------------
 
 
 def plot_lut_vs_fp32(lut: GELULut, output_path: Path) -> None:

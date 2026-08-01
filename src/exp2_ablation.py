@@ -3,67 +3,366 @@
 Orchestrates the full Phase 2 pipeline across three measurement sites:
 ``pre_gelu``, ``pre_softmax``, and ``residual_stream``.
 
+All intervention is performed inside nnsight trace contexts via
+:func:`ablation.zero_outliers_in_trace` — no raw PyTorch hooks are used.
+
 Pipeline
 --------
-1. Load the pretrained ViT-B/16 model and preprocessing transform.
+1. Load the pretrained ViT-B/16 model, wrap with NNsight.
 2. Load Phase 1 per-layer statistics from ``config.layer_stats_path``
-   (``profiling_result.json`` produced by ``profiler.save_profiling_result``).
-   These provide exact global ``σ`` for all six measurement sites.
-3. **Sample attention-site σ:** build a single batch of
-   ``config.attn_profile_num_images`` images using fixed seed
-   ``config.attn_profile_seed``, run ``profiler.profile_vit`` on that
-   batch, and extract the per-layer ``pre_softmax`` std.  This batch-derived
-   estimate is used as the scale parameter for the pre-softmax threshold
-   ``τ = k · σ``.  It is **not** a globally exact statistic — log a
-   warning to that effect at runtime.
-4. Merge Phase 1 and sampled stats into a unified ``layer_stats`` dict.
+   (``profiling_result.json``).  These provide exact global ``σ`` and ``μ``
+   for all six measurement sites — no single-batch estimation needed.
+3. Build the validation DataLoader (shuffle=False for deterministic eval).
+4. Measure **baseline** accuracy (no intervention) via
+   ``model.evaluate_accuracy``.
 5. For each site in ``{pre_gelu, pre_softmax, residual_stream}``:
      For each ``k`` in ``config.sigma_thresholds``:
-       a. Register site-selective zeroing pre-hooks
-          (``ablation.patch_model_for_ablation``).
-       b. Build the validation DataLoader.
-       c. Evaluate top-1 and top-5 accuracy (``model.evaluate_accuracy``).
-       d. Record per-layer percentage-zeroed and accuracy as
-          :class:`~ablation.AblationResult`.
-       e. Remove hooks (``ablation.remove_hooks``) before next iteration.
-     For ``pre_softmax`` only: also record
-     ``ablation.compute_entropy_delta`` across the threshold sweep.
-6. Save all :class:`~ablation.AblationResult` records to
-   ``ablation_results.csv`` via ``ablation.save_ablation_results``.
+       For each batch in the val loader:
+         a. **Outlier pass**: zero_outliers_in_trace with mean-centered
+            threshold.  Collect logits and per-layer %-zeroed.
+         b. **Random control** (pre_gelu and residual_stream only):
+            zero_outliers_in_trace with random_fractions set to the
+            exact per-batch per-layer %-zeroed from step (a).  This
+            ensures the random control zeros exactly the same fraction
+            of elements as the outlier condition on every batch.
+       Record :class:`~ablation.AblationResult` per layer for both
+       outlier and random conditions.
+6. Save all results to ``ablation_results.csv`` and ``entropy_deltas.csv`` via
+   ``ablation.save_ablation_results`` and ``ablation.save_entropy_deltas``.
 7. Generate accuracy-vs-threshold and per-layer %-zeroed plots via
    ``plotting.*``.
 
 Statistical notes
 -----------------
-Zeroing thresholds for ``pre_gelu`` and ``residual_stream`` use exact global
-σ from Phase 1.  The ``pre_softmax`` threshold uses a batch-derived σ
-estimate (see step 3); this is adequate for a threshold scale parameter but
-must be disclosed as approximate in any publication.
+All zeroing thresholds use exact global σ and μ from Phase 1's
+``run_profiling_dataset_pass``.  The threshold definition is mean-centered
+(``|x − μ| > k·σ``), consistent with Phase 1's outlier definition and the
+standard statistical convention (Wei et al. 2022, §3.1; Bondarenko et al.
+2021, §4.1).  No batch-derived estimates are used.
+
+The random-zeroing control zeros the **exact same fraction** of elements as
+the outlier-threshold condition on a **per-batch** basis.  After each outlier
+forward pass, the per-layer %-zeroed is collected and used as the target
+fraction for the random pass on the same batch.  This eliminates the
+confound of differing zeroing rates between conditions.
+
+Entropy deltas are computed per-head using ``torch.special.entr``
+(consistent with Phase 1 after T-017 fix) and compared against Phase 1
+baseline entropy values from ``profiling_result.json``.
 """
 
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
+from typing import Any
 
+from nnsight import NNsight
+
+from src.ablation import (
+    AblationResult,
+    save_ablation_results,
+    save_entropy_deltas,
+    zero_outliers_in_trace,
+)
 from src.config import AblationConfig
+from src.data_loader import build_val_loader
+from src.model import evaluate_accuracy, load_vit
+from src.plotting import plot_accuracy_vs_threshold, plot_pct_zeroed_per_layer
+from src.profiler import LayerStats, load_profiling_result
+from src.utils import ensure_dir
 
 logger = logging.getLogger(__name__)
+
+
+def _site_matches(site_id: str, site: str) -> bool:
+    """Check whether a site_identifier belongs to the given measurement site.
+
+    Parameters
+    ----------
+    site_id:
+        Fully-qualified site identifier, e.g. ``"blocks.3/pre_gelu"``.
+    site:
+        Measurement site name: ``"pre_gelu"``, ``"pre_softmax"``, or
+        ``"residual_stream"``.
+
+    Returns
+    -------
+    bool
+        True if ``site_id`` ends with ``"/{site}"`` or matches the
+        ``patch_embed/residual_stream`` special case.
+    """
+    if site_id == "patch_embed/residual_stream" and site == "residual_stream":
+        return True
+    return site_id.endswith(f"/{site}")
+
+
+def _build_layer_results(
+    pct_sum: dict[str, float],
+    pct_count: dict[str, int],
+    entropy_cls_sum: dict[str, list[float]],
+    entropy_patch_sum: dict[str, list[float]],
+    site: str,
+    sigma_k: float,
+    layer_stats: dict[str, LayerStats],
+    baseline_top1: float,
+    baseline_top5: float,
+    top1: float,
+    top5: float,
+    is_random: bool,
+) -> list[AblationResult]:
+    """Build AblationResult records from accumulated per-layer statistics.
+
+    Parameters
+    ----------
+    pct_sum:
+        Running sum of per-layer %-zeroed across batches.
+    pct_count:
+        Number of batches contributing to each layer's sum.
+    entropy_cls_sum:
+        Per-batch CLS entropy lists, keyed by site_identifier.
+    entropy_patch_sum:
+        Per-batch patch entropy lists, keyed by site_identifier.
+    site:
+        Measurement site name.
+    sigma_k:
+        Threshold multiplier.
+    layer_stats:
+        Phase 1 per-site statistics (for baseline entropy).
+    baseline_top1, baseline_top5:
+        Unablated accuracy percentages.
+    top1, top5:
+        Accuracy percentages for this condition.
+    is_random:
+        Whether this is the random control condition.
+
+    Returns
+    -------
+    list[AblationResult]
+    """
+    results: list[AblationResult] = []
+    for sid in sorted(pct_sum.keys()):
+        mean_pct = pct_sum[sid] / pct_count[sid] if pct_count[sid] > 0 else 0.0
+
+        cls_entropy: list[float] = []
+        patch_entropy: list[float] = []
+        baseline_cls: list[float] = []
+        baseline_patch: list[float] = []
+
+        if sid in entropy_cls_sum and sid in layer_stats:
+            num_heads = len(entropy_cls_sum[sid][0])
+            cls_entropy = [
+                sum(batch[h] for batch in entropy_cls_sum[sid]) / len(entropy_cls_sum[sid])
+                for h in range(num_heads)
+            ]
+            patch_entropy = [
+                sum(batch[h] for batch in entropy_patch_sum[sid]) / len(entropy_patch_sum[sid])
+                for h in range(num_heads)
+            ]
+            ps_stats = layer_stats[sid]
+            if ps_stats.attention_entropy_cls is not None:
+                baseline_cls = list(ps_stats.attention_entropy_cls)
+            if ps_stats.attention_entropy_patches is not None:
+                baseline_patch = list(ps_stats.attention_entropy_patches)
+
+        results.append(AblationResult(
+            site=site,
+            sigma_threshold=sigma_k,
+            site_identifier=sid,
+            pct_zeroed=mean_pct,
+            top1_accuracy=top1,
+            top5_accuracy=top5,
+            baseline_top1=baseline_top1,
+            baseline_top5=baseline_top5,
+            is_random=is_random,
+            cls_entropy=cls_entropy,
+            patch_entropy=patch_entropy,
+            baseline_cls_entropy=baseline_cls,
+            baseline_patch_entropy=baseline_patch,
+        ))
+
+    return results
 
 
 def run(config: AblationConfig) -> None:
     """Execute the Phase 2 ablation pipeline end-to-end.
 
-    All artefacts (``ablation_results.csv`` and plot PNGs) are written under
-    ``config.output_dir``, which is created if it does not exist.
+    All artefacts (``ablation_results.csv``, ``entropy_deltas.csv``, and
+    plot PNGs) are written under ``config.output_dir``, which is created if
+    it does not exist.
 
     Parameters
     ----------
     config:
         Fully-specified :class:`~config.AblationConfig` instance.
-
-    Raises
-    ------
-    NotImplementedError
-        Always; stub implementation pending Phase 2 development.
     """
-    raise NotImplementedError
+    # 1. Load model and wrap with NNsight.
+    model, transform = load_vit(config.device)
+    wrapped = NNsight(model)
+
+    # 2. Load Phase 1 stats.
+    profiling_result = load_profiling_result(config.layer_stats_path)
+    layer_stats: dict[str, LayerStats] = profiling_result.stats
+    logger.info(
+        "Loaded Phase 1 stats: %d sites from %s",
+        len(layer_stats), config.layer_stats_path,
+    )
+
+    # 3. Build val loader (deterministic order for fair comparisons).
+    loader = build_val_loader(
+        config.data_dir, transform, config.batch_size,
+        config.num_images, config.device, shuffle=False,
+    )
+
+    # 4. Measure baseline accuracy (no intervention).
+    logger.info("Measuring baseline accuracy...")
+    baseline_top1, baseline_top5 = evaluate_accuracy(model, loader, config.device)
+    logger.info("Baseline: top-1=%.2f%%, top-5=%.2f%%", baseline_top1, baseline_top5)
+
+    # 5. Sweep sites × thresholds.
+    #    For pre_gelu and residual_stream, each batch is processed twice:
+    #    first with outlier thresholding, then with random zeroing using
+    #    the exact per-batch per-layer %-zeroed from the outlier pass.
+    sites = ("pre_gelu", "pre_softmax", "residual_stream")
+    all_results: list[AblationResult] = []
+
+    for site in sites:
+        logger.info("=== Ablating site: %s ===", site)
+        do_random = site in ("pre_gelu", "residual_stream")
+
+        for k in config.sigma_thresholds:
+            logger.info("  Threshold k=%.1f ...", k)
+
+            # --- Accumulators for outlier pass ---
+            out_pct_sum: dict[str, float] = defaultdict(float)
+            out_pct_count: dict[str, int] = defaultdict(int)
+            out_entropy_cls: dict[str, list[float]] = defaultdict(list)
+            out_entropy_patch: dict[str, list[float]] = defaultdict(list)
+            out_correct_top1 = 0
+            out_correct_top5 = 0
+            out_total = 0
+
+            # --- Accumulators for random control ---
+            rnd_pct_sum: dict[str, float] = defaultdict(float)
+            rnd_pct_count: dict[str, int] = defaultdict(int)
+            rnd_correct_top1 = 0
+            rnd_correct_top5 = 0
+            rnd_total = 0
+
+            for images, labels in loader:
+                images = images.to(config.device)
+                labels = labels.to(config.device)
+
+                # --- Outlier pass ---
+                logits, batch_pct, batch_entropy = zero_outliers_in_trace(
+                    wrapped, images, site, k, layer_stats,
+                )
+
+                for sid, pct in batch_pct.items():
+                    out_pct_sum[sid] += pct
+                    out_pct_count[sid] += 1
+                for sid, ent in batch_entropy.items():
+                    out_entropy_cls[sid].append(ent["cls"])
+                    out_entropy_patch[sid].append(ent["patch"])
+
+                top5_preds = logits.topk(5, dim=1).indices
+                out_correct_top1 += (top5_preds[:, 0] == labels).sum().item()
+                out_correct_top5 += (
+                    top5_preds == labels.unsqueeze(1)
+                ).any(dim=1).sum().item()
+                out_total += labels.size(0)
+
+                # --- Random control (per-batch matched fractions) ---
+                if do_random:
+                    # Convert per-layer %-zeroed (0-100) to fractions (0-1).
+                    random_fractions = {
+                        sid: pct / 100.0 for sid, pct in batch_pct.items()
+                    }
+                    rnd_logits, rnd_pct, _rnd_entropy = zero_outliers_in_trace(
+                        wrapped, images, site, k, layer_stats,
+                        random_fractions=random_fractions,
+                        random_seed=config.seed,
+                    )
+
+                    for sid, pct in rnd_pct.items():
+                        rnd_pct_sum[sid] += pct
+                        rnd_pct_count[sid] += 1
+
+                    rnd_top5 = rnd_logits.topk(5, dim=1).indices
+                    rnd_correct_top1 += (rnd_top5[:, 0] == labels).sum().item()
+                    rnd_correct_top5 += (
+                        rnd_top5 == labels.unsqueeze(1)
+                    ).any(dim=1).sum().item()
+                    rnd_total += labels.size(0)
+
+            # --- Record outlier results ---
+            if out_total == 0:
+                logger.warning("No samples evaluated for site=%s k=%.1f", site, k)
+                continue
+
+            out_top1 = 100.0 * out_correct_top1 / out_total
+            out_top5 = 100.0 * out_correct_top5 / out_total
+            logger.info(
+                "    site=%s k=%.1f [outlier]: top-1=%.2f%%, top-5=%.2f%%",
+                site, k, out_top1, out_top5,
+            )
+
+            all_results.extend(_build_layer_results(
+                out_pct_sum, out_pct_count,
+                out_entropy_cls, out_entropy_patch,
+                site, k, layer_stats,
+                baseline_top1, baseline_top5,
+                out_top1, out_top5,
+                is_random=False,
+            ))
+
+            # --- Record random control results ---
+            if do_random and rnd_total > 0:
+                rnd_top1 = 100.0 * rnd_correct_top1 / rnd_total
+                rnd_top5 = 100.0 * rnd_correct_top5 / rnd_total
+                logger.info(
+                    "    site=%s k=%.1f [random]: top-1=%.2f%%, top-5=%.2f%%",
+                    site, k, rnd_top1, rnd_top5,
+                )
+
+                all_results.extend(_build_layer_results(
+                    rnd_pct_sum, rnd_pct_count,
+                    defaultdict(list), defaultdict(list),  # no entropy for random
+                    site, k, layer_stats,
+                    baseline_top1, baseline_top5,
+                    rnd_top1, rnd_top5,
+                    is_random=True,
+                ))
+
+    # 6. Save results.
+    ensure_dir(config.output_dir)
+    csv_path = config.output_dir / "ablation_results.csv"
+    save_ablation_results(all_results, csv_path)
+
+    entropy_path = config.output_dir / "entropy_deltas.csv"
+    save_entropy_deltas(all_results, entropy_path)
+
+    # 7. Generate plots (outlier results only; random control plotted separately).
+    for site in sites:
+        site_results = [r for r in all_results if r.site == site and not r.is_random]
+        if not site_results:
+            continue
+        plot_accuracy_vs_threshold(
+            site_results,
+            config.output_dir / f"accuracy_vs_threshold_{site}.png",
+        )
+        for k in config.sigma_thresholds:
+            plot_pct_zeroed_per_layer(
+                site_results, k,
+                config.output_dir / f"pct_zeroed_{site}_k{k:.1f}.png",
+            )
+
+        # Random control comparison plot.
+        random_results = [r for r in all_results if r.site == site and r.is_random]
+        if random_results:
+            plot_accuracy_vs_threshold(
+                random_results,
+                config.output_dir / f"accuracy_vs_threshold_{site}_random.png",
+            )
+
+    logger.info("Phase 2 complete. Outputs in %s", config.output_dir)

@@ -104,12 +104,17 @@ def build_val_loader(
         else:
             # When shuffling, randomly sample indices so that different
             # seeds select different images (enables cross-seed variance).
-            # When not shuffling, take the first N deterministically
-            # (useful for debugging and reproducibility).
+            # When not shuffling, use a seeded random permutation to avoid
+            # class imbalance: ImageFolder returns images grouped by class
+            # (alphabetical order), so taking the first N would only sample
+            # from the first few classes.
             if shuffle:
                 indices = torch.randperm(full_size)[:num_images].tolist()
             else:
-                indices = list(range(num_images))
+                # Seeded permutation for deterministic class-balanced subsets.
+                g = torch.Generator()
+                g.manual_seed(42)
+                indices = torch.randperm(full_size, generator=g)[:num_images].tolist()
             dataset = Subset(dataset, indices)
 
     loader = DataLoader(

@@ -1016,6 +1016,12 @@ def _register_stat_saves(
         outlier_proxies.append(frac)
 
     # Per-channel population std: reduce over batch and token dims.
+    # All (B×N) token positions are treated as i.i.d. samples of each
+    # channel's marginal distribution.  This is correct for computing
+    # per-channel activation statistics for quantization range calibration
+    # (the intended use).  Within-image spatial correlations between token
+    # positions affect the effective sample size but not the validity of
+    # the marginal statistics being computed here.
     per_channel_sum_proxy: Any = None
     per_channel_sum_sq_proxy: Any = None
     if track_per_channel:
@@ -1058,8 +1064,9 @@ def _register_entropy_saves(
     diagnostic for transformer training stability.
 
     For each head h and query position i, entropy is:
-        H(i, h) = -Σ_{j=1..N} p_{h,i,j} · log(p_{h,i,j} + ε)
-    where ε = 1e-8 is a proxy NaN guard (not a bias-correction).
+        H(i, h) = -Σ_{j=1..N} p_{h,i,j} · log(p_{h,i,j})
+    computed via ``torch.special.entr`` which handles p=0 correctly
+    (0·log(0) = 0) without any ε bias.
 
     When called inside an nnsight trace context, returns .save() proxies.
     When called with a concrete torch.Tensor, returns concrete tensors directly
@@ -1075,10 +1082,12 @@ def _register_entropy_saves(
         cls_entropy_proxy:   mean over B of H(query=CLS, head=h).
         patch_entropy_sum_proxy: sum over B×(N-1) of H(query=patch_i, head=h).
     """
-    eps = 1e-8  # proxy NaN guard only; not a bias-correction
-
-    # Per-query entropy: -(p * log(p + eps)).sum(dim=-1) → shape (B, H, N)
-    per_query_entropy = -(attn_weight_proxy * (attn_weight_proxy + eps).log()).sum(dim=-1)
+    # Use torch.special.entr(p) which implements -p·log(p) with the correct
+    # 0·log(0) = 0 convention natively — no ε guard needed.  This eliminates
+    # the O(N·ε) bias from the previous p·log(p+ε) approximation and makes
+    # entropy values directly comparable with other implementations.
+    # Ref: https://pytorch.org/docs/stable/special.html#torch.special.entr
+    per_query_entropy = torch.special.entr(attn_weight_proxy).sum(dim=-1)  # (B, H, N)
 
     # CLS row: query index 0 → shape (B, H)
     cls_entropy = per_query_entropy[:, :, 0]          # (B, H)
@@ -1273,6 +1282,16 @@ def profile_vit(
         raise ProfilingError(
             f"Wrapped model {type(inner_model).__name__} has no 'blocks' attribute. "
             "profile_vit expects a timm VisionTransformer."
+        )
+
+    # Defensive: profiling must run in eval mode.  If the model is in training
+    # mode, dropout would inject stochastic noise into activation statistics.
+    # load_vit already calls model.eval(), but this guards against accidental
+    # model.train() calls between loading and profiling.
+    if inner_model.training:
+        raise ProfilingError(
+            "Model is in training mode.  Call model.eval() before profiling "
+            "to disable dropout and ensure deterministic activation statistics."
         )
 
     num_blocks: int = len(inner_model.blocks)

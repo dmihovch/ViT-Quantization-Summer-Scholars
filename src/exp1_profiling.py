@@ -224,13 +224,17 @@ def _plot_histograms(
     transform: Callable,
     config: ProfilingConfig,
     output_dir: Path,
-    block_indices: tuple[int, ...] = (0, 5, 11),
+    block_indices: tuple[int, ...] = tuple(range(12)),
 ) -> None:
-    """Generate real-activation histograms for selected blocks.
+    """Generate real-activation histograms for all 12 encoder blocks.
 
     Runs one additional forward pass using ``histogram_profile_vit`` to
-    collect full activation tensors at all six sites for ``block_indices``.
+    collect full activation tensors at all six sites for every block.
     Histograms show the true distribution including heavy tails.
+
+    Defaults to all 12 blocks (0-11).  Wei et al. (2022, arXiv:2209.13325,
+    §3.1) show that outlier emergence is progressive through the network —
+    histograms for every block are needed to characterize this fully.
 
     Args:
         wrapped: NNsight-wrapped model (already profiled by the Welford pass).

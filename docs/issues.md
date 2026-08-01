@@ -840,112 +840,67 @@ results), verify that the cited claim exists, and check the ☐ → ☑.
 ### T-017 — Attention entropy ε-bias not documented; values unreliable for highly focused distributions
 
 **Severity:** MEDIUM  
-**Status:** 🔲 Open  
+**Status:** ✅ Closed (2026-08-01)  
 **Category:** Documentation + numerical concern  
 **Source:** Skeptical review, 2026-07-30
 
-**Evidence**
+**Resolution:** Replaced ``p·log(p + ε)`` with ``torch.special.entr(p)`` which
+implements ``−p·log(p)`` with the correct ``0·log(0) = 0`` convention natively.
+No ε guard needed.  All 12 entropy tests pass with the new implementation.
 
-`_register_entropy_saves` (profiler.py, line 1016):
-```python
-per_query_entropy = -(attn_weight_proxy * (attn_weight_proxy + eps).log()).sum(dim=-1)
-```
+Changes applied:
+- ``src/profiler.py``: ``_register_entropy_saves`` line 1081 changed from
+  ``-(attn_weight_proxy * (attn_weight_proxy + eps).log()).sum(dim=-1)`` to
+  ``torch.special.entr(attn_weight_proxy).sum(dim=-1)``.
+- ``src/profiler.py``: Updated docstring to remove ε mention and document
+  ``torch.special.entr`` usage.
 
-The standard Shannon entropy formula is `H = −Σ p·log(p)`. This implementation uses `p·log(p + ε)` instead of `p·log(p)`. While this correctly handles the `p=0` case (the term becomes `0·log(ε) = 0`), it introduces a positive bias in the entropy estimate when `p > 0`:
-
-`p·log(p + ε) ≈ p·log(p) + p·ε/p = p·log(p) + ε`
-
-The bias per element is `O(ε)`, and summing over N=197 tokens gives a total bias of `197·ε ≈ 2×10⁻⁶`, which is negligible for most entropy values (range 0.02–5.28 nats).
-
-However, for highly focused distributions (e.g., head 10 block 1 entropy = 0.42 nats), where one token receives probability ≈ 1 and all others receive ≈ 0, the effective formula is `1·log(1+ε) ≈ ε` instead of `1·log(1) = 0` for the dominant token, plus up to 196 terms of `~0·log(ε)`. The deviation from true entropy is small but the relative error near H=0 can be larger.
-
-**Why this matters**
-
-The entropy values are reported in the Phase 1 report and cited using Maisonnave et al. 2025 and Mali 2025. If the entropy formula is non-standard, readers cannot reproduce the values or compare them with other implementations.
-
-**Proposed fix (needs researcher decision)**
-
-Two options:
-1. Use `torch.special.entr(p)` which implements `−p·log(p)` with the correct `0·log(0) = 0` convention natively (no ε needed). This is the cleanest fix.
-2. Keep the ε guard but document it as a numerical stability choice with a note that the bias is `O(N·ε) ≈ 2×10⁻⁶` — negligible for the entropy ranges observed.
-
-The choice is minor for the current analysis but matters for reproducibility. Option 1 is preferred since it eliminates the ε bias entirely.
+**Note:** This changes entropy values slightly (removes the O(N·ε) bias).
+Any previously collected Phase 1 profiling data should be re-run to get
+corrected entropy values before Phase 2 entropy delta computation.
 
 **Affected files**
-- `src/profiler.py` — `_register_entropy_saves` (line 1016)
-- `tests/test_profiler.py` — entropy tests should verify values match `torch.special.entr` reference if Option 1 is chosen
+- ``src/profiler.py`` — ``_register_entropy_saves`` (line 1081), docstring
 
 ---
 
 ### T-018 — Per-channel accumulation ignores within-image spatial correlation; undocumented
 
 **Severity:** LOW  
-**Status:** 🔲 Open  
+**Status:** ✅ Closed (2026-08-01)  
 **Category:** Documentation  
 **Source:** Skeptical review, 2026-07-30
 
-**Evidence**
-
-`_register_stat_saves` with `track_per_channel=True` (profiler.py, lines 957–960) accumulates channel statistics by pooling all (B×N) token positions:
-```python
-t_bn_d = tensor_proxy.reshape(-1, tensor_proxy.shape[-1])
-per_channel_sum_proxy = t_bn_d.sum(dim=0).save()       # shape (D,)
-per_channel_sum_sq_proxy = (t_bn_d**2).sum(dim=0).save()  # shape (D,)
-```
-
-All B×N token positions are treated as i.i.d. samples of each channel's distribution. In reality, token activations within the same image are correlated — the activation of channel `d` at patch position `(i,j)` in image `k` is correlated with the activation of channel `d` at position `(i,j±1)` in the same image.
-
-**Why this matters (and why it mostly doesn't)**
-
-For computing the marginal distribution of each channel (i.e., the channel-wise mean and variance over all tokens and images), treating positions as i.i.d. is the correct approach if the goal is understanding the population-level statistics of each channel. The correlation structure affects the **effective sample size** (correlated samples provide less independent information than independent samples), but the point estimates of per-channel mean and σ remain unbiased.
-
-The effect on the Phase 1 conclusions is negligible: we are computing marginal channel statistics for quantization range analysis, not estimating a distribution that requires independent samples. The reported per-channel σ values are population statistics over all observed activations.
-
-**Proposed fix**
-
-No code change required. Add a comment to `_register_stat_saves` near the per-channel accumulation code:
-```python
-# Per-channel statistics treat all (B×N) token positions as i.i.d. samples.
-# This is correct for computing marginal channel activation statistics over
-# the dataset, which is the intended use for quantization range calibration.
-# Token-pair correlations within an image affect the effective sample size
-# but not the validity of the marginal statistics being computed here.
-```
+**Resolution:** Added a documentation comment in ``_register_stat_saves`` near the
+per-channel accumulation code explaining that all (B×N) token positions are treated
+as i.i.d. samples of each channel's marginal distribution.  This is correct for
+computing per-channel activation statistics for quantization range calibration.
+Within-image spatial correlations affect the effective sample size but not the
+validity of the marginal statistics.
 
 **Affected files**
-- `src/profiler.py` — `_register_stat_saves` (near lines 957–960, per-channel block)
+- ``src/profiler.py`` — ``_register_stat_saves`` (per-channel block, lines 1018-1025)
 
 ---
 
 ### T-019 — eval() mode and dropout disabled: not asserted at runtime
 
 **Severity:** LOW  
-**Status:** 🔲 Open  
+**Status:** ✅ Closed (2026-08-01)  
 **Category:** Defensive programming  
 **Source:** Skeptical review, 2026-07-30
 
-**Evidence**
+**Resolution:** Added a ``ProfilingError`` guard in ``profile_vit`` that checks
+``inner_model.training`` and raises if the model is in training mode.  This is
+a defensive check — ``load_vit`` already calls ``model.eval()``, but this guards
+against accidental ``model.train()`` calls between loading and profiling.
 
-`load_vit` (model.py, line 71) calls `model.eval()` before any profiling. `model.eval()` sets all `nn.Dropout` modules to pass-through mode. This is correct behavior. However, there is no runtime assertion anywhere in the profiling pipeline that confirms the model is in eval mode before a profiling pass begins.
-
-If a downstream caller were to accidentally call `model.train()` between `load_vit` and `profile_vit` (e.g., when wrapping with NNsight or patching modules), dropout would be active and activation statistics would include stochastic dropout noise.
-
-**Why this matters**
-
-This is a low-probability failure mode, not a current bug. The current code path is correct. The concern is purely defensive.
-
-**Proposed fix**
-
-Add an assertion in `profile_vit` (or in `run_profiling_dataset_pass`):
-```python
-assert not inner_model.training, (
-    "Model must be in eval() mode during profiling. "
-    "Call model.eval() before wrapping with NNsight."
-)
-```
+Changes applied:
+- ``src/profiler.py``: ``profile_vit`` now raises ``ProfilingError`` if
+  ``inner_model.training`` is ``True``, after the ``blocks`` attribute check.
 
 **Affected files**
-- `src/profiler.py` — `profile_vit` (near the top, after extracting `inner_model`)
+- ``src/profiler.py`` — ``profile_vit`` (after ``inner_model`` extraction)
 
 ---
 
@@ -1071,6 +1026,135 @@ directory is empty in the current workspace.
 
 ---
 
+### T-020 — Phase 2 threshold definition mismatch: zero-centered (|x| > k·σ) vs mean-centered (|x − μ| > k·σ)
+
+**Severity:** HIGH
+**Status:** ✅ Closed (2026-08-01)
+**Category:** Bug — silent definition mismatch
+**Source:** Skeptical review of Phase 2, 2026-08-01
+
+**Evidence**
+
+Phase 1's ``_register_stat_saves`` (profiler.py L1008-1016) defines outliers as
+``|x − μ| > k·σ`` — mean-centered, consistent with the standard statistical
+definition and the quantization literature (Wei et al. 2022, §3.1; Bondarenko
+et al. 2021, §4.1).
+
+Phase 2's ``_build_zeroing_mask`` (ablation.py L185-186) used:
+```python
+threshold = sigma_k * sigma
+return tensor.abs() <= threshold    # |x| ≤ k·σ — zero-centered!
+```
+
+For sites where μ ≈ 0 (residual_stream, post_layernorm), the difference is
+negligible.  For pre_gelu sites with large mean shifts (e.g., block 10 pre-GELU
+where μ = −28.33), the two definitions zero different sets of elements.
+
+**Resolution:** Added ``mean`` parameter to ``_build_zeroing_mask``.  All
+``_intervene_*`` functions now pass ``layer_stats[site_id].mean``.  The mask
+is now ``(tensor - mean).abs() <= threshold``, consistent with Phase 1.
+
+Changes applied:
+- ``src/ablation.py``: ``_build_zeroing_mask`` gained ``mean: float = 0.0`` parameter.
+- ``src/ablation.py``: ``_intervene_pre_gelu``, ``_intervene_residual_stream``,
+  ``_intervene_pre_softmax`` all pass ``layer_stats[site_id].mean``.
+- ``src/ablation.py``: Module docstring updated to document mean-centered definition.
+- ``tests/test_ablation.py``: Added ``test_build_zeroing_mask_mean_centered`` and
+  ``test_build_zeroing_mask_mean_centered_default_zero``.
+
+**Note:** This invalidates any previously collected Phase 2 results.  Re-run
+Phase 2 to regenerate results with the corrected threshold definition.
+
+**Affected files**
+- ``src/ablation.py`` — ``_build_zeroing_mask``, ``_intervene_pre_gelu``,
+  ``_intervene_residual_stream``, ``_intervene_pre_softmax``, module docstring
+- ``tests/test_ablation.py`` — 2 new tests
+- ``docs/MISTAKES.md`` — entry added
+
+---
+
+### T-021 — Phase 2 missing random-zeroing control condition
+
+**Severity:** HIGH
+**Status:** ✅ Closed (2026-08-01)
+**Category:** Missing experimental control
+**Source:** Skeptical review of Phase 2, 2026-08-01
+
+**Evidence**
+
+Phase 2 zeroed activation elements exceeding a threshold and measured accuracy
+degradation.  Without a random-zeroing control (zeroing the same fraction of
+elements at random positions), it is impossible to attribute accuracy
+degradation to *outliers specifically* rather than to activation sparsity in
+general.  This is a standard control in ablation studies.
+
+**Resolution:** Added ``_build_random_mask`` function and ``random_fractions``
+parameter to ``zero_outliers_in_trace`` and all ``_intervene_*`` functions.
+The orchestrator (``exp2_ablation.py``) now runs a random-zeroing sweep for
+``pre_gelu`` and ``residual_stream`` sites using the **exact per-batch
+per-layer %-zeroed** from the outlier pass as the target fraction.  This
+ensures the random control zeros exactly the same fraction of elements as
+the outlier condition on every batch — the only difference is *which*
+elements are zeroed, not *how many*.  Results are marked with ``is_random=True``.
+
+Changes applied:
+- ``src/ablation.py``: Added ``_build_random_mask`` function.
+- ``src/ablation.py``: ``AblationResult`` gained ``is_random: bool`` field.
+- ``src/ablation.py``: ``zero_outliers_in_trace``, ``_intervene_pre_gelu``,
+  ``_intervene_residual_stream`` gained ``random_fractions`` and ``random_seed``
+  parameters.
+- ``src/ablation.py``: ``save_ablation_results`` includes ``is_random`` column.
+- ``src/ablation.py``: ``save_entropy_deltas`` filters out ``is_random=True`` rows.
+- ``src/exp2_ablation.py``: Rewritten to run outlier and random passes on the
+  same batch with matched fractions.  Added ``_site_matches`` and
+  ``_build_layer_results`` helpers.
+- ``tests/test_ablation.py``: Added 9 tests for ``_build_random_mask``,
+  1 test for ``is_random`` field, 2 slow tests for random mode, 1 test for
+  ``is_random`` in CSV output, 3 tests for ``_site_matches``, 1 test for
+  ``save_entropy_deltas`` random filtering.
+
+**Affected files**
+- ``src/ablation.py`` — ``_build_random_mask`` (new), ``AblationResult``,
+  ``zero_outliers_in_trace``, ``_intervene_pre_gelu``, ``_intervene_residual_stream``,
+  ``save_ablation_results``, ``save_entropy_deltas``
+- ``src/exp2_ablation.py`` — ``_site_matches`` (new), ``_build_layer_results`` (new),
+  ``run`` (per-batch matched random-control sweep)
+- ``tests/test_ablation.py`` — 17 new tests
+- ``docs/MISTAKES.md`` — entry added
+
+---
+
+### T-022 — Class imbalance in subset mode when shuffle=False
+
+**Severity:** MEDIUM
+**Status:** ✅ Closed (2026-08-01)
+**Category:** Bug — silent data skew
+**Source:** Skeptical review of Phase 2, 2026-08-01
+
+**Evidence**
+
+``build_val_loader`` (data_loader.py L112) used:
+```python
+indices = list(range(num_images))
+```
+when ``shuffle=False``.  ``ImageFolder`` returns images grouped by class in
+alphabetical order, so taking the first N images samples only from the first
+few classes.  For ``--num-images 1024``, this would produce a class-imbalanced
+subset with meaningless accuracy numbers.
+
+**Resolution:** Replaced ``list(range(num_images))`` with a seeded random
+permutation (``torch.randperm`` with ``Generator().manual_seed(42)``).  This
+produces a deterministic, class-balanced subset regardless of ``shuffle``.
+
+Changes applied:
+- ``src/data_loader.py``: ``build_val_loader`` now uses seeded permutation
+  for subset selection when ``shuffle=False``.
+
+**Affected files**
+- ``src/data_loader.py`` — ``build_val_loader`` (subset selection logic)
+
+---
+
 ## Summary
 
 | Ticket | Severity | Status | Title |
@@ -1091,6 +1175,9 @@ directory is empty in the current workspace.
 | T-014 | HIGH | ✅ Closed (2026-07-30) | Outlier fraction definition: fixed to mean-centered |x−μ| > k·σ |
 | T-015 | ~~HIGH~~ → LOW | ✅ Closed (2026-07-30) | Doc bug: field renamed to `ln2_amplification_ratio`, docstrings corrected |
 | T-016 | HIGH | ✅ Closed (2026-07-30) | Model pinned to `augreg2_in21k_ft_in1k`; `RunMetadata` added to output JSON |
-| T-017 | MEDIUM | 🔲 Open | Attention entropy ε-bias not documented; values unreliable for highly focused distributions |
-| T-018 | LOW | 🔲 Open | Per-channel accumulation ignores within-image spatial correlation; undocumented |
-| T-019 | LOW | 🔲 Open | eval() mode and dropout disabled: not asserted at runtime |
+| T-017 | MEDIUM | ✅ Closed (2026-08-01) | Entropy ε-bias: replaced p·log(p+ε) with torch.special.entr(p) |
+| T-018 | LOW | ✅ Closed (2026-08-01) | Per-channel spatial correlation assumption documented |
+| T-019 | LOW | ✅ Closed (2026-08-01) | eval() mode assertion added to profile_vit |
+| T-020 | HIGH | ✅ Closed (2026-08-01) | Phase 2 threshold mismatch: zero-centered → mean-centered |x−μ| > k·σ |
+| T-021 | HIGH | ✅ Closed (2026-08-01) | Phase 2 missing random-zeroing control condition |
+| T-022 | MEDIUM | ✅ Closed (2026-08-01) | Class imbalance in subset mode when shuffle=False |

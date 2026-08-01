@@ -78,14 +78,10 @@ class AblationConfig:
         (``profiler.save_profiling_result``).  Provides exact global σ
         for all six measurement sites across every encoder block.
     attn_profile_num_images:
-        Number of images in the single representative batch used to estimate
-        per-layer ``pre_softmax`` σ via ``profiler.profile_vit``.  Must be
-        ≥ 32 for a stable estimate.  Default: 64.
+        **Deprecated.**  Phase 1 now produces dataset-wide ``pre_softmax`` σ
+        via ``run_profiling_dataset_pass``.  This field is ignored.
     attn_profile_seed:
-        Random seed used when sampling the attention-profiling batch.
-        Must be fixed and reported alongside any result that uses the
-        pre-softmax zeroing threshold, since the σ estimate is
-        batch-dependent.
+        **Deprecated.**  See ``attn_profile_num_images``.
     """
 
     data_dir: Path

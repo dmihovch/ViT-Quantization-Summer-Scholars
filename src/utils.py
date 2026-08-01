@@ -88,20 +88,22 @@ def log_system_info() -> None:
         logger.info("nnsight not installed")
 
 
-def collect_system_metadata() -> dict[str, object]:
+def collect_system_metadata() -> dict[str, str | bool | float | None]:
     """Collect hardware and software metadata as a dict for JSON serialisation.
 
     Returns a dict suitable for constructing a :class:`profiler.RunMetadata`
     instance.  All values are JSON-serialisable primitives.
 
-    Returns:
+    Returns
+    -------
+    dict[str, str | bool | float | None]
         Dict with keys: python_version, pytorch_version, timm_version,
         nnsight_version, cuda_available, cuda_version, gpu_name,
         gpu_memory_gb.
     """
     import sys
 
-    metadata: dict[str, object] = {
+    metadata: dict[str, str | bool | float | None] = {
         "python_version": sys.version.split()[0],
         "pytorch_version": torch.__version__,
         "cuda_available": torch.cuda.is_available(),

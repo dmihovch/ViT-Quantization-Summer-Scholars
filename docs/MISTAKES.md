@@ -689,3 +689,105 @@ always check whether the framework doc needs a corresponding update.  The doc
 should be treated as a living specification, not a frozen artifact.
 
 See `docs/issues.md` T-006.
+
+
+---
+
+## 13. Phase 2 test assumption mistakes
+
+### 13.1 — `test_residual_stream_cls_preserved` assumed k=100 would zero nothing
+
+**What happened:** The test used `sigma_k=100` with `sigma=0.5` (threshold=50)
+and asserted logits would be unchanged.  But the actual residual stream contains
+elements with magnitude > 50, so the intervention was not a no-op.  The test
+failed with `max diff = 2.23`.
+
+**Why it's wrong:** The residual stream after LayerNorm is not bounded to
+[-50, 50].  Post-LayerNorm values can exceed this range, especially in deeper
+blocks where the residual accumulates.  The test assumption that "no element
+exceeds threshold=50" was incorrect.
+
+**Resolution (2026-08-01):** Renamed test to
+`test_residual_stream_no_zeroing_at_high_k` and used `sigma_k=10000`
+(threshold=5000), which is genuinely above any possible residual stream value.
+Also added an assertion that `pct_zeroed == 0.0` for all sites, not just that
+logits are unchanged.
+
+**What to do instead:** When writing "no-op" tests for threshold-based
+interventions, use thresholds that are provably above the maximum possible
+value (e.g., 10000×σ), not just "large enough" guesses.  Also verify that
+`pct_zeroed` is actually 0%, not just that the output didn't change.
+
+---
+
+## 14. Phase 2 threshold definition mistakes
+
+### 14.1 — Phase 2 used zero-centered threshold (|x| > k·σ) instead of mean-centered (|x − μ| > k·σ)
+
+**What happened:** Phase 2's ``_build_zeroing_mask`` (ablation.py) used
+``tensor.abs() <= threshold`` — a zero-centered threshold.  Phase 1's outlier
+definition (fixed in mistake 1.4) uses ``|x − μ| > k·σ`` — mean-centered.
+This meant Phase 2 was zeroing a different set of elements than Phase 1
+identified as outliers.
+
+**Why it's wrong:** For sites where μ ≈ 0 (residual_stream, post_layernorm),
+the difference is negligible.  For pre_gelu sites with large mean shifts
+(e.g., block 10 pre-GELU where μ = −28.33), the two definitions zero
+different sets of elements.  The experimental narrative ("we zeroed the
+outliers identified in Phase 1") was misleading.
+
+**Resolution (2026-08-01):** Added ``mean`` parameter to ``_build_zeroing_mask``.
+All ``_intervene_*`` functions now pass ``layer_stats[site_id].mean``.  The mask
+is now ``(tensor - mean).abs() <= threshold``, consistent with Phase 1.
+
+**What to do instead:** Always use the same outlier definition across phases.
+When Phase 1 defines outliers as mean-centered, Phase 2 must use the same
+definition for thresholding.  See ``docs/issues.md`` T-020.
+
+---
+
+### 14.2 — Phase 2 had no random-zeroing control condition
+
+**What happened:** Phase 2 zeroed activation elements exceeding a threshold
+and measured accuracy degradation.  Without a random-zeroing control (zeroing
+the same fraction of elements at random positions), it was impossible to
+attribute accuracy degradation to *outliers specifically* rather than to
+activation sparsity in general.
+
+**Why it's wrong:** This is a standard control in ablation studies.  If
+random zeroing produces the same accuracy degradation as outlier-targeted
+zeroing, then the degradation is due to activation sparsity, not outliers.
+
+**Resolution (2026-08-01):** Added ``_build_random_mask`` function and
+``random_fractions`` parameter to ``zero_outliers_in_trace``.  The orchestrator
+now runs a random-zeroing sweep for pre_gelu and residual_stream sites,
+using the **exact per-batch per-layer %-zeroed** from the outlier pass as
+the target fraction.  This ensures the random control zeros exactly the same
+fraction of elements as the outlier condition on every batch — the only
+difference is *which* elements are zeroed, not *how many*.
+Results are marked with ``is_random=True``.  See ``docs/issues.md`` T-021.
+
+**What to do instead:** Always include a random-zeroing (or random-perturbation)
+control when claiming that a specific subset of elements (outliers, high-magnitude,
+etc.) is responsible for an effect.
+
+---
+
+### 14.3 — Class imbalance in subset mode when shuffle=False
+
+**What happened:** ``build_val_loader`` used ``list(range(num_images))`` when
+``shuffle=False``.  ``ImageFolder`` returns images grouped by class in
+alphabetical order, so taking the first N images samples only from the first
+few classes.
+
+**Why it's wrong:** For ``--num-images 1024``, this would produce a
+class-imbalanced subset with meaningless accuracy numbers.  The documented
+smoke-test command in ``EXP2-IMPL.md`` used this path.
+
+**Resolution (2026-08-01):** Replaced ``list(range(num_images))`` with a
+seeded random permutation (``torch.randperm`` with ``Generator().manual_seed(42)``).
+This produces a deterministic, class-balanced subset.  See ``docs/issues.md`` T-022.
+
+**What to do instead:** Never take the first N samples from an ImageFolder
+dataset for evaluation.  Always use random sampling (seeded for reproducibility)
+to ensure class balance.
