@@ -91,6 +91,9 @@ class AblationConfig:
     device: torch.device
     sigma_thresholds: tuple[float, ...]
     layer_stats_path: Path
+    seed: int = 42
+    """Global random seed for reproducibility.  Used for the random-zeroing
+    control mask generation."""
     attn_profile_num_images: int = 64
     attn_profile_seed: int = 42
 

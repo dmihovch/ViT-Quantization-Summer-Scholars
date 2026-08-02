@@ -160,10 +160,16 @@ def _build_layer_results(
                 for h in range(num_heads)
             ]
             ps_stats = layer_stats[sid]
-            if ps_stats.attention_entropy_cls is not None:
-                baseline_cls = list(ps_stats.attention_entropy_cls)
-            if ps_stats.attention_entropy_patches is not None:
-                baseline_patch = list(ps_stats.attention_entropy_patches)
+            # Phase 1 stores attention entropy on post_softmax sites, but
+            # ablation site_identifiers use pre_softmax.  Resolve the
+            # corresponding post_softmax site for baseline entropy lookup.
+            entropy_sid = sid.replace("/pre_softmax", "/post_softmax")
+            entropy_stats = layer_stats.get(entropy_sid)
+            if entropy_stats is not None:
+                if entropy_stats.attention_entropy_cls is not None:
+                    baseline_cls = list(entropy_stats.attention_entropy_cls)
+                if entropy_stats.attention_entropy_patches is not None:
+                    baseline_patch = list(entropy_stats.attention_entropy_patches)
 
         results.append(AblationResult(
             site=site,

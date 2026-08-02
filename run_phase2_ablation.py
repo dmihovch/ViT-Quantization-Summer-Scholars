@@ -29,7 +29,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("data/imagenet-val"),
+        default=Path("data"),
         help="Root directory of the ImageNet validation split (ImageFolder layout).",
     )
     parser.add_argument(
@@ -90,6 +90,7 @@ def main() -> None:
         device=get_device(),
         sigma_thresholds=tuple(args.sigma_thresholds),
         layer_stats_path=args.layer_stats,
+        seed=args.seed,
     )
     run(config)
 
