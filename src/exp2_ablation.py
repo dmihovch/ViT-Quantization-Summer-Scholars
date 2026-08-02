@@ -55,7 +55,6 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import Any
 
 from nnsight import NNsight
 
@@ -110,6 +109,7 @@ def _build_layer_results(
     top1: float,
     top5: float,
     is_random: bool,
+    granularity: str = "global",
 ) -> list[AblationResult]:
     """Build AblationResult records from accumulated per-layer statistics.
 
@@ -135,6 +135,8 @@ def _build_layer_results(
         Accuracy percentages for this condition.
     is_random:
         Whether this is the random control condition.
+    granularity:
+        Zeroing granularity (``"global"`` or ``"per_channel"``).
 
     Returns
     -------
@@ -181,6 +183,7 @@ def _build_layer_results(
             baseline_top1=baseline_top1,
             baseline_top5=baseline_top5,
             is_random=is_random,
+            granularity=granularity,
             cls_entropy=cls_entropy,
             patch_entropy=patch_entropy,
             baseline_cls_entropy=baseline_cls,
@@ -229,12 +232,19 @@ def run(config: AblationConfig) -> None:
     #    For pre_gelu and residual_stream, each batch is processed twice:
     #    first with outlier thresholding, then with random zeroing using
     #    the exact per-batch per-layer %-zeroed from the outlier pass.
-    sites = ("pre_gelu", "pre_softmax", "residual_stream")
+    #    In per_channel mode, only pre_gelu is ablated (per-channel μ_c, σ_c
+    #    thresholds are only meaningful for the channel-structured MLP hidden dim).
+    is_per_channel = config.granularity == "per_channel"
+    if is_per_channel:
+        sites: tuple[str, ...] = ("pre_gelu",)
+        logger.info("Per-channel granularity: only ablating pre_gelu site.")
+    else:
+        sites = ("pre_gelu", "pre_softmax", "residual_stream")
     all_results: list[AblationResult] = []
 
     for site in sites:
         logger.info("=== Ablating site: %s ===", site)
-        do_random = site in ("pre_gelu", "residual_stream")
+        do_random = site in ("pre_gelu", "residual_stream") and not is_per_channel
 
         for k in config.sigma_thresholds:
             logger.info("  Threshold k=%.1f ...", k)
@@ -262,6 +272,7 @@ def run(config: AblationConfig) -> None:
                 # --- Outlier pass ---
                 logits, batch_pct, batch_entropy = zero_outliers_in_trace(
                     wrapped, images, site, k, layer_stats,
+                    per_channel=is_per_channel,
                 )
 
                 for sid, pct in batch_pct.items():
@@ -320,6 +331,7 @@ def run(config: AblationConfig) -> None:
                 baseline_top1, baseline_top5,
                 out_top1, out_top5,
                 is_random=False,
+                granularity=config.granularity,
             ))
 
             # --- Record random control results ---
@@ -338,6 +350,7 @@ def run(config: AblationConfig) -> None:
                     baseline_top1, baseline_top5,
                     rnd_top1, rnd_top5,
                     is_random=True,
+                    granularity=config.granularity,
                 ))
 
     # 6. Save results.

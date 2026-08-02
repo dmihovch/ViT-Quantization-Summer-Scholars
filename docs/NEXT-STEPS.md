@@ -1,6 +1,6 @@
 # Next Steps: Implementation Roadmap
 
-> **Last updated:** 2026-08-01 — Phase 2 fixes applied (T-020, T-021, T-022).
+> **Last updated:** 2026-08-02 — Phase 1 per-channel mean added + Phase 2 per-channel ablation complete.
 
 ---
 
@@ -9,13 +9,27 @@
 - **Phase 1 (profiling):** ✅ Complete.  ``src/profiler.py`` produces dataset-wide
   statistics via exact Pébay (2008) parallel merge.  Six measurement sites per
   encoder block.  ``profiling_result.json`` includes global μ, σ, kurtosis,
-  outlier fractions, per-channel std, attention entropy, LayerNorm γ/β, LN2
+  outlier fractions, per-channel σ and μ, attention entropy, LayerNorm γ/β, LN2
   amplification ratio, max/min, and ``RunMetadata``.
-- **Phase 2 (ablation):** ✅ Complete with fixes.  Outlier zeroing uses
+- **Phase 2 (ablation):** ✅ Complete.  Outlier zeroing uses
   mean-centered threshold (``|x − μ| > k·σ``) consistent with Phase 1.
-  Random-zeroing control condition included.  Subset evaluation uses class-balanced
-  sampling.  Entropy deltas computed against Phase 1 baselines.
+  Random-zeroing control condition included.  Per-channel ablation
+  (``--granularity per_channel``) tests whether outlier concentration in
+  high-variance channels drives accuracy degradation.  Subset evaluation uses
+  class-balanced sampling.  Entropy deltas computed against Phase 1 baselines.
 - **Phase 3 (integer GELU):** 🔲 Not yet implemented.
+
+### Key Phase 2 results (50k images)
+
+| k | Global | Per-channel | Δ |
+|---|--------|-------------|---|
+| 3.0 | 43.24% | 47.00% | +3.76% |
+| 4.0 | 75.12% | 75.54% | +0.42% |
+| 6.0 | 84.58% | 84.11% | −0.47% |
+
+Baseline: 85.03%.  Per-channel thresholds preserve significantly more accuracy
+at aggressive thresholds (k=3), suggesting per-channel quantization of the MLP
+hidden dimension would reduce the accuracy penalty of INT8 range clipping.
 
 ### Running tests
 
@@ -33,11 +47,6 @@ pytest tests/test_ablation.py -v
 ---
 
 ## Architecture: profiling modules
-
-### `src/hooks.py` — Welford accumulator pipeline (legacy, 3-site)
-
-**Status:** ⚠️ Deprecated.  Kept for reference only.  ``hooks.LayerStats`` has
-been deleted; all consumers use ``profiler.LayerStats``.
 
 ### `src/profiler.py` — nnsight pipeline  **Primary for all phases**
 
@@ -63,6 +72,13 @@ been deleted; all consumers use ``profiler.LayerStats``.
   - Random-zeroing control (T-021)
   - Class-imbalance fix in subset mode (T-022)
 ### Step 8: `src/exp2_ablation.py` — ✅ DONE (nnsight-based orchestrator with random control)
+### Step 8b: Phase 2 per-channel ablation (2026-08-02) — ✅ DONE
+  - Per-channel mean serialized in Phase 1 (``LayerStats.per_channel_mean``)
+  - ``_build_per_channel_zeroing_mask`` in ``ablation.py``
+  - ``--granularity per_channel`` CLI flag
+  - Per-channel mode: pre_gelu only, no random control
+  - Phase 1 re-run with ``--all --seed 42``
+  - Full 50k-image global + per-channel ablation runs complete
 ### Step 9: `src/integer_gelu.py` — 🔲
 ### Step 10: `src/exp3_integer_gelu.py` — 🔲
 
@@ -71,7 +87,6 @@ been deleted; all consumers use ``profiler.LayerStats``.
 ## What to Read (and When)
 
 ### Before Step 9 (integer GELU)
-- `docs/scispace-docs/vit_profiling_framework.md` — Phase 3 design spec.
 - Kim et al. (2021), "I-BERT," ICML 2021 — integer-only GELU via polynomial approx.
 - Li & Gu (2023), "I-ViT," ICCV 2023 — ShiftGELU for ViT.
 - `src/profiler.py` — ``LayerStats`` fields available for quantization scale derivation.

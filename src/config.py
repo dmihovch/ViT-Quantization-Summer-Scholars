@@ -94,6 +94,10 @@ class AblationConfig:
     seed: int = 42
     """Global random seed for reproducibility.  Used for the random-zeroing
     control mask generation."""
+    granularity: str = "global"
+    """Zeroing granularity: ``"global"`` uses per-layer μ and σ;
+    ``"per_channel"`` uses per-channel μ_c and σ_c for pre_gelu only.
+    Per-channel mode skips pre_softmax and residual_stream sites."""
     attn_profile_num_images: int = 64
     attn_profile_seed: int = 42
 

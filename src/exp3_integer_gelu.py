@@ -1,7 +1,7 @@
 """Phase 3 — Integer GELU Exploration experiment entry point.
 
 Orchestrates the full Phase 3 pipeline:
-  1. Load per-layer statistics from Phase 1 to derive quantisation scales.
+  1. Load per-layer statistics from Phase 1 to derive quantization scales.
   2. For each GELU layer, build a :class:`~integer_gelu.GELULut` calibrated
      with that layer's activation range.
   3. Compare each LUT against FP32 GELU over all 256 INT8 input points and

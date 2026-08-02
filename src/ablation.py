@@ -97,6 +97,8 @@ class AblationResult:
     baseline_top5: float
     is_random: bool = False
     """Whether this result used random (not outlier-threshold) zeroing."""
+    granularity: str = "global"
+    """Zeroing granularity: ``"global"`` or ``"per_channel"``."""
     cls_entropy: list[float] = field(default_factory=list)
     patch_entropy: list[float] = field(default_factory=list)
     baseline_cls_entropy: list[float] = field(default_factory=list)
@@ -261,6 +263,51 @@ def _build_zeroing_mask(
     return (tensor - mean).abs() <= threshold
 
 
+def _build_per_channel_zeroing_mask(
+    tensor: torch.Tensor,
+    sigma_k: float,
+    per_channel_sigma: list[float],
+    per_channel_mean: list[float],
+    device: torch.device,
+) -> torch.Tensor:
+    """Build a per-channel boolean mask where ``True`` means *keep*.
+
+    For each channel ``c``, an element ``x_c`` is kept if
+    ``|x_c − μ_c| ≤ sigma_k * σ_c``, where ``μ_c`` and ``σ_c`` are the
+    per-channel mean and standard deviation from Phase 1 profiling.
+
+    The mask broadcasts over the batch and token dimensions: ``tensor`` has
+    shape ``(B, N, D)`` and the per-channel statistics have shape ``(D,)``.
+
+    When called inside an nnsight trace context, ``tensor`` is an nnsight
+    proxy and the returned mask is also a proxy.
+
+    Parameters
+    ----------
+    tensor:
+        Activation tensor or nnsight proxy of shape ``(B, N, D)``.
+    sigma_k:
+        Threshold multiplier.
+    per_channel_sigma:
+        Per-channel population standard deviation, length ``D``.
+    per_channel_mean:
+        Per-channel population mean, length ``D``.
+    device:
+        Device on which to create the statistics tensors.
+
+    Returns
+    -------
+    torch.Tensor
+        Boolean mask of shape ``(B, N, D)``, ``True`` where the element
+        should be preserved.
+    """
+    pc_sigma = torch.tensor(per_channel_sigma, device=device, dtype=torch.float32)
+    pc_mean = torch.tensor(per_channel_mean, device=device, dtype=torch.float32)
+    threshold = sigma_k * pc_sigma  # shape (D,)
+    # Broadcast: (B, N, D) - (D,) → (B, N, D)
+    return (tensor - pc_mean).abs() <= threshold
+
+
 def zero_outliers_in_trace(
     wrapped_model: NNsight,
     input_batch: torch.Tensor,
@@ -269,6 +316,7 @@ def zero_outliers_in_trace(
     layer_stats: dict[str, LayerStats],
     random_fractions: dict[str, float] | None = None,
     random_seed: int | None = None,
+    per_channel: bool = False,
 ) -> tuple[torch.Tensor, dict[str, float], dict[str, dict[str, list[float]]]]:
     """Run one forward pass with outlier zeroing at the specified site.
 
@@ -280,6 +328,10 @@ def zero_outliers_in_trace(
     If ``random_fractions`` is provided, zeros a random subset of elements
     matching the given fraction per layer instead of using the outlier
     threshold — this is the random-zeroing control condition.
+
+    If ``per_channel`` is True and ``site`` is ``"pre_gelu"``, uses
+    per-channel μ_c and σ_c for thresholding (see
+    :func:`_intervene_pre_gelu`).  Ignored for other sites.
 
     For ``pre_softmax``, also captures per-head CLS and patch attention
     entropy on the zeroed attention weights for entropy delta computation.
@@ -305,6 +357,8 @@ def zero_outliers_in_trace(
     random_seed:
         Seed for the random mask generator.  Only used when
         ``random_fractions`` is provided.
+    per_channel:
+        If True, use per-channel thresholds for pre_gelu ablation.
 
     Returns
     -------
@@ -338,6 +392,7 @@ def zero_outliers_in_trace(
                     _intervene_pre_gelu(
                         block, i, sigma_k, layer_stats, pct_zeroed,
                         random_fractions=random_fractions, random_seed=random_seed,
+                        per_channel=per_channel,
                     )
                 elif site == "residual_stream":
                     _intervene_residual_stream(
@@ -373,11 +428,17 @@ def _intervene_pre_gelu(
     pct_zeroed: dict[str, float],
     random_fractions: dict[str, float] | None = None,
     random_seed: int | None = None,
+    per_channel: bool = False,
 ) -> None:
     """Zero pre-GELU outliers for a single encoder block.
 
     Replaces ``block.mlp.act.input`` with a zeroed version where
     ``|x − μ| > sigma_k * sigma`` (mean-centered, consistent with Phase 1).
+
+    If ``per_channel`` is True, uses per-channel μ_c and σ_c from
+    ``layer_stats[site_id].per_channel_mean`` and ``.per_channel_std``
+    instead of the global scalar μ and σ.  This tests whether outlier
+    concentration in high-variance channels drives accuracy degradation.
 
     If ``random_fractions`` is provided, zeros a random subset of elements
     matching the given fraction instead of using the outlier threshold.
@@ -402,6 +463,8 @@ def _intervene_pre_gelu(
     random_seed:
         Seed for the random mask generator.  Only used when
         ``random_fractions`` is provided.
+    per_channel:
+        If True, use per-channel μ_c and σ_c for thresholding.
     """
     site_id = f"blocks.{block_idx}/pre_gelu"
     if site_id not in layer_stats:
@@ -412,6 +475,25 @@ def _intervene_pre_gelu(
     if random_fractions is not None and site_id in random_fractions:
         mask = _build_random_mask(tensor, random_fractions[site_id], random_seed, block_idx)
         pct_zeroed[site_id] = 100.0 * random_fractions[site_id]
+    elif per_channel:
+        stats = layer_stats[site_id]
+        if stats.per_channel_std is None or stats.per_channel_mean is None:
+            logger.warning(
+                "Per-channel stats missing for %s; falling back to global.", site_id,
+            )
+            sigma = stats.std
+            if sigma == 0.0:
+                return
+            mean = stats.mean
+            mask = _build_zeroing_mask(tensor, sigma_k, sigma, mean)
+        else:
+            # Determine device from the tensor proxy's device attribute.
+            # Inside an nnsight trace, tensor.device returns the concrete device.
+            mask = _build_per_channel_zeroing_mask(
+                tensor, sigma_k, stats.per_channel_std, stats.per_channel_mean,
+                device=tensor.device,
+            )
+        pct_zeroed[site_id] = 100.0 * (~mask).float().mean().item()
     else:
         sigma = layer_stats[site_id].std
         if sigma == 0.0:
@@ -606,7 +688,7 @@ def save_ablation_results(results: list[AblationResult], path: Path) -> None:
     fieldnames = [
         "site", "sigma_threshold", "site_identifier",
         "pct_zeroed", "top1_accuracy", "top5_accuracy",
-        "baseline_top1", "baseline_top5", "is_random",
+        "baseline_top1", "baseline_top5", "is_random", "granularity",
         "cls_entropy", "patch_entropy",
         "baseline_cls_entropy", "baseline_patch_entropy",
     ]
@@ -625,6 +707,7 @@ def save_ablation_results(results: list[AblationResult], path: Path) -> None:
                 "baseline_top1": r.baseline_top1,
                 "baseline_top5": r.baseline_top5,
                 "is_random": r.is_random,
+                "granularity": r.granularity,
                 "cls_entropy": json.dumps(r.cls_entropy),
                 "patch_entropy": json.dumps(r.patch_entropy),
                 "baseline_cls_entropy": json.dumps(r.baseline_cls_entropy),

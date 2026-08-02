@@ -1,7 +1,6 @@
 # EXP1-IMPL: Experiment 1 — Baseline Activation Profiling
 
 > **Status:** Phase 1 complete. All steps implemented and tested.
-> 80/112 fast tests pass (32 slow tests require nnsight trace context).
 > Tested with PyTorch 2.12.1, nnsight 0.7.0, CUDA 13.0, NVIDIA RTX 3070 (8 GB).
 
 ---
@@ -19,39 +18,31 @@ python run_phase1_profiling.py --num-images 1024 --num-seeds 3 --seed 42
 python run_phase1_profiling.py --all
 ```
 
-produces (single seed):
+produces:
 
 ```
 outputs/phase1-profiling/
-├── profiling_result.json          # 6 sites × 12 blocks + patch_embed + final residual = 73 sites
-│                                     # Each residual_stream site includes ln2_amplification_ratio
-├── summary_table.csv              # 73 rows × (5 + num_sigma_thresholds) columns
-├── histograms/
-│   ├── blocks.0_pre_gelu.png      # real activations — blocks 0, 5, 11 only
-│   ├── blocks.0_pre_softmax.png
-│   ├── blocks.5_pre_gelu.png
-│   ├── blocks.5_pre_softmax.png
-│   ├── blocks.11_pre_gelu.png
-│   ├── blocks.11_pre_softmax.png
-│   └── ...                        # one PNG per (selected block, site) — 18 total
-├── per_channel_std_heatmap_d768.png   # layernorm sites (D=768)
-├── per_channel_std_heatmap_d3072.png  # pre_gelu sites (D=3072)
-├── attention_entropy_cls_heatmap.png     # CLS query: 12 blocks × 12 heads
-└── attention_entropy_patches_heatmap.png  # patch queries: 12 blocks × 12 heads
+└── seed_42/
+    ├── profiling_result.json      # 6 sites × 12 blocks + patch_embed + final residual = 73 sites
+    │                                 # Each residual_stream site includes ln2_amplification_ratio
+    ├── summary_table.csv          # 73 rows × (5 + num_sigma_thresholds) columns
+    ├── histograms/
+    │   ├── blocks.0_pre_gelu.png  # real activations — blocks 0, 5, 11 only
+    │   ├── blocks.0_pre_softmax.png
+    │   ├── blocks.5_pre_gelu.png
+    │   ├── blocks.5_pre_softmax.png
+    │   ├── blocks.11_pre_gelu.png
+    │   ├── blocks.11_pre_softmax.png
+    │   └── ...                    # one PNG per (selected block, site) — 18 total
+    ├── per_channel_std_heatmap_d768.png   # layernorm sites (D=768)
+    ├── per_channel_std_heatmap_d3072.png  # pre_gelu sites (D=3072)
+    ├── attention_entropy_cls_heatmap.png     # CLS query: 12 blocks × 12 heads
+    └── attention_entropy_patches_heatmap.png  # patch queries: 12 blocks × 12 heads
 ```
 
-With `--num-seeds 3`, output is organised as:
-
-```
-outputs/phase1-profiling/
-├── seed_42/
-│   ├── profiling_result.json
-│   ├── histograms/ ...
-│   ├── per_channel_std_heatmap_d768.png
-│   └── per_channel_std_heatmap_d3072.png
-├── seed_43/ ...
-└── seed_44/ ...
-```
+All seeds (including single-seed runs) write to a ``seed_{N}`` subdirectory
+for uniform output structure.  With ``--num-seeds 3``, ``outputs/phase1-profiling/``
+contains ``seed_42/``, ``seed_43/``, and ``seed_44/``.
 
 All fast tests (`pytest -m "not slow"`) pass with no regressions.
 

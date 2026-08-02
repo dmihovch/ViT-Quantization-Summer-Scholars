@@ -365,9 +365,9 @@ hooks) for the dataset-wide pass to get exact statistics for 3 sites, and
    C is available.
 
 **What to do instead:** Option C — Welford merge inside `profiler.py` (nnsight)
-covering all 6 sites exactly. `hooks.py` is retained for reference (its
-`LayerStats` dataclass was deleted 2026-07-30 in favour of `profiler.LayerStats`)
-but is not used in any phase. See `NEXT-STEPS.md` architecture decision section.
+covering all 6 sites exactly. `hooks.py` was deleted 2026-08-01 (its
+`LayerStats` dataclass was removed 2026-07-30 in favour of `profiler.LayerStats`)
+and is not used in any phase. See `NEXT-STEPS.md` architecture decision section.
 
 ---
 
@@ -476,7 +476,7 @@ expecting `layer_stats.json` (from `hooks.save_stats`). Phase 1 now produces
 **Current status:** The docstring fix and `exp2_ablation.py` update are deferred
 to Phase 2 implementation. When implementing Phase 2, update the docstring to
 reference `profiling_result.json` and call `profiler.load_profiling_result`
-instead of `hooks.load_stats`. See `open-issues.md §7.1`.
+instead of `hooks.load_stats`. See `docs/issues.md` T-009.
 
 ---
 
@@ -543,7 +543,7 @@ transformers.
 ### 9.1 — OUTLIER_SIGMAS used (3, 5, 8) instead of spec (3, 4, 6)
 
 **What happened:** `src/profiler.py` defined `OUTLIER_SIGMAS = (3.0, 5.0, 8.0)`
-while the spec (`docs/scispace-docs/vit_profiling_framework.md`) specified
+while the spec (`docs/scispace-docs/vit_profiling_framework.md`, since removed) specified
 $k \in \{3, 4, 6\}$.  The original implementation decision acknowledged the
 discrepancy and ordered not to change the values because doing so would
 invalidate previously collected data.
@@ -556,7 +556,7 @@ incomparable with the literature.
 
 **Resolution (2026-07-30):** Changed `OUTLIER_SIGMAS` to `(3.0, 4.0, 6.0)` in
 `src/profiler.py`.  Updated all downstream references in `src/plotting.py`,
-`src/hooks.py`, `docs/scispace-docs/vit_profiling_framework.md`,
+`src/hooks.py` (deleted 2026-08-01), `docs/scispace-docs/vit_profiling_framework.md` (since removed),
 `docs/NEXT-STEPS.md`, and `tests/test_profiler.py`.  See `docs/issues.md` T-002.
 
 **What to do instead:** Always use `(3.0, 4.0, 6.0)` — these are the
@@ -569,7 +569,7 @@ thresholds must be regenerated.
 
 ### 10.1 — LayerNorm γ/β never captured (spec required it)
 
-**What happened:** The framework spec (`docs/scispace-docs/vit_profiling_framework.md`)
+**What happened:** The framework spec (`docs/scispace-docs/vit_profiling_framework.md`, since removed)
 explicitly required logging LayerNorm γ weights alongside per-channel σ to separate
 learned-scale outliers from distribution outliers.  This was never implemented —
 `LayerStats` had no fields for γ or β, and `profile_vit` never extracted them from
@@ -601,7 +601,7 @@ variance) before making per-channel quantization decisions.
 ### 11.1 — Residual update delta ‖Δ‖/‖x_skip‖ never computed (spec required it)
 
 **What happened:** The framework spec (`docs/scispace-docs/vit_profiling_framework.md`,
-§Residual Update Stream) explicitly specified computing the LN2 amplification
+since removed, §Residual Update Stream) explicitly specified computing the LN2 amplification
 magnitude relative to the skip connection: ``‖LN2(x)‖ / ‖x_skip‖``.  This was never
 implemented — ``LayerStats`` had no field for it, and ``profile_vit`` never computed
 the ratio inside the trace.
@@ -651,7 +651,7 @@ See `docs/issues.md` T-005.
 **What happened:** The authoritative framework spec
 (`docs/scispace-docs/vit_profiling_framework.md`) was written early in the
 project and not updated as the implementation evolved through T-001 to T-005.
-Several sections became stale:
+The file was later removed entirely. Several sections became stale:
 - The Site Labeling Convention table marked `blocks.11/residual_stream` as
   "Not yet captured" even after T-001 was resolved.
 - The sigma thresholds, outlier fraction methodology, γ/β logging, delta ratio,
@@ -678,11 +678,11 @@ captured" — was corrected to reflect T-001 resolution.
 
 **Verification:** Cross-referenced sigma thresholds across all files:
 - `src/profiler.py`: `OUTLIER_SIGMAS = (3.0, 4.0, 6.0)`
-- `src/hooks.py`: `_OUTLIER_SIGMAS = (3, 4, 6)`
+- `src/hooks.py` (deleted 2026-08-01): `_OUTLIER_SIGMAS = (3, 4, 6)`
 - `src/plotting.py`: annotates `±3σ, ±4σ, ±6σ`
-- `docs/scispace-docs/vit_profiling_framework.md`: `k ∈ {3, 4, 6}`
+- `docs/scispace-docs/vit_profiling_framework.md` (since removed): `k ∈ {3, 4, 6}`
 
-All four sources agree on `(3, 4, 6)`.
+All four sources (at the time) agreed on `(3, 4, 6)`. The framework doc has since been removed.
 
 **What to do instead:** When resolving any issue that changes the implementation,
 always check whether the framework doc needs a corresponding update.  The doc
@@ -791,3 +791,31 @@ This produces a deterministic, class-balanced subset.  See ``docs/issues.md`` T-
 **What to do instead:** Never take the first N samples from an ImageFolder
 dataset for evaluation.  Always use random sampling (seeded for reproducibility)
 to ensure class balance.
+
+---
+
+## 15. Per-channel mean not serialized in Phase 1
+
+### 15.1 — ``LayerStats`` had ``per_channel_std`` but no ``per_channel_mean``
+
+**What happened:** Phase 1 profiling computed per-channel sum and sum-of-squares
+(``per_channel_sum``, ``per_channel_sum_sq``) and derived ``per_channel_std``
+from them.  The per-channel mean (``sum / n``) was computed internally but never
+stored in the ``LayerStats`` dataclass or serialized to JSON.  When per-channel
+ablation was implemented in Phase 2, it needed both μ_c and σ_c per channel for
+the mean-centered threshold ``|x_c − μ_c| > k·σ_c``.
+
+**Why it's wrong:** The data existed in memory during profiling but was discarded.
+Phase 1 had to be re-run (50k images, ~75 minutes on RTX 3070) to regenerate the
+JSON with per-channel mean data.  If the field had been included from the start,
+this re-run would have been unnecessary.
+
+**Resolution (2026-08-02):** Added ``per_channel_mean: list[float] | None`` field
+to ``LayerStats``.  Computed in both ``_finalize_stats`` and ``finalize_accumulator``.
+Serialized automatically via ``dataclasses.asdict``.  Phase 1 re-run with
+``--all --seed 42``.
+
+**What to do instead:** When adding a derived statistic to a profiling dataclass,
+include all intermediate values needed for downstream consumers.  Per-channel
+standard deviation without per-channel mean is only half the picture — any
+mean-centered threshold or normalization requires both.

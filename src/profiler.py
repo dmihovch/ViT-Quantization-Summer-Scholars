@@ -1,7 +1,6 @@
 """nnsight-based activation profiler for timm Vision Transformers.
 
-This module replaces the legacy raw-hook approach in the original ``hooks.py``.
-It wraps a ``timm`` ``VisionTransformer`` with ``nnsight.NNsight`` and collects
+Wraps a ``timm`` ``VisionTransformer`` with ``nnsight.NNsight`` and collects
 activation statistics at six sites across every encoder block in a single
 forward pass, without retaining any full activation tensors in memory.
 
@@ -63,6 +62,12 @@ from src.exceptions import ProfilingError
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_EXPECTED_BATCH_NDIM: int = 4  # (B, C, H, W) for image inputs
+
+# ---------------------------------------------------------------------------
 # Site key constants
 # ---------------------------------------------------------------------------
 
@@ -117,6 +122,7 @@ class LayerStats:
     per_channel_std: list[float] | None = None
     per_channel_sum: list[float] | None = None
     per_channel_sum_sq: list[float] | None = None
+    per_channel_mean: list[float] | None = None
     attention_entropy_cls: list[float] | None = None
     # Per-head Shannon entropy (nats) of the CLS query's attention distribution,
     # averaged over the batch dimension only.  Shape: [num_heads].
@@ -528,7 +534,9 @@ def finalize_accumulator(acc: WelfordAccumulator) -> LayerStats:
     }
 
     per_channel_std: list[float] | None = None
+    per_channel_mean: list[float] | None = None
     if acc.per_channel_sum is not None and acc.per_channel_sum_sq is not None and acc.per_channel_n > 0:
+        per_channel_mean = [s / acc.per_channel_n for s in acc.per_channel_sum]
         per_channel_std = [
             math.sqrt(max(0.0, sum_sq / acc.per_channel_n - (s / acc.per_channel_n) ** 2))
             for s, sum_sq in zip(acc.per_channel_sum, acc.per_channel_sum_sq)
@@ -558,6 +566,7 @@ def finalize_accumulator(acc: WelfordAccumulator) -> LayerStats:
         outlier_fractions=outlier_fractions,
         n_samples=acc.n,
         per_channel_std=per_channel_std,
+        per_channel_mean=per_channel_mean,
         attention_entropy_cls=attention_entropy_cls,
         attention_entropy_patches=attention_entropy_patches,
         layernorm_gamma=acc.layernorm_gamma,
@@ -713,7 +722,7 @@ def run_outlier_counting_pass(
     for k in OUTLIER_SIGMAS.  Accumulates raw counts across all batches and
     returns the final fractions.
 
-    This corrects the per-batch σ overestimate documented in open-issues.md §10.1.
+    This corrects the per-batch σ overestimate documented in docs/MISTAKES.md §1.3.
 
     The standard practice in the quantization literature (Bondarenko et al. 2023;
     Dettmers et al. 2022; Xiao et al. 2023; Wei et al. 2022) is to report
@@ -1144,6 +1153,7 @@ def _finalize_stats(savers: _StatsSavers) -> LayerStats:
     per_channel_std: list[float] | None = None
     per_channel_sum: list[float] | None = None
     per_channel_sum_sq: list[float] | None = None
+    per_channel_mean: list[float] | None = None
     if savers.per_channel_sum is not None and savers.per_channel_sum_sq is not None:
         sum_ch = _val(savers.per_channel_sum)  # shape (D,)
         sum_sq_ch = _val(savers.per_channel_sum_sq)  # shape (D,)
@@ -1155,6 +1165,7 @@ def _finalize_stats(savers: _StatsSavers) -> LayerStats:
         per_channel_sum_sq = sum_sq_ch.tolist()
         if per_ch_n > 0:
             mean_ch = sum_ch / per_ch_n
+            per_channel_mean = mean_ch.tolist()
             var_ch = sum_sq_ch / per_ch_n - mean_ch**2
             std_ch = var_ch.clamp(min=0.0).sqrt()
             per_channel_std = std_ch.tolist()
@@ -1179,6 +1190,7 @@ def _finalize_stats(savers: _StatsSavers) -> LayerStats:
         outlier_fractions=outlier_fractions,
         n_samples=savers.n_samples,
         per_channel_std=per_channel_std,
+        per_channel_mean=per_channel_mean,
         per_channel_sum=per_channel_sum,
         per_channel_sum_sq=per_channel_sum_sq,
         attention_entropy_cls=attention_entropy_cls,
@@ -1271,7 +1283,7 @@ def profile_vit(
             or if the nnsight trace raises an unexpected exception.
         ValueError: If ``input_batch`` is not a 4-D tensor.
     """
-    if input_batch.ndim != 4:  # noqa: PLR2004
+    if input_batch.ndim != _EXPECTED_BATCH_NDIM:
         raise ValueError(
             f"input_batch must be 4-D (B, C, H, W), got shape {tuple(input_batch.shape)}"
         )
@@ -1531,7 +1543,7 @@ def histogram_profile_vit(
         ProfilingError: If the nnsight trace fails.
         ValueError: If ``input_batch`` is not 4-D.
     """
-    if input_batch.ndim != 4:  # noqa: PLR2004
+    if input_batch.ndim != _EXPECTED_BATCH_NDIM:
         raise ValueError(
             f"input_batch must be 4-D (B, C, H, W), got shape {tuple(input_batch.shape)}"
         )

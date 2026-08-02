@@ -23,10 +23,10 @@ _NUM_WORKERS: int = 4
 
 def build_val_loader(
     data_dir: Path,
-    transform: Callable,
+    transform: Callable[[object], torch.Tensor],
     batch_size: int,
     num_images: int | None,
-    device: torch.device,  # noqa: ARG001 — kept for API symmetry; pin_memory depends on CUDA
+    device: torch.device,
     shuffle: bool | None = None,
 ) -> DataLoader:
     """Build a DataLoader over the ImageNet validation split.
@@ -90,7 +90,7 @@ def build_val_loader(
     # value controls both random sampling and DataLoader shuffling.
     # Always shuffle by default — class-diverse batches produce
     # representative per-batch σ, reducing the outlier-fraction
-    # overestimate documented in open-issues.md §10.1.
+    # overestimate documented in docs/MISTAKES.md §1.3.
     if shuffle is None:
         shuffle = True
 

@@ -67,8 +67,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--layer-stats",
         type=Path,
-        default=Path("outputs/phase1-profiling/profiling_result.json"),
+        default=Path("outputs/phase1-profiling/seed_42/profiling_result.json"),
         help="Path to the profiling_result.json produced by Phase 1.",
+    )
+    parser.add_argument(
+        "--granularity",
+        type=str,
+        default="global",
+        choices=["global", "per_channel"],
+        help="Zeroing granularity: 'global' (per-layer μ,σ) or 'per_channel' (per-channel μ_c,σ_c for pre_gelu only).",
     )
     return parser.parse_args()
 
@@ -91,6 +98,7 @@ def main() -> None:
         sigma_thresholds=tuple(args.sigma_thresholds),
         layer_stats_path=args.layer_stats,
         seed=args.seed,
+        granularity=args.granularity,
     )
     run(config)
 

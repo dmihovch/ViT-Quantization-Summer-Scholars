@@ -40,6 +40,7 @@ from typing import Callable
 import numpy as np
 import torch
 from nnsight import NNsight
+from PIL import Image
 
 from src.config import ProfilingConfig
 from src.data_loader import build_val_loader
@@ -70,11 +71,11 @@ def run(config: ProfilingConfig) -> None:
     """Execute the Phase 1 profiling pipeline end-to-end.
 
     All artefacts (``profiling_result.json``, histogram PNGs, and per-channel
-    σ heatmap) are written under ``config.output_dir``, which is created if it
-    does not exist.
+    σ heatmap) are written under ``config.output_dir / seed_{seed}``, which is
+    created if it does not exist.
 
-    When ``config.num_seeds > 1``, the pipeline is repeated for each seed
-    and results are saved to per-seed subdirectories.
+    Each seed (``config.seed``, ``config.seed+1``, ...) gets its own
+    subdirectory for uniform output structure regardless of ``num_seeds``.
 
     Parameters
     ----------
@@ -100,9 +101,7 @@ def run(config: ProfilingConfig) -> None:
                 "=== Seed %d/%d (seed=%d) ===",
                 run_idx + 1, config.num_seeds, run_seed,
             )
-            run_output_dir = config.output_dir / f"seed_{run_seed}"
-        else:
-            run_output_dir = config.output_dir
+        run_output_dir = config.output_dir / f"seed_{run_seed}"
 
         seed_everything(run_seed)
         _run_single(wrapped, transform, config, run_output_dir)
@@ -112,7 +111,7 @@ def run(config: ProfilingConfig) -> None:
 
 def _run_single(
     wrapped: NNsight,
-    transform: Callable,
+    transform: Callable[[Image.Image], torch.Tensor],
     config: ProfilingConfig,
     output_dir: Path,
 ) -> None:
@@ -221,7 +220,7 @@ def _run_single(
 
 def _plot_histograms(
     wrapped: NNsight,
-    transform: Callable,
+    transform: Callable[[Image.Image], torch.Tensor],
     config: ProfilingConfig,
     output_dir: Path,
     block_indices: tuple[int, ...] = tuple(range(12)),

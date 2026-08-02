@@ -14,6 +14,7 @@ import timm
 import timm.data
 import torch
 import torch.nn as nn
+from PIL import Image
 from timm.models.vision_transformer import VisionTransformer
 from torch.utils.data import DataLoader
 
@@ -39,7 +40,7 @@ def disable_fused_attn(model: VisionTransformer) -> None:
     logger.info("fused_attn disabled on all %d blocks", len(model.blocks))
 
 
-def load_vit(device: torch.device) -> tuple[VisionTransformer, Callable]:
+def load_vit(device: torch.device) -> tuple[VisionTransformer, Callable[[Image.Image], torch.Tensor]]:
     """Load the pretrained ``vit_base_patch16_224`` model and its transform.
 
     The preprocessing transform is derived exclusively from the model's own
@@ -110,8 +111,8 @@ def evaluate_accuracy(
 
     with torch.no_grad():
         for images, labels in loader:
-            images = images.to(device)  # noqa: PLW2901
-            labels = labels.to(device)  # noqa: PLW2901
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
 
             outputs = model(images)  # (B, num_classes)
 

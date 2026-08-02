@@ -1,8 +1,9 @@
 # EXP2-IMPL: Experiment 2 — Outlier Ablation (Zeroing)
 
-> **Status:** Phase 2 implementation complete with fixes (2026-08-01).
+> **Status:** Phase 2 implementation complete (2026-08-02).
 > Mean-centered thresholding (T-020), random-zeroing control (T-021),
-> class-imbalance fix (T-022).  See `docs/issues.md` for details.
+> class-imbalance fix (T-022), per-channel ablation (T-024).
+> See `docs/issues.md` for details.
 > Tested with PyTorch 2.12.1, nnsight 0.7.0, CUDA 13.0, NVIDIA RTX 3070 (8 GB).
 
 ---
@@ -129,6 +130,34 @@ For `pre_softmax` ablation, per-head CLS and patch attention entropy is captured
 
 For `residual_stream` zeroing, the CLS token (position 0 along the token dimension) is explicitly preserved. Zeroing the CLS token would destroy the classification signal regardless of outlier status. Ref: Wei et al. (2022), arXiv:2209.13325, §3.1.
 
+### 2.7 Per-channel ablation (granularity)
+
+Per-channel ablation uses per-channel μ_c and σ_c from Phase 1's
+``per_channel_mean`` and ``per_channel_std`` fields instead of the global
+scalar μ and σ.  The threshold for channel ``c`` is:
+
+```
+|x_c − μ_c| > k·σ_c
+```
+
+This is only meaningful for ``pre_gelu``, where the MLP hidden dimension
+(3,072) has a natural channel structure.  Per-channel mode:
+- Only ablates ``pre_gelu`` (skips ``pre_softmax`` and ``residual_stream``).
+- Does not run the random-zeroing control (per-channel random zeroing would
+  require per-channel random fractions, which is over-parameterized).
+- Writes ``granularity=per_channel`` in the CSV output.
+
+Enabled via ``--granularity per_channel`` on the CLI or
+``AblationConfig(granularity="per_channel")``.
+
+**Hypothesis:** High-variance channels carry proportionally more
+outlier-dependent signal.  A global threshold over-zeroes them while
+under-zeroing low-variance channels.  Per-channel thresholds redistribute
+the zeroing budget, preserving more accuracy at aggressive thresholds.
+
+**Result (50k images):** Confirmed.  At k=3, per-channel preserves 47.00%
+vs 43.24% global (+3.76%).  At k≥4 the difference vanishes.
+
 ---
 
 ## 3. `src/ablation.py` — Public API
@@ -147,6 +176,7 @@ class AblationResult:
     baseline_top1: float   # unablated accuracy
     baseline_top5: float
     is_random: bool        # True for random-zeroing control condition
+    granularity: str       # "global" or "per_channel"
     cls_entropy: list[float]           # per-head CLS entropy after ablation [H]
     patch_entropy: list[float]         # per-head patch entropy after ablation [H]
     baseline_cls_entropy: list[float]  # Phase 1 baseline [H]
@@ -163,27 +193,34 @@ Builds a boolean keep-mask where `|x − μ| ≤ k·σ`.  The `mean` parameter
 defaults to 0.0 for backward compatibility but should always be provided
 from `layer_stats`.
 
-### 3.4 `_build_random_mask(tensor, fraction, seed=None, salt=0) -> Tensor`
+### 3.4 `_build_per_channel_zeroing_mask(tensor, sigma_k, per_channel_sigma, per_channel_mean, device) -> Tensor`
+
+Builds a boolean keep-mask where `|x_c − μ_c| ≤ k·σ_c` per channel.
+Broadcasts per-channel statistics of shape `(D,)` against tensor of shape
+`(B, N, D)`.  Only valid for pre_gelu (MLP hidden dimension).
+
+### 3.5 `_build_random_mask(tensor, fraction, seed=None, salt=0) -> Tensor`
 
 Builds a boolean keep-mask where exactly `fraction` of elements are zeroed
 at uniformly random positions.  Used for the random-zeroing control condition.
 
-### 3.5 `compute_entropy_delta(ablated_cls, ablated_patch, baseline_cls, baseline_patch) -> dict`
+### 3.6 `compute_entropy_delta(ablated_cls, ablated_patch, baseline_cls, baseline_patch) -> dict`
 
 Returns `{"mean_cls_delta": float, "mean_patch_delta": float}`. Positive means entropy increased (more uniform attention) after zeroing.
 
-### 3.6 `zero_outliers_in_trace(wrapped_model, input_batch, site, sigma_k, layer_stats, random_fractions=None, random_seed=None) -> (logits, pct_zeroed, entropy_data)`
+### 3.7 `zero_outliers_in_trace(wrapped_model, input_batch, site, sigma_k, layer_stats, random_fractions=None, random_seed=None, per_channel=False) -> (logits, pct_zeroed, entropy_data)`
 
 Core intervention function. Runs one forward pass with outlier zeroing (or
-random zeroing if `random_fractions` is provided). Returns 3-tuple with
-logits, per-layer %-zeroed, and per-layer entropy (for pre_softmax).
+random zeroing if `random_fractions` is provided).  If `per_channel=True` and
+`site="pre_gelu"`, uses per-channel μ_c and σ_c for thresholding.  Returns
+3-tuple with logits, per-layer %-zeroed, and per-layer entropy (for pre_softmax).
 
-### 3.7 `save_ablation_results(results, path) -> None`
+### 3.8 `save_ablation_results(results, path) -> None`
 
-Persists results to CSV. Includes `is_random` column. Entropy fields
-serialised as JSON strings.
+Persists results to CSV. Includes `is_random` and `granularity` columns.
+Entropy fields serialised as JSON strings.
 
-### 3.8 `save_entropy_deltas(results, path) -> None`
+### 3.9 `save_entropy_deltas(results, path) -> None`
 
 Persists per-layer entropy deltas for pre_softmax ablation to a separate CSV.
 
@@ -280,6 +317,29 @@ confound of differing zeroing rates between conditions — the only difference i
 
 **Rationale:** ImageFolder returns images grouped by class in alphabetical order. Taking the first N images would sample only from the first few classes, producing meaningless accuracy numbers for small `--num-images` values.
 
+### 6.9 Per-channel ablation (T-024)
+
+**Decision:** Add per-channel zeroing as a separate granularity mode for
+pre_gelu, using per-channel μ_c and σ_c from Phase 1.
+
+**Rationale:** Phase 1 profiling showed per-channel σ varies 12× within
+block 10 (2.06–25.54).  A global threshold over-zeroes high-variance
+channels while under-zeroing low-variance channels.  Per-channel ablation
+tests whether this concentration drives accuracy degradation — and whether
+per-channel quantization of the MLP hidden dimension would reduce the
+accuracy penalty of INT8 range clipping.  The 3.76% improvement at k=3
+confirms this hypothesis.
+
+### 6.10 Per-channel mean added to Phase 1 (T-023)
+
+**Decision:** Add ``per_channel_mean`` to ``LayerStats`` alongside existing
+``per_channel_std``.
+
+**Rationale:** Per-channel standard deviation without per-channel mean is
+only half the picture.  Any mean-centered threshold (``|x_c − μ_c| > k·σ_c``)
+requires both.  The data existed in memory during profiling but was discarded.
+Phase 1 was re-run to regenerate the JSON with this field.
+
 ---
 
 ## 7. Critical constraints
@@ -287,9 +347,11 @@ confound of differing zeroing rates between conditions — the only difference i
 - `fused_attn=False` must be set before wrapping with NNsight (done by `load_vit`).
 - Model must be in `eval()` mode (done by `load_vit`, asserted in `profile_vit`).
 - Phase 1 `profiling_result.json` must exist at `config.layer_stats_path` and contain `mean`, `std`, `outlier_fractions`, and `attention_entropy_cls`/`attention_entropy_patches`.
+- For per-channel ablation, `profiling_result.json` must also contain `per_channel_mean` and `per_channel_std` for all pre_gelu sites (requires Phase 1 re-run after 2026-08-02).
 - The `pre_softmax` intervention reconstructs QKᵀ/√d and injects via `attn.proj.input`. This bypasses the attention dropout (`attn_drop`) — acceptable since dropout is disabled in eval mode.
 - Random-zeroing control uses per-batch per-layer %-zeroed from the outlier pass
   as the target fraction — no dependency on Phase 1 `outlier_fractions`.
+- Per-channel mode only ablates `pre_gelu`; `pre_softmax` and `residual_stream` are skipped.
 
 ---
 

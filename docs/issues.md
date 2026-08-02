@@ -1,7 +1,7 @@
 # Issue Tracker — ViT Quantization Summer Scholars
 
 > **Created:** 2026-07-28 — from skeptical review of Phase 1 implementation.
-> **Source:** 15-issue review against `src/profiler.py`, `docs/scispace-docs/vit_profiling_framework.md`,
+> **Source:** 15-issue review against `src/profiler.py`, `docs/EXP1-IMPL.md`,
 > `docs/CITATIONS.md`, and test suite.
 >
 > Each ticket includes: severity, status, evidence, proposed fix, rationale with citations,
@@ -119,7 +119,7 @@ Updated all downstream references:
 - `src/profiler.py`: `OUTLIER_SIGMAS` constant and `LayerStats` docstring.
 - `src/plotting.py`: `plot_activation_histogram` now annotates ±3σ, ±4σ, ±6σ.
 - `src/hooks.py`: comment updated (already had correct values).
-- `docs/scispace-docs/vit_profiling_framework.md`: Per-Site Metrics, Deliverables, Phase 2 thresholding, Sigma Threshold Convention.
+- `docs/scispace-docs/vit_profiling_framework.md` (since removed): Per-Site Metrics, Deliverables, Phase 2 thresholding, Sigma Threshold Convention.
 - `docs/NEXT-STEPS.md`: `LayerStats` dataclass keys and Statistics computed section.
 - `docs/EXP1-IMPL.md`: no direct references to update (uses `OUTLIER_SIGMAS` symbolically).
 - `tests/test_profiler.py`: hardcoded outlier fraction keys updated.
@@ -138,7 +138,7 @@ profiling to regenerate results with the correct thresholds.
 - `src/profiler.py` — `OUTLIER_SIGMAS` constant changed to `(3.0, 4.0, 6.0)`
 - `src/plotting.py` — histogram annotations updated to ±3σ, ±4σ, ±6σ
 - `src/hooks.py` — comment clarified
-- `docs/scispace-docs/vit_profiling_framework.md` — all sigma references updated
+- `docs/scispace-docs/vit_profiling_framework.md` (since removed) — all sigma references updated
 - `docs/NEXT-STEPS.md` — LayerStats keys updated
 - `tests/test_profiler.py` — hardcoded outlier fraction keys updated
 
@@ -165,7 +165,7 @@ is an I-ViT contribution.
 **Resolution**
 
 No changes needed. The existing attribution in `docs/scispace-docs/vit_profiling_framework.md`
-and `docs/CITATIONS.md` is correct. Both papers remain cited for their respective
+(since removed) and `docs/CITATIONS.md` is correct. Both papers remain cited for their respective
 contributions: I-BERT for i-GELU (integer polynomial GELU), I-ViT for ShiftGELU
 (bit-shifting approximation for ViT).
 
@@ -226,7 +226,7 @@ decisions — the core SmoothQuant (Xiao et al. 2023) insight.
   `merge_batch_stats` (carry-through), `finalize_accumulator` (pass-through),
   `profile_vit` (post-trace extraction)
 - `tests/test_profiler.py` — 8 new tests for γ/β presence, correctness, and serialization
-- `docs/scispace-docs/vit_profiling_framework.md` — Per-Site Metrics and Post-LayerNorm sections updated
+- `docs/scispace-docs/vit_profiling_framework.md` (since removed) — Per-Site Metrics and Post-LayerNorm sections updated
 - `docs/EXP1-IMPL.md` — §3.2 and §3.4 updated with γ/β fields
 - `docs/MISTAKES.md` — entry added
 
@@ -419,13 +419,13 @@ which is actionable for Phase 2 ablation targeting (Wei et al. 2022, §3.1).
   `finalize_accumulator` (finalization), `_finalize_stats` (extraction),
   `profile_vit` (trace computation with pending buffer)
 - `tests/test_profiler.py` — 12 new tests for delta ratio
-- `docs/scispace-docs/vit_profiling_framework.md` — Residual Update Stream section updated
+- `docs/scispace-docs/vit_profiling_framework.md` (since removed) — Residual Update Stream section updated
 - `docs/EXP1-IMPL.md` — §3.2, §3.4, §8 updated with delta ratio fields
 - `docs/MISTAKES.md` — entry added
 
 ---
 
-### T-006 — Update `docs/scispace-docs/vit_profiling_framework.md` to match implementation
+### T-006 — Update `docs/scispace-docs/vit_profiling_framework.md` to match implementation (file since removed)
 
 **Severity:** MEDIUM  
 **Status:** ✅ Closed (2026-07-30)  
@@ -462,10 +462,10 @@ Final fix applied:
 - `src/profiler.py`: `OUTLIER_SIGMAS = (3.0, 4.0, 6.0)`
 - `src/hooks.py`: `_OUTLIER_SIGMAS = (3, 4, 6)`
 - `src/plotting.py`: annotates `±3σ, ±4σ, ±6σ`
-- `docs/scispace-docs/vit_profiling_framework.md`: `k ∈ {3, 4, 6}`
+- `docs/scispace-docs/vit_profiling_framework.md` (since removed): `k ∈ {3, 4, 6}`
 
 **Affected files**
-- `docs/scispace-docs/vit_profiling_framework.md` — Site Labeling Convention table updated
+- `docs/scispace-docs/vit_profiling_framework.md` (since removed) — Site Labeling Convention table updated
 
 ---
 
@@ -658,7 +658,7 @@ to a function expecting `hooks.LayerStats`, it will fail at runtime with
 `AttributeError: 'LayerStats' object has no attribute 'site'`.
 
 Additionally, `profiler.LayerStats` lacks `max` and `min` fields.  The spec
-(`docs/scispace-docs/vit_profiling_framework.md` line 51) specifies max/min as
+(`docs/scispace-docs/vit_profiling_framework.md` line 51, since removed) specifies max/min as
 per-tensor scalars.  Without them, you cannot directly see the extreme values
 that would clip under INT8 quantization (range [-128, 127]).  While std and
 kurtosis characterize the distribution shape, the absolute range is what
@@ -945,7 +945,7 @@ when block 4 actually does.
 
 **Proposed fix** ✅ Implemented
 
-Add a §Document Conventions section to `docs/scispace-docs/vit_profiling_framework.md`:
+Add a §Document Conventions section to `docs/scispace-docs/vit_profiling_framework.md` (since removed):
 
 ```markdown
 ### Site Labeling Convention
@@ -1155,6 +1155,82 @@ Changes applied:
 
 ---
 
+### T-023 — Per-channel mean not serialized in Phase 1 profiling output
+
+**Severity:** MEDIUM
+**Status:** ✅ Closed (2026-08-02)
+**Category:** Bug — missing data
+**Source:** Per-channel ablation implementation, 2026-08-02
+
+**Evidence**
+
+Phase 1's ``LayerStats`` dataclass had ``per_channel_std`` but no
+``per_channel_mean``.  The per-channel sum data (``per_channel_sum``,
+``per_channel_sum_sq``) was computed during profiling but the mean was
+never stored in the dataclass or serialized to JSON.  This made per-channel
+ablation impossible because the mean-centered threshold
+``|x_c − μ_c| > k·σ_c`` requires both μ_c and σ_c per channel.
+
+**Resolution:** Added ``per_channel_mean: list[float] | None`` field to
+``LayerStats``.  Computed in both ``_finalize_stats`` (single-batch path)
+and ``finalize_accumulator`` (multi-batch merge path) as
+``mean_ch = sum_ch / per_ch_n``.  Serialized automatically via
+``dataclasses.asdict`` in ``save_profiling_result``.
+
+Phase 1 was re-run with ``--all --seed 42`` to regenerate
+``profiling_result.json`` with per-channel mean data.
+
+**Affected files**
+- ``src/profiler.py`` — ``LayerStats`` dataclass, ``_finalize_stats``,
+  ``finalize_accumulator``
+- ``docs/MISTAKES.md`` — entry added
+
+---
+
+### T-024 — Per-channel ablation not implemented
+
+**Severity:** MEDIUM
+**Status:** ✅ Closed (2026-08-02)
+**Category:** Missing feature
+**Source:** Research direction discussion, 2026-08-02
+
+**Evidence**
+
+Phase 2 ablation used only global per-layer μ and σ for thresholding.
+Phase 1 profiling showed per-channel σ varies 12× within block 10
+(2.06–25.54), suggesting that a global threshold over-zeroes high-variance
+channels while under-zeroing low-variance channels.  Per-channel ablation
+tests whether outlier concentration in high-variance channels drives
+accuracy degradation.
+
+**Resolution:** Added per-channel zeroing support to Phase 2:
+- ``src/ablation.py``: ``_build_per_channel_zeroing_mask`` function;
+  ``_intervene_pre_gelu`` gained ``per_channel`` parameter;
+  ``zero_outliers_in_trace`` threads ``per_channel`` through.
+- ``src/config.py``: ``AblationConfig.granularity`` field
+  (``"global"`` or ``"per_channel"``).
+- ``src/exp2_ablation.py``: Per-channel mode only ablates ``pre_gelu``
+  (skips ``pre_softmax`` and ``residual_stream``, which don't have
+  meaningful per-channel structure).
+- ``run_phase2_ablation.py``: ``--granularity {global,per_channel}`` flag.
+- ``src/ablation.py``: ``AblationResult.granularity`` field; CSV output
+  includes ``granularity`` column.
+
+**Results (50k images):** Per-channel thresholds preserve 3.76% more
+accuracy at k=3 (47.00% vs 43.24%).  At k≥4 the difference vanishes.
+
+**Affected files**
+- ``src/ablation.py`` — ``_build_per_channel_zeroing_mask`` (new),
+  ``_intervene_pre_gelu``, ``zero_outliers_in_trace``, ``AblationResult``,
+  ``save_ablation_results``
+- ``src/config.py`` — ``AblationConfig.granularity``
+- ``src/exp2_ablation.py`` — ``run`` (per-channel site selection),
+  ``_build_layer_results``
+- ``run_phase2_ablation.py`` — ``--granularity`` CLI flag
+- ``docs/MISTAKES.md`` — entry added
+
+---
+
 ## Summary
 
 | Ticket | Severity | Status | Title |
@@ -1181,3 +1257,5 @@ Changes applied:
 | T-020 | HIGH | ✅ Closed (2026-08-01) | Phase 2 threshold mismatch: zero-centered → mean-centered |x−μ| > k·σ |
 | T-021 | HIGH | ✅ Closed (2026-08-01) | Phase 2 missing random-zeroing control condition |
 | T-022 | MEDIUM | ✅ Closed (2026-08-01) | Class imbalance in subset mode when shuffle=False |
+| T-023 | MEDIUM | ✅ Closed (2026-08-02) | Per-channel mean not serialized in Phase 1 profiling output |
+| T-024 | MEDIUM | ✅ Closed (2026-08-02) | Per-channel ablation not implemented |

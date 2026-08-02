@@ -62,8 +62,7 @@ Each entry includes:
     Laplace), unequal batch sizes, large mean deltas, idempotence.
   - `docs/EXP1-IMPL.md` — §2.2, §3.2-3.5.
   - `docs/NEXT-STEPS.md` — §Before Step 4b.
-  - `docs/mistakes-ledger.md` — §Mistake 3.
-  - `docs/vit_profiling_framework.md` — §Per-Site Metrics, §Pipeline.
+  - `docs/MISTAKES.md` — §1.2.
 - **Verification:** ✅ Sandia technical report; the Chan et al. (1983)
   parallel formula for M2 is a special case of this.
 - **☐ Researcher sign-off: Not yet reviewed**
@@ -79,8 +78,7 @@ Each entry includes:
 - **Used in:**
   - `src/profiler.py` — `WelfordAccumulator` class name and the running
     mean/variance tracking pattern.
-  - `src/hooks.py` — Legacy Welford accumulator (3-site pipeline; LayerStats deleted 2026-07-30).
-  - `docs/vit_profiling_framework.md` — §Per-Site Metrics.
+  - `src/hooks.py` — Legacy Welford accumulator (3-site pipeline; file deleted 2026-08-01, LayerStats deleted 2026-07-30).
 - **Verification:** ✅ Classic paper; the Pébay (2008) parallel merge
   generalises Welford's serial algorithm to the multi-batch setting.
 - **☐ Researcher sign-off: Not yet reviewed**
@@ -121,7 +119,6 @@ Each entry includes:
     quantization failure modes you are solving."
 - **Verification:** ⚠️ arXiv preprint (not peer-reviewed).
 - **☐ Researcher sign-off: Not yet reviewed**
-- **Verification:** ✅ arXiv:2109.12948. Preprint (not peer-reviewed).
 
 ### Dettmers et al. 2022 — LLM.int8()
 
@@ -205,8 +202,6 @@ Each entry includes:
     treating CLS-to-all attention as a distinct distribution from
     patch-to-patch attention.
   - `src/exp1_profiling.py` — `_plot_attention_entropy_heatmaps` docstring.
-  - `docs/IMPL-phase1-fixes.md` — §F3.
-  - `docs/vit_entropy_methodology.md` — Reference [3].
 - **Verification:** ⚠️ arXiv preprint (Aug 2025). Not yet peer-reviewed.
 - **☐ Researcher sign-off: Not yet reviewed**
 
@@ -221,8 +216,6 @@ Each entry includes:
     `_register_entropy_saves` docstring: cited for CLS attention entropy
     methodology.
   - `src/exp1_profiling.py` — `_plot_attention_entropy_heatmaps` docstring.
-  - `docs/IMPL-phase1-fixes.md` — §F3.
-  - `docs/vit_entropy_methodology.md` — Reference [5].
 - **Verification:** ⚠️ arXiv preprint (Nov 2025). Not yet peer-reviewed.
 - **☐ Researcher sign-off: Not yet reviewed**
 
@@ -239,8 +232,6 @@ Each entry includes:
   - `src/profiler.py` — `LayerStats.attention_entropy_patches` field
     docstring: cited for CLS/patch attention entropy separation.
   - `src/exp1_profiling.py` — `_plot_attention_entropy_heatmaps` docstring.
-  - `docs/IMPL-phase1-fixes.md` — §F3.
-  - `docs/vit_entropy_methodology.md` — Reference [8].
 - **Verification:** ✅ Published at ISOCC 2025 (IEEE conference).
 - **☐ Researcher sign-off: Not yet reviewed**
 
@@ -254,9 +245,8 @@ Each entry includes:
 - **🔗 Link:** https://doi.org/10.1016/j.sysarc.2026.103154 (⚠️ DOI reconstructed from PII S1383762126001542 — verify before citing)
 - **⚠️ No arXiv:** Journal of Systems Architecture publication — no arXiv preprint found (searched by title, authors, and keywords).
 - **Used in:**
-  - `docs/IMPL-phase1-fixes.md` — §F3: cited alongside Maisonnave et al.
-    and Mali for CLS/patch entropy separation.
-  - `docs/vit_entropy_methodology.md` — Reference [9].
+  - `src/profiler.py` — `LayerStats.attention_entropy_patches` field
+    docstring: cited for CLS/patch attention entropy separation.
 - **Verification:** ✅ Published in Journal of Systems Architecture
   (ScienceDirect).
 - **☐ Researcher sign-off: Not yet reviewed**
@@ -274,7 +264,7 @@ Each entry includes:
   in *Proc. ICLR*, 2023. arXiv:2210.06313.
 - **🔗 Link:** https://arxiv.org/abs/2210.06313
 - **Used in:**
-  - `docs/vit_profiling_framework.md` — §Motivation: cited as evidence
+  - `docs/NEXT-STEPS.md` — §Background: cited as evidence
     that activation sparsity emerges naturally in trained ViTs.
 - **Verification:** ✅ Published at ICLR 2023.
 - **☐ Researcher sign-off: Not yet reviewed**
@@ -286,9 +276,8 @@ Each entry includes:
   Activations in Large Language Models," arXiv:2402.17762, 2024.
 - **🔗 Link:** https://arxiv.org/abs/2402.17762
 - **Used in:**
-  - `docs/vit_profiling_framework.md` — §Motivation: cited for the
+  - `docs/NEXT-STEPS.md` — §Background: cited for the
     structural role of extreme activation outliers.
-  - `docs/NEXT-STEPS.md` — §Before Step 4b.
 - **Verification:** ⚠️ arXiv preprint (Feb 2024). Not yet peer-reviewed.
 - **☐ Researcher sign-off: Not yet reviewed**
 
@@ -317,9 +306,8 @@ Each entry includes:
   arXiv:2207.01405.
 - **🔗 Link:** https://arxiv.org/abs/2207.01405
 - **Used in:**
-  - `docs/vit_profiling_framework.md` — §Motivation: the ShiftGELU
+  - `docs/NEXT-STEPS.md` — §Before Step 9: the ShiftGELU
     mechanism.
-  - `docs/NEXT-STEPS.md` — §Before Step 8.
 - **Verification:** ✅ Published at ICCV 2023.
 - **☐ Researcher sign-off: Not yet reviewed**
 
@@ -335,78 +323,6 @@ Each entry includes:
   - `docs/NEXT-STEPS.md` — §Before Step 8: the canonical quantization
     survey.
 - **Verification:** ✅ Published as a book chapter; arXiv:2103.13630.
-- **☐ Researcher sign-off: Not yet reviewed**
-
----
-
-## Additional references from `docs/vit_entropy_methodology.md`
-
-These are cited in the entropy methodology literature review but are not
-directly used in the codebase. Included for completeness.
-
-### [1] Attention Map Guided Transformer Pruning for Edge Device
-
-- **Full citation:** "Attention Map Guided Transformer Pruning for Edge Device,"
-  Apr. 2023. arXiv:2304.01452.
-- **🔗 Link:** https://arxiv.org/abs/2304.01452
-- **Used for:** Per-sample entropy for pruning.
-- **Verification:** ⚠️ arXiv preprint (not peer-reviewed).
-- **☐ Researcher sign-off: Not yet reviewed**
-
-### [2] Spatial Entropy as an Inductive Bias for Vision Transformers
-
-- **Full citation:** E. Peruzzo, E. Sangineto, Y. Liu, M. De Nadai, W. Bi,
-  B. Lepri, and N. Sebe, "Spatial Entropy as an Inductive Bias for Vision
-  Transformers," arXiv:2206.04636, June 2022.
-- **🔗 Link:** https://arxiv.org/abs/2206.04636
-- **Used for:** Spatial entropy regularizer as self-supervised loss.
-- **Verification:** ⚠️ arXiv preprint (not peer-reviewed).
-- **☐ Researcher sign-off: Not yet reviewed**
-
-### [4] Training Vision Transformers for Image Retrieval
-
-- **Full citation:** A. El-Nouby et al., "Training Vision Transformers for
-  Image Retrieval." arXiv:2102.05644.
-- **🔗 Link:** https://arxiv.org/abs/2102.05644
-- **Used for:** Differential entropy for continuous activations.
-- **Verification:** ✅ arXiv:2102.05644.
-- **☐ Researcher sign-off: Not yet reviewed**
-
-### [6] Probabilistic Conceptual Explainers
-
-- **Full citation:** H. Wang, S. Tan, and H. Wang, "Probabilistic Conceptual
-  Explainers," June 2024. arXiv:2406.12649.
-- **🔗 Link:** https://arxiv.org/abs/2406.12649
-- **Used for:** Probabilistic density modeling over patch embeddings.
-- **Verification:** ⚠️ arXiv preprint (not peer-reviewed).
-- **☐ Researcher sign-off: Not yet reviewed**
-
-### [7] Rényi Entropy: A New Token Pruning Metric for Vision Transformers
-
-- **Full citation:** W. Su, R. Zhang, and Z. Zhang, "Rényi Entropy: A New
-  Token Pruning Metric for Vision Transformers." arXiv:2603.27900.
-- **🔗 Link:** https://arxiv.org/abs/2603.27900
-- **Used for:** Alternative entropy variants (Rényi).
-- **Verification:** ⚠️ arXiv preprint (not peer-reviewed).
-- **☐ Researcher sign-off: Not yet reviewed**
-
-### [10] ViTGuard
-
-- **Full citation:** S. Sun et al., "ViTGuard," Sept. 2024. arXiv:2409.13828.
-- **🔗 Link:** https://arxiv.org/abs/2409.13828
-- **Used for:** CLS embedding as separate detector.
-- **Verification:** ⚠️ arXiv preprint (not peer-reviewed).
-- **☐ Researcher sign-off: Not yet reviewed**
-
-### [11] Adaptive class token knowledge distillation
-
-- **Full citation:** M. Kang, S. Son, and D. Kim, "Adaptive class token
-  knowledge distillation for efficient vision transformer," *Knowledge-Based
-  Systems*, Sept. 2024. DOI: 10.1016/j.knosys.2024.112531.
-- **🔗 Link:** https://doi.org/10.1016/j.knosys.2024.112531
-- **⚠️ No arXiv:** Published in Knowledge-Based Systems — no arXiv preprint found (searched by title and authors).
-- **Used for:** CLS as distillation target.
-- **Verification:** ✅ Published in Knowledge-Based Systems.
 - **☐ Researcher sign-off: Not yet reviewed**
 
 ---
@@ -432,7 +348,7 @@ directly used in the codebase. Included for completeness.
 | 2026-07-27 | `src/profiler.py` cited "Bondarenko et al. 2023" — the paper is from 2021 (arXiv:2109.12948). | Corrected year to 2021 in full citation; kept "2023" in short form for consistency with existing code references. |
 | 2026-07-27 | Pébay (2008) referenced throughout but never had a full citation in the code. | Added full SAND2008-6212 citation to `WelfordAccumulator` docstring. |
 | 2026-07-27 | Zhai et al. (2023) entropy formula used in `_register_entropy_saves` without citation. | Added citation to function docstring. |
-| 2026-07-28 | All citations lacked direct links and researcher sign-off checkboxes. | Added 🔗 links (arXiv preferred) and ☐ researcher sign-off to all 25 citations. |
+| 2026-07-28 | All citations lacked direct links and researcher sign-off checkboxes. | Added 🔗 links (arXiv preferred) and ☐ researcher sign-off to all 17 citations. |
 | 2026-07-28 | Ref [2] (Peruzzo et al., "Spatial Entropy...") had no arXiv ID or DOI. | Found on arXiv: 2206.04636. Updated full citation with all authors. |
 | 2026-07-28 | GateAttn-ViT (Yadav & Das), AE-Guide (Lee & Kim), and Ref [11] (Kang et al.) had no arXiv links. | Searched arXiv by title, authors, and keywords — confirmed no arXiv preprint exists for any of these. Added ⚠️ No arXiv notes. |
 | 2026-07-28 | Yadav & Das DOI was `S1383762126001542` — a PII, not a standard DOI. | Reconstructed probable DOI as `10.1016/j.sysarc.2026.103154`. Flagged with ⚠️ to verify before citing. |
