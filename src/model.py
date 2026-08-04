@@ -8,7 +8,7 @@ own pretrained config to avoid accidental mean/std mismatches.
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from collections.abc import Callable
 
 import timm
 import timm.data

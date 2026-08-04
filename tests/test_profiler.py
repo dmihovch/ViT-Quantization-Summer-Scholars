@@ -1980,8 +1980,8 @@ def test_build_val_loader_auto_shuffle_full_dataset(temp_image_dir: Path) -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_profiling_config_skip_outlier_recount_default_false() -> None:
-    """ProfilingConfig.skip_outlier_recount must default to False."""
+def test_profiling_config_approximate_outliers_default_false() -> None:
+    """ProfilingConfig.approximate_outliers must default to False."""
     from src.config import ProfilingConfig
 
     cfg = ProfilingConfig(
@@ -1991,11 +1991,11 @@ def test_profiling_config_skip_outlier_recount_default_false() -> None:
         batch_size=8,
         device=torch.device("cpu"),
     )
-    assert cfg.skip_outlier_recount is False
+    assert cfg.approximate_outliers is False
 
 
-def test_profiling_config_skip_outlier_recount_can_be_set() -> None:
-    """ProfilingConfig.skip_outlier_recount can be set to True."""
+def test_profiling_config_approximate_outliers_can_be_set() -> None:
+    """ProfilingConfig.approximate_outliers can be set to True."""
     from src.config import ProfilingConfig
 
     cfg = ProfilingConfig(
@@ -2004,9 +2004,9 @@ def test_profiling_config_skip_outlier_recount_can_be_set() -> None:
         num_images=64,
         batch_size=8,
         device=torch.device("cpu"),
-        skip_outlier_recount=True,
+        approximate_outliers=True,
     )
-    assert cfg.skip_outlier_recount is True
+    assert cfg.approximate_outliers is True
 
 
 @pytest.mark.slow

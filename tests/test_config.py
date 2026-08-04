@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from src.config import AblationConfig, IntegerGELUConfig, ProfilingConfig
+from src.config import AblationConfig, ProfilingConfig
 
 
 def test_profiling_config_is_frozen(tmp_path: Path) -> None:
@@ -37,15 +37,3 @@ def test_ablation_config_is_frozen(tmp_path: Path) -> None:
     )
     with pytest.raises(FrozenInstanceError):
         config.sigma_thresholds = (1.0,)  # type: ignore[misc]
-
-
-def test_integer_gelu_config_is_frozen(tmp_path: Path) -> None:
-    """Assigning to any field of IntegerGELUConfig must raise FrozenInstanceError."""
-    config = IntegerGELUConfig(
-        output_dir=tmp_path,
-        device=torch.device("cpu"),
-        layer_stats_path=tmp_path / "layer_stats.json",
-        ablation_stats_path=tmp_path / "ablation_results.csv",
-    )
-    with pytest.raises(FrozenInstanceError):
-        config.output_dir = tmp_path / "other"  # type: ignore[misc]

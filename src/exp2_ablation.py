@@ -29,8 +29,7 @@ Pipeline
        outlier and random conditions.
 6. Save all results to ``ablation_results.csv`` and ``entropy_deltas.csv`` via
    ``ablation.save_ablation_results`` and ``ablation.save_entropy_deltas``.
-7. Generate accuracy-vs-threshold and per-layer %-zeroed plots via
-   ``plotting.*``.
+   Plots are generated offline via ``scripts/regenerate_plots.py``.
 
 Statistical notes
 -----------------
@@ -67,7 +66,6 @@ from src.ablation import (
 from src.config import AblationConfig
 from src.data_loader import build_val_loader
 from src.model import evaluate_accuracy, load_vit
-from src.plotting import plot_accuracy_vs_threshold, plot_pct_zeroed_per_layer
 from src.profiler import LayerStats, load_profiling_result
 from src.utils import ensure_dir
 
@@ -110,6 +108,7 @@ def _build_layer_results(
     top5: float,
     is_random: bool,
     granularity: str = "global",
+    ablation_mode: str = "outlier",
 ) -> list[AblationResult]:
     """Build AblationResult records from accumulated per-layer statistics.
 
@@ -137,6 +136,9 @@ def _build_layer_results(
         Whether this is the random control condition.
     granularity:
         Zeroing granularity (``"global"`` or ``"per_channel"``).
+    ablation_mode:
+        Per-channel ablation variant (``"outlier"``, ``"mean_only"``, or
+        ``"var_only"``).  Ignored when ``granularity == "global"``.
 
     Returns
     -------
@@ -184,6 +186,7 @@ def _build_layer_results(
             baseline_top5=baseline_top5,
             is_random=is_random,
             granularity=granularity,
+            ablation_mode=ablation_mode,
             cls_entropy=cls_entropy,
             patch_entropy=patch_entropy,
             baseline_cls_entropy=baseline_cls,
@@ -196,9 +199,9 @@ def _build_layer_results(
 def run(config: AblationConfig) -> None:
     """Execute the Phase 2 ablation pipeline end-to-end.
 
-    All artefacts (``ablation_results.csv``, ``entropy_deltas.csv``, and
-    plot PNGs) are written under ``config.output_dir``, which is created if
-    it does not exist.
+    Saves ``ablation_results.csv`` and ``entropy_deltas.csv`` to
+    ``config.output_dir``.  All plots are generated offline via
+    ``scripts/regenerate_plots.py``.
 
     Parameters
     ----------
@@ -273,6 +276,8 @@ def run(config: AblationConfig) -> None:
                 logits, batch_pct, batch_entropy = zero_outliers_in_trace(
                     wrapped, images, site, k, layer_stats,
                     per_channel=is_per_channel,
+                    ablation_mode=config.ablation_mode,
+                    layer_range=config.layer_range,
                 )
 
                 for sid, pct in batch_pct.items():
@@ -332,6 +337,7 @@ def run(config: AblationConfig) -> None:
                 out_top1, out_top5,
                 is_random=False,
                 granularity=config.granularity,
+                ablation_mode=config.ablation_mode,
             ))
 
             # --- Record random control results ---
@@ -351,6 +357,7 @@ def run(config: AblationConfig) -> None:
                     rnd_top1, rnd_top5,
                     is_random=True,
                     granularity=config.granularity,
+                    ablation_mode=config.ablation_mode,
                 ))
 
     # 6. Save results.
@@ -361,27 +368,8 @@ def run(config: AblationConfig) -> None:
     entropy_path = config.output_dir / "entropy_deltas.csv"
     save_entropy_deltas(all_results, entropy_path)
 
-    # 7. Generate plots (outlier results only; random control plotted separately).
-    for site in sites:
-        site_results = [r for r in all_results if r.site == site and not r.is_random]
-        if not site_results:
-            continue
-        plot_accuracy_vs_threshold(
-            site_results,
-            config.output_dir / f"accuracy_vs_threshold_{site}.png",
-        )
-        for k in config.sigma_thresholds:
-            plot_pct_zeroed_per_layer(
-                site_results, k,
-                config.output_dir / f"pct_zeroed_{site}_k{k:.1f}.png",
-            )
-
-        # Random control comparison plot.
-        random_results = [r for r in all_results if r.site == site and r.is_random]
-        if random_results:
-            plot_accuracy_vs_threshold(
-                random_results,
-                config.output_dir / f"accuracy_vs_threshold_{site}_random.png",
-            )
-
-    logger.info("Phase 2 complete. Outputs in %s", config.output_dir)
+    logger.info(
+        "Phase 2 complete.  Data saved to %s.  "
+        "Run 'python scripts/regenerate_plots.py --phase2-csv %s --output-dir %s' for plots.",
+        config.output_dir, csv_path, config.output_dir,
+    )

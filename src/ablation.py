@@ -99,34 +99,15 @@ class AblationResult:
     """Whether this result used random (not outlier-threshold) zeroing."""
     granularity: str = "global"
     """Zeroing granularity: ``"global"`` or ``"per_channel"``."""
+    ablation_mode: str = "outlier"
+    """Ablation variant for per-channel mode: ``"outlier"``, ``"mean_only"``,
+    or ``"var_only"``.  Ignored in global granularity mode."""
     cls_entropy: list[float] = field(default_factory=list)
     patch_entropy: list[float] = field(default_factory=list)
     baseline_cls_entropy: list[float] = field(default_factory=list)
     baseline_patch_entropy: list[float] = field(default_factory=list)
 
 
-def compute_pct_zeroed(tensor: torch.Tensor, threshold: float) -> float:
-    """Compute the percentage of tensor elements whose absolute value exceeds ``threshold``.
-
-    This is a pure function with no side effects.
-
-    Parameters
-    ----------
-    tensor:
-        Input activation tensor (any shape).
-    threshold:
-        Absolute value cutoff.
-
-    Returns
-    -------
-    float
-        Percentage in the range ``[0, 100]`` of elements satisfying
-        ``|x| > threshold``.
-    """
-    if tensor.numel() == 0:
-        return 0.0
-    count = (tensor.abs() > threshold).sum().item()
-    return 100.0 * count / tensor.numel()
 
 
 def compute_entropy_delta(
@@ -157,6 +138,13 @@ def compute_entropy_delta(
     """
     if not ablated_cls or not baseline_cls:
         return {"mean_cls_delta": 0.0, "mean_patch_delta": 0.0}
+
+    assert len(ablated_cls) == len(baseline_cls), (
+        f"CLS entropy length mismatch: ablated={len(ablated_cls)}, baseline={len(baseline_cls)}"
+    )
+    assert len(ablated_patch) == len(baseline_patch), (
+        f"Patch entropy length mismatch: ablated={len(ablated_patch)}, baseline={len(baseline_patch)}"
+    )
 
     cls_deltas = [a - b for a, b in zip(ablated_cls, baseline_cls)]
     patch_deltas = [a - b for a, b in zip(ablated_patch, baseline_patch)]
@@ -228,7 +216,7 @@ def _build_zeroing_mask(
     tensor: torch.Tensor,
     sigma_k: float,
     sigma: float,
-    mean: float = 0.0,
+    mean: float,
 ) -> torch.Tensor:
     """Build a boolean mask where ``True`` means *keep* (not an outlier).
 
@@ -250,8 +238,7 @@ def _build_zeroing_mask(
     sigma:
         Per-layer population standard deviation from Phase 1.
     mean:
-        Per-layer population mean from Phase 1.  Default 0.0 for backward
-        compatibility; should always be provided from ``layer_stats``.
+        Per-layer population mean from Phase 1.
 
     Returns
     -------
@@ -317,6 +304,8 @@ def zero_outliers_in_trace(
     random_fractions: dict[str, float] | None = None,
     random_seed: int | None = None,
     per_channel: bool = False,
+    ablation_mode: str = "outlier",
+    layer_range: tuple[int, int] | None = None,
 ) -> tuple[torch.Tensor, dict[str, float], dict[str, dict[str, list[float]]]]:
     """Run one forward pass with outlier zeroing at the specified site.
 
@@ -383,16 +372,20 @@ def zero_outliers_in_trace(
     pct_zeroed: dict[str, float] = {}
     entropy_data: dict[str, dict[str, list[float]]] = {}
 
+    start_blk, end_blk = layer_range if layer_range is not None else (0, num_blocks - 1)
+
     with torch.no_grad():
         with wrapped_model.trace(input_batch):
             for i in range(num_blocks):
+                if i < start_blk or i > end_blk:
+                    continue
                 block = wrapped_model.blocks[i]
 
                 if site == "pre_gelu":
                     _intervene_pre_gelu(
                         block, i, sigma_k, layer_stats, pct_zeroed,
                         random_fractions=random_fractions, random_seed=random_seed,
-                        per_channel=per_channel,
+                        per_channel=per_channel, ablation_mode=ablation_mode,
                     )
                 elif site == "residual_stream":
                     _intervene_residual_stream(
@@ -429,6 +422,7 @@ def _intervene_pre_gelu(
     random_fractions: dict[str, float] | None = None,
     random_seed: int | None = None,
     per_channel: bool = False,
+    ablation_mode: str = "outlier",
 ) -> None:
     """Zero pre-GELU outliers for a single encoder block.
 
@@ -486,9 +480,22 @@ def _intervene_pre_gelu(
                 return
             mean = stats.mean
             mask = _build_zeroing_mask(tensor, sigma_k, sigma, mean)
+        elif ablation_mode == "mean_only":
+            # Per-channel μ_c, global σ
+            d_ch = len(stats.per_channel_std)
+            mask = _build_per_channel_zeroing_mask(
+                tensor, sigma_k, [stats.std] * d_ch,
+                stats.per_channel_mean, device=tensor.device,
+            )
+        elif ablation_mode == "var_only":
+            # Global μ, per-channel σ_c
+            d_ch = len(stats.per_channel_std)
+            mask = _build_per_channel_zeroing_mask(
+                tensor, sigma_k, stats.per_channel_std,
+                [stats.mean] * d_ch, device=tensor.device,
+            )
         else:
-            # Determine device from the tensor proxy's device attribute.
-            # Inside an nnsight trace, tensor.device returns the concrete device.
+            # "outlier" mode: full per-channel μ_c and σ_c
             mask = _build_per_channel_zeroing_mask(
                 tensor, sigma_k, stats.per_channel_std, stats.per_channel_mean,
                 device=tensor.device,
@@ -689,6 +696,7 @@ def save_ablation_results(results: list[AblationResult], path: Path) -> None:
         "site", "sigma_threshold", "site_identifier",
         "pct_zeroed", "top1_accuracy", "top5_accuracy",
         "baseline_top1", "baseline_top5", "is_random", "granularity",
+        "ablation_mode",
         "cls_entropy", "patch_entropy",
         "baseline_cls_entropy", "baseline_patch_entropy",
     ]
@@ -708,6 +716,7 @@ def save_ablation_results(results: list[AblationResult], path: Path) -> None:
                 "baseline_top5": r.baseline_top5,
                 "is_random": r.is_random,
                 "granularity": r.granularity,
+                "ablation_mode": r.ablation_mode,
                 "cls_entropy": json.dumps(r.cls_entropy),
                 "patch_entropy": json.dumps(r.patch_entropy),
                 "baseline_cls_entropy": json.dumps(r.baseline_cls_entropy),

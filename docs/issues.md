@@ -260,8 +260,9 @@ Changes applied:
   added documenting the zero-centered bug and its resolution.
 
 **Note:** This invalidates any previously collected profiling data where
-``skip_outlier_recount=True`` was used.  Re-run Phase 1 profiling to
-regenerate results with the corrected Pass 1 outlier definition.
+``approximate_outliers=True`` (formerly ``--skip-outlier-recount``) was used.
+Re-run Phase 1 profiling to regenerate results with the corrected Pass 1
+outlier definition.
 
 **References**
 - Wei et al. (2022), "Outlier Suppression," NeurIPS 2022 (Spotlight),
@@ -1259,3 +1260,43 @@ accuracy at k=3 (47.00% vs 43.24%).  At k≥4 the difference vanishes.
 | T-022 | MEDIUM | ✅ Closed (2026-08-01) | Class imbalance in subset mode when shuffle=False |
 | T-023 | MEDIUM | ✅ Closed (2026-08-02) | Per-channel mean not serialized in Phase 1 profiling output |
 | T-024 | MEDIUM | ✅ Closed (2026-08-02) | Per-channel ablation not implemented |
+| T-025 | INFO | ✅ Closed (2026-08-03) | Phase 3 (integer GELU) deferred — code deleted, focus shifted to Phase 2 expansion |
+| T-026 | MEDIUM | ✅ Closed (2026-08-03) | fc1.weight ⊙ γ effective gain analysis: r=+0.32 mean, +0.65–0.77 in late blocks |
+
+**Severity:** MEDIUM  
+**Status:** ✅ Closed (2026-08-03)  
+**Category:** Analysis  
+**Source:** Phase 2 expansion, RQ1 follow-up
+
+**Resolution:** Implemented ``scripts/analyze_effective_gain.py`` which computes
+``‖fc1.weight[c, :] ⊙ γ‖`` per channel (both 3072-dim) and correlates with
+``per_channel_std``.  Results: mean r = +0.3241 across all blocks, with strong
+correlation in late blocks (r = +0.65 to +0.77 for blocks 8–11).  This confirms
+the SmoothQuant hypothesis: the per-channel variance pattern is architectural,
+encoded in the interaction of fc1.weight and LN2 γ.
+
+**Affected files**
+- ``scripts/analyze_effective_gain.py`` (new)
+- ``docs/phase2-expansion.md`` — RQ1 follow-up updated
+- ``docs/NEXT-STEPS.md`` — effective gain analysis section added
+| T-027 | MEDIUM | 🔲 Open | Per-channel mean-only and var-only ablation experiments
+| T-028 | MEDIUM | 🔲 Open | Layer-group per-channel ablation experiments
+| T-029 | MEDIUM | 🔲 Open | Multi-seed per-channel variance estimation
+| T-030 | LOW | 🔲 Open | Finer k-sweep for per-channel crossover point
+| T-031 | LOW | ✅ Closed (2026-08-03) | Bootstrap CI: k=3 delta 95% CI [3.12%, 4.36%] — significant
+| T-032 | LOW | ✅ Closed (2026-08-03) | Effective channels preserved sufficiency analysis
+| T-033 | LOW | ✅ Closed (2026-08-03) | Degradation per sparsity: per-channel 1.89× more efficient at k=3 |
+| T-034 | MEDIUM | ✅ Closed (2026-08-03) | `compute_pct_zeroed` was zero-centered; fixed to mean-centered |x−μ| > threshold |
+| T-035 | LOW | ✅ Closed (2026-08-03) | `requirements.txt` pinned nnsight==0.2.21 (environment needs ≥0.7); file deleted |
+| T-036 | LOW | ✅ Closed (2026-08-03) | Deprecated `attn_profile_*` fields removed from `AblationConfig` |
+| T-037 | LOW | ✅ Closed (2026-08-03) | `--skip-outlier-recount` renamed to `--approximate-outliers` for clarity |
+| T-038 | LOW | ✅ Closed (2026-08-03) | `compute_entropy_delta` length assertion added |
+| T-039 | MEDIUM | ✅ Closed (2026-08-03) | Plotting decoupled from experiment runs — all plots regenerable from data |
+| T-040 | MEDIUM | ✅ Closed (2026-08-03) | 10 new Phase 1 + Phase 2 workhorse plot functions in `src/plotting.py` |
+| T-041 | MEDIUM | ✅ Closed (2026-08-03) | Poster-quality plotting: `src/plotting_poster.py` + `scripts/generate_poster_plots.py` |
+| T-042 | LOW | ✅ Closed (2026-08-03) | Post-hoc analysis scripts migrated to use `src/plotting.py` (no inline matplotlib) |
+| T-043 | LOW | ✅ Closed (2026-08-03) | `_build_per_channel_zeroing_mask` unit tests added (7 fast) |
+| T-044 | MEDIUM | ✅ Closed (2026-08-03) | Ablation mode (mean_only/var_only/outlier) slow tests added (6 slow) |
+| T-045 | LOW | ✅ Closed (2026-08-03) | Poster plot tests added (12 fast, `tests/test_plotting_poster.py`) |
+| T-046 | LOW | ✅ Closed (2026-08-03) | `conftest.py` stale `hooks.LayerStats` reference removed |
+| T-047 | INFO | ✅ Closed (2026-08-03) | Documentation updated: README, NEXT-STEPS, issues — all plotting commands |

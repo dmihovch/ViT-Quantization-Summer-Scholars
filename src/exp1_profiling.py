@@ -35,7 +35,7 @@ import dataclasses
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -47,8 +47,6 @@ from src.data_loader import build_val_loader
 from src.model import load_vit
 from src.plotting import (
     plot_activation_histogram,
-    plot_attention_entropy_heatmap,
-    plot_per_channel_std_heatmap,
 )
 from src.profiler import (
     LayerStats,
@@ -70,12 +68,9 @@ logger = logging.getLogger(__name__)
 def run(config: ProfilingConfig) -> None:
     """Execute the Phase 1 profiling pipeline end-to-end.
 
-    All artefacts (``profiling_result.json``, histogram PNGs, and per-channel
-    σ heatmap) are written under ``config.output_dir / seed_{seed}``, which is
-    created if it does not exist.
-
-    Each seed (``config.seed``, ``config.seed+1``, ...) gets its own
-    subdirectory for uniform output structure regardless of ``num_seeds``.
+    Saves ``profiling_result.json``, ``summary_table.csv``, and activation
+    histograms to ``config.output_dir / seed_{seed}``.  All other plots are
+    generated offline via ``scripts/regenerate_plots.py``.
 
     Parameters
     ----------
@@ -148,7 +143,7 @@ def _run_single(
         )
 
     # 3b. Global-σ outlier recount (F2).
-    if not config.skip_outlier_recount:
+    if not config.approximate_outliers:
         logger.info("Starting outlier recount pass (global-σ fractions)...")
         with torch.no_grad():
             corrected_fractions = run_outlier_counting_pass(
@@ -162,8 +157,9 @@ def _run_single(
         logger.info("Outlier recount complete.")
     else:
         logger.warning(
-            "Skipping outlier recount pass (--skip-outlier-recount). "
-            "Outlier fractions in output are per-batch-σ approximations."
+            "Approximate outliers mode (--approximate-outliers). "
+            "Outlier fractions in output are per-batch-σ approximations — "
+            "systematically over-estimated relative to the correct global-σ definition."
         )
 
     # 4. Save profiling result.
@@ -197,7 +193,7 @@ def _run_single(
 
     result = ProfilingResult(
         stats=stats,
-        num_blocks=len(inner.blocks),
+        num_blocks=len(inner.blocks),  # type: ignore[arg-type]
         batch_shape=actual_batch_shape,
         metadata=metadata,
     )
@@ -211,11 +207,13 @@ def _run_single(
     save_summary_table(table_rows, table_path)
     logger.info("Summary table (%d rows) written to %s", len(table_rows), table_path)
 
-    # 5. Generate plots.
+    # 5. Generate activation histograms (only plot that requires live model).
     _plot_histograms(wrapped, transform, config, output_dir)
-    _plot_per_channel_heatmap(stats, output_dir)
-    _plot_attention_entropy_heatmaps(stats, output_dir)
-    logger.info("Seed complete. Outputs in %s", output_dir)
+
+    logger.info(
+        "Seed complete.  Data saved to %s.  Run regenerate_plots.py for all other plots.",
+        output_dir,
+    )
 
 
 def _plot_histograms(
@@ -268,87 +266,3 @@ def _plot_histograms(
             log_scale=True,
         )
     logger.info("Wrote %d real-activation histogram PNGs to %s", len(raw_tensors), hist_dir)
-
-
-def _plot_per_channel_heatmap(
-    stats: dict[SiteId, LayerStats], output_dir: Path,
-) -> None:
-    """Generate per-channel σ heatmap for sites that track channel statistics.
-
-    Only includes sites where ``per_channel_std`` is not None (pre_gelu and
-    post_layernorm_1/2).  Sites with different channel dimensions (e.g.
-    pre_gelu at 3072 vs layernorm at 768) are plotted in separate heatmaps.
-
-    Args:
-        stats: Mapping from site_identifier to finalized global LayerStats.
-        output_dir: Directory where heatmap PNGs are written.
-    """
-    per_channel: dict[str, list[float]] = {
-        key: s.per_channel_std
-        for key, s in stats.items()
-        if s.per_channel_std is not None
-    }
-    if not per_channel:
-        logger.warning(
-            "No per_channel_std data found in stats. "
-            "Ensure _register_stat_saves is called with track_per_channel=True "
-            "for pre_gelu and post_layernorm sites (Step 4b-iii)."
-        )
-        return
-
-    # Group sites by channel dimension so each heatmap has homogeneous columns.
-    by_dim: dict[int, dict[str, list[float]]] = {}
-    for key, stds in per_channel.items():
-        d = len(stds)
-        by_dim.setdefault(d, {})[key] = stds
-
-    for d, group in sorted(by_dim.items()):
-        suffix = f"_d{d}" if len(by_dim) > 1 else ""
-        out_path = output_dir / f"per_channel_std_heatmap{suffix}.png"
-        plot_per_channel_std_heatmap(group, out_path)
-        logger.info("Per-channel σ heatmap (D=%d) written to %s", d, out_path)
-
-
-def _plot_attention_entropy_heatmaps(
-    stats: dict[SiteId, LayerStats],
-    output_dir: Path,
-) -> None:
-    """Generate attention entropy heatmaps for CLS and patch queries.
-
-    Produces two separate heatmaps:
-    - ``attention_entropy_cls_heatmap.png``: CLS query entropy per head.
-    - ``attention_entropy_patches_heatmap.png``: patch query mean entropy per head.
-
-    The separation follows the literature convention (Maisonnave et al. 2025;
-    Mali 2025; Lee & Kim 2025) of treating CLS-to-patch attention as a
-    distinct distribution from patch-to-patch attention.
-
-    Args:
-        stats: Mapping from site_identifier to finalized global LayerStats.
-        output_dir: Directory where heatmap PNGs are written.
-    """
-    cls_entropies: dict[str, list[float]] = {
-        key: s.attention_entropy_cls
-        for key, s in stats.items()
-        if s.attention_entropy_cls is not None
-    }
-    patch_entropies: dict[str, list[float]] = {
-        key: s.attention_entropy_patches
-        for key, s in stats.items()
-        if s.attention_entropy_patches is not None
-    }
-    if not cls_entropies and not patch_entropies:
-        logger.warning("No attention entropy data found in stats.")
-        return
-    if cls_entropies:
-        plot_attention_entropy_heatmap(
-            cls_entropies,
-            output_dir / "attention_entropy_cls_heatmap.png",
-            title="CLS query attention entropy per head (nats)",
-        )
-    if patch_entropies:
-        plot_attention_entropy_heatmap(
-            patch_entropies,
-            output_dir / "attention_entropy_patches_heatmap.png",
-            title="Patch query mean attention entropy per head (nats)",
-        )

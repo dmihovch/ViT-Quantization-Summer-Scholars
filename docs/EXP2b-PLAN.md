@@ -1,8 +1,16 @@
 # Phase 2b: Per-Channel Ablation — Implementation Plan
 
 > **Created:** 2026-08-01
-> **Status:** 🔲 Planning — not yet implemented
+> **Status:** ✅ Implemented 2026-08-02 — see `docs/phase2-expansion.md` for results
 > **Depends on:** Phase 1 profiling complete (✅), Phase 2 population ablation complete (✅)
+>
+> **Note:** The per-channel ablation described in this plan was implemented as part
+> of the Phase 2 expansion.  This document is retained as a historical planning
+> artifact.  The implementation differs from the plan in two key respects:
+> 1. Per-channel ablation was applied to `pre_gelu` (not the planned `post_layernorm_2`),
+>    because existing Phase 1 data provided per-channel stats for pre_gelu.
+> 2. The `zeroing_mode` field was implemented as `granularity` + `ablation_mode`
+>    on `AblationConfig` rather than as a field on `AblationResult`.
 
 ---
 

@@ -77,6 +77,21 @@ def _parse_args() -> argparse.Namespace:
         choices=["global", "per_channel"],
         help="Zeroing granularity: 'global' (per-layer μ,σ) or 'per_channel' (per-channel μ_c,σ_c for pre_gelu only).",
     )
+    parser.add_argument(
+        "--ablation-mode",
+        type=str,
+        default="outlier",
+        choices=["outlier", "mean_only", "var_only"],
+        help="Per-channel ablation variant (only with --granularity per_channel): 'outlier' (full per-channel), 'mean_only' (per-channel μ_c + global σ), 'var_only' (global μ + per-channel σ_c).",
+    )
+    parser.add_argument(
+        "--layer-range",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("START", "END"),
+        help="Only ablate blocks in this inclusive range (0-based).  E.g. '--layer-range 10 10' for block 10 only.",
+    )
     return parser.parse_args()
 
 
@@ -89,6 +104,10 @@ def main() -> None:
     args = _parse_args()
     seed_everything(args.seed)
 
+    layer_range: tuple[int, int] | None = None
+    if args.layer_range is not None:
+        layer_range = (args.layer_range[0], args.layer_range[1])
+
     config = AblationConfig(
         data_dir=args.data_dir,
         output_dir=args.output_dir,
@@ -99,6 +118,8 @@ def main() -> None:
         layer_stats_path=args.layer_stats,
         seed=args.seed,
         granularity=args.granularity,
+        ablation_mode=args.ablation_mode,
+        layer_range=layer_range,
     )
     run(config)
 

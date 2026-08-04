@@ -463,12 +463,12 @@ def merge_batch_stats(
             acc.entropy_cls_count += 1
 
     if batch_stats.attention_entropy_patches is not None:
-        H = len(batch_stats.attention_entropy_patches)
+        n_heads = len(batch_stats.attention_entropy_patches)
         if acc.entropy_patch_sum is None:
             acc.entropy_patch_sum = list(batch_stats.attention_entropy_patches)
             acc.entropy_patch_count = patch_token_count
         else:
-            for h in range(H):
+            for h in range(n_heads):
                 acc.entropy_patch_sum[h] += batch_stats.attention_entropy_patches[h]
             acc.entropy_patch_count += patch_token_count
 
@@ -1318,7 +1318,6 @@ def profile_vit(
     D: int = inner_model.embed_dim
     attn0 = inner_model.blocks[0].attn
     num_heads: int = attn0.num_heads
-    head_dim: int = attn0.head_dim
     D_mlp: int = inner_model.blocks[0].mlp.fc1.out_features
 
     # Pre-compute per-site element counts (scalars, const for all blocks).
@@ -1554,10 +1553,6 @@ def histogram_profile_vit(
             f"Wrapped model {type(inner_model).__name__} has no 'blocks' attribute. "
             "histogram_profile_vit expects a timm VisionTransformer."
         )
-
-    N: int = inner_model.patch_embed.num_patches + 1
-    D: int = inner_model.embed_dim
-    D_mlp: int = inner_model.blocks[0].mlp.fc1.out_features
 
     raw: dict[SiteId, Any] = {}
 

@@ -183,15 +183,16 @@ class AblationResult:
     baseline_patch_entropy: list[float] # Phase 1 baseline [H]
 ```
 
-### 3.2 `compute_pct_zeroed(tensor, threshold) -> float`
+### 3.2 `compute_pct_zeroed` — REMOVED
 
-Pure function. Returns percentage of elements where `|x| > threshold`.
+This function was dead code (never called in the codebase; pct_zeroed is computed
+inline in the intervention functions via ``(~mask).float().mean().item()``).
+Deleted 2026-08-03.
 
-### 3.3 `_build_zeroing_mask(tensor, sigma_k, sigma, mean=0.0) -> Tensor`
+### 3.3 `_build_zeroing_mask(tensor, sigma_k, sigma, mean) -> Tensor`
 
-Builds a boolean keep-mask where `|x − μ| ≤ k·σ`.  The `mean` parameter
-defaults to 0.0 for backward compatibility but should always be provided
-from `layer_stats`.
+Builds a boolean keep-mask where `|x − μ| ≤ k·σ`.  The `mean` parameter is
+required and must always be provided from `layer_stats`.
 
 ### 3.4 `_build_per_channel_zeroing_mask(tensor, sigma_k, per_channel_sigma, per_channel_mean, device) -> Tensor`
 
@@ -244,14 +245,7 @@ Pipeline:
 
 ## 5. Test coverage
 
-### Fast tests (30)
-- 5 `compute_pct_zeroed` tests (all-below, all-above, mixed, empty, exact-boundary)
-- 7 `_build_zeroing_mask` tests (all-kept, all-zeroed, mixed, shape, dtype, mean-centered, mean-centered-default-zero)
-- 9 `_build_random_mask` tests (zero-fraction, full-fraction, exact-count, deterministic, different-seeds, salt, shape, dtype, small-fraction-no-zeros)
-- 3 `compute_entropy_delta` tests (positive, negative, empty)
-- 4 `AblationResult` tests (construction, with-entropy, degradation, is-random)
-- 4 `save_ablation_results` tests (creates-file, empty-list, with-entropy, with-random)
-- 2 `save_entropy_deltas` tests (creates-file, no-pre_softmax)
+### Fast tests (29)
 
 ### Slow tests (13, marked `@pytest.mark.slow`)
 - 4 pre_gelu tests (logits-change, returns-pct, shape, random-mode)
@@ -357,7 +351,7 @@ Phase 1 was re-run to regenerate the JSON with this field.
 
 ## 8. Test checklist
 
-- [ ] `pytest -m "not slow" tests/test_ablation.py` — 30 fast tests
+- [ ] `pytest -m "not slow" tests/test_ablation.py` — 29 fast tests
 - [ ] `pytest -m "slow" tests/test_ablation.py` — 13 slow tests
 - [ ] End-to-end smoke test: `python run_phase2_ablation.py --data-dir data --num-images 1024 --sigma-thresholds 3.0 6.0`
 - [ ] Full run: `python run_phase2_ablation.py --data-dir data --num-images 50000`

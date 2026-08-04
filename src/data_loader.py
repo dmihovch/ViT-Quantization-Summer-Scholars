@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 import torch
 import torchvision.datasets as datasets
+from PIL import Image
 from torch.utils.data import DataLoader, Subset
 
 from src.exceptions import DataDirectoryError
@@ -23,12 +24,12 @@ _NUM_WORKERS: int = 4
 
 def build_val_loader(
     data_dir: Path,
-    transform: Callable[[object], torch.Tensor],
+    transform: Callable[[Image.Image], torch.Tensor],
     batch_size: int,
     num_images: int | None,
     device: torch.device,
     shuffle: bool | None = None,
-) -> DataLoader:
+) -> DataLoader[tuple[torch.Tensor, int]]:
     """Build a DataLoader over the ImageNet validation split.
 
     Parameters
@@ -84,7 +85,6 @@ def build_val_loader(
         )
 
     full_size: int = len(dataset)
-    is_subset: bool = num_images is not None and num_images < full_size
 
     # Resolve effective shuffle before subsetting so the auto-selected
     # value controls both random sampling and DataLoader shuffling.

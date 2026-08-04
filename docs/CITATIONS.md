@@ -283,47 +283,13 @@ Each entry includes:
 
 ---
 
-## Phase 2/3 references (ablation, integer GELU)
+## Phase 2 references (ablation, per-channel)
 
-### Kim et al. 2021 — I-BERT
-
-- **Short key:** `Kim et al. 2021`
-- **Full citation:** S. Kim, A. Gholami, Z. Yao, M. W. Mahoney, and
-  K. Keutzer, "I-BERT: Integer-only BERT Quantization," in *Proc. ICML*
-  (Oral), 2021. arXiv:2101.01321.
-- **🔗 Link:** https://arxiv.org/abs/2101.01321
-- **Used in:**
-  - `docs/NEXT-STEPS.md` — §Before Step 8: primary reference for
-    integer-only GELU (polynomial approximation).
-- **Verification:** ✅ Published at ICML 2021 (Oral).
-- **☐ Researcher sign-off: Not yet reviewed**
-
-### I-ViT — Integer-only ViT quantization
-
-- **Short key:** `I-ViT`
-- **Full citation:** Z. Li and Q. Gu, "I-ViT: Integer-only Quantization
-  for Efficient Vision Transformer Inference," in *Proc. ICCV*, 2023.
-  arXiv:2207.01405.
-- **🔗 Link:** https://arxiv.org/abs/2207.01405
-- **Used in:**
-  - `docs/NEXT-STEPS.md` — §Before Step 9: the ShiftGELU
-    mechanism.
-- **Verification:** ✅ Published at ICCV 2023.
-- **☐ Researcher sign-off: Not yet reviewed**
-
-### Gholami et al. 2022 — Quantization survey
-
-- **Short key:** `Gholami et al. 2022`
-- **Full citation:** A. Gholami, S. Kim, Z. Dong, Z. Yao, M. W. Mahoney,
-  and K. Keutzer, "A Survey of Quantization Methods for Efficient Neural
-  Network Inference," in *Low-Power Computer Vision*, Chapman and Hall/CRC,
-  pp. 291–326, 2022. arXiv:2103.13630.
-- **🔗 Link:** https://arxiv.org/abs/2103.13630
-- **Used in:**
-  - `docs/NEXT-STEPS.md` — §Before Step 8: the canonical quantization
-    survey.
-- **Verification:** ✅ Published as a book chapter; arXiv:2103.13630.
-- **☐ Researcher sign-off: Not yet reviewed**
+Phase 3 (integer GELU LUTs) was entirely deleted on 2026-08-03.  The
+quantization literature references above (Bondarenko 2021, Dettmers 2022,
+Xiao 2023, Wei 2022) provide the foundational context for per-channel
+ablation.  Former Phase 3 citations (Kim et al. 2021, I-ViT, Gholami 2022)
+have been removed.
 
 ---
 

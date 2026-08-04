@@ -1,6 +1,6 @@
 # Next Steps: Implementation Roadmap
 
-> **Last updated:** 2026-08-02 — Phase 1 per-channel mean added + Phase 2 per-channel ablation complete.
+> **Last updated:** 2026-08-03 — Phase 3 deleted; Phase 2 expansion implemented; poster plots added; fc1·γ effective gain analysis complete.
 
 ---
 
@@ -11,13 +11,26 @@
   encoder block.  ``profiling_result.json`` includes global μ, σ, kurtosis,
   outlier fractions, per-channel σ and μ, attention entropy, LayerNorm γ/β, LN2
   amplification ratio, max/min, and ``RunMetadata``.
-- **Phase 2 (ablation):** ✅ Complete.  Outlier zeroing uses
+
+- **Phase 2 (ablation):** ✅ Complete; expansion ongoing.  Outlier zeroing uses
   mean-centered threshold (``|x − μ| > k·σ``) consistent with Phase 1.
-  Random-zeroing control condition included.  Per-channel ablation
-  (``--granularity per_channel``) tests whether outlier concentration in
-  high-variance channels drives accuracy degradation.  Subset evaluation uses
-  class-balanced sampling.  Entropy deltas computed against Phase 1 baselines.
-- **Phase 3 (integer GELU):** 🔲 Not yet implemented.
+  Random-zeroing control condition included.  Per-channel ablation with
+  ``--granularity per_channel``, ``--ablation-mode {outlier,mean_only,var_only}``,
+  and ``--layer-range START END`` for layer-group isolation.
+
+- **Phase 3 (integer GELU):** ❌ Deleted 2026-08-03.  Focus shifted to Phase 2
+  expansion.  See `docs/phase2-expansion.md`.
+
+- **Plotting:** ✅ Complete.  Two-tier architecture:
+  - `src/plotting.py` — workhorse plots for research iteration (~17 functions).
+  - `src/plotting_poster.py` — poster-quality plots for presentations (~7 functions).
+  - `scripts/regenerate_plots.py` — regenerates all workhorse plots from data files.
+  - `scripts/generate_poster_plots.py` — generates all poster plots from data files.
+  - `scripts/analyze_ablation_results.py` — post-hoc analysis with bootstrap CIs.
+  - `scripts/analyze_layernorm_gamma.py` — LN γ correlation analysis.
+  - `scripts/analyze_effective_gain.py` — fc1.weight ⊙ γ effective gain analysis.
+
+- **Tests:** 252 total (192 fast + 60 slow, model-dependent).  All pass.
 
 ### Key Phase 2 results (50k images)
 
@@ -31,27 +44,23 @@ Baseline: 85.03%.  Per-channel thresholds preserve significantly more accuracy
 at aggressive thresholds (k=3), suggesting per-channel quantization of the MLP
 hidden dimension would reduce the accuracy penalty of INT8 range clipping.
 
-### Running tests
+### Effective gain analysis (2026-08-03)
 
-```bash
-# Fast tests only
-pytest -m "not slow" tests/
+Pearson r(LN2 γ, pre-GELU σ_c) ≈ 0.0003 — no correlation (different dimensionalities).
+The proper analysis computes ``‖fc1.weight[c, :] ⊙ γ‖`` per channel (both 3072-dim):
 
-# All tests (requires GPU + nnsight)
-pytest tests/
+| Block | r(gain, σ_c) |
+|-------|-------------|
+| 0–7   | −0.13 to +0.21 |
+| 8     | **+0.7550** |
+| 9     | **+0.7747** |
+| 10    | **+0.6496** |
+| 11    | **+0.7674** |
 
-# Ablation-specific
-pytest tests/test_ablation.py -v
-```
-
----
-
-## Architecture: profiling modules
-
-### `src/profiler.py` — nnsight pipeline  **Primary for all phases**
-
-**Status:** ✅ Complete.  Single-pass ``profile_vit`` + multi-batch
-``run_profiling_dataset_pass`` + two-pass ``run_outlier_counting_pass``.
+Mean r across all blocks: **+0.3241**.  The strong correlation in late blocks
+(8–11) confirms the SmoothQuant hypothesis: the per-channel variance pattern is
+architectural — encoded in the interaction of fc1.weight and LN2 γ.  See
+`scripts/analyze_effective_gain.py`.
 
 ---
 
@@ -79,23 +88,103 @@ pytest tests/test_ablation.py -v
   - Per-channel mode: pre_gelu only, no random control
   - Phase 1 re-run with ``--all --seed 42``
   - Full 50k-image global + per-channel ablation runs complete
-### Step 9: `src/integer_gelu.py` — 🔲
-### Step 10: `src/exp3_integer_gelu.py` — 🔲
+### Step 8c: Phase 2 expansion (2026-08-03) — ✅ DONE
+  - Phase 3 deleted (code, tests, config, plotting references)
+  - ``--ablation-mode {outlier,mean_only,var_only}`` CLI flag
+  - ``--layer-range START END`` CLI flag
+  - ``scripts/analyze_layernorm_gamma.py`` (LN γ correlation analysis)
+  - ``docs/phase2-expansion.md`` (research questions & experiment plan)
+### Step 8d: Plotting architecture (2026-08-03) — ✅ DONE
+  - ``--approximate-outliers`` renamed from ``--skip-outlier-recount`` for clarity
+  - Workhorse plotting decoupled from experiment runs
+  - ``src/plotting.py`` expanded: 10 new Phase 1 + Phase 2 plot functions
+  - ``scripts/regenerate_plots.py`` rewritten as universal workhorse regenerator
+  - ``scripts/analyze_ablation_results.py`` uses ``src/plotting.py`` for all figures
+  - Poster-quality plotting: ``src/plotting_poster.py`` + ``scripts/generate_poster_plots.py``
+  - 7 poster plot types: activation overlay, site grid, ridgeline, streamgraph, Hinton,
+    accuracy-vs-sparsity, ablation waterfall
+  - 252 total test functions (192 fast + 60 slow, model-dependent).  All pass.
+### Step 8e: Phase 2 expansion experiments — 🔲
+  - mean_only + var_only at k=3 (RQ2)
+  - Layer-group ablation at k=3 (RQ3)
+  - Multi-seed variance at k=3 (RQ4)
+  - Finer k-sweep [2.5..3.5] (RQ5)
+
+---
+
+## Quick Reference — Plotting Commands
+
+### Workhorse plots
+```sh
+# Phase 1
+python scripts/regenerate_plots.py \
+    --phase1-json outputs/phase1-profiling/seed_42/profiling_result.json \
+    --output-dir outputs/phase1-profiling/seed_42/
+
+# Phase 2 single run
+python scripts/regenerate_plots.py \
+    --phase2-csv outputs/phase2-ablation/ablation_results.csv \
+    --output-dir outputs/phase2-ablation/
+
+# Phase 2 comparison
+python scripts/regenerate_plots.py \
+    --phase2-csv-a outputs/phase2-ablation-global-50k/ablation_results.csv \
+    --phase2-csv-b outputs/phase2-ablation-per-channel-50k/ablation_results.csv \
+    --output-dir outputs/phase2-comparison/
+```
+
+### Poster plots
+```sh
+# Phase 1 + Phase 2
+python scripts/generate_poster_plots.py \
+    --phase1-json outputs/phase1-profiling/seed_42/profiling_result.json \
+    --phase2-csv-a outputs/phase2-ablation-global-50k/ablation_results.csv \
+    --phase2-csv-b outputs/phase2-ablation-per-channel-50k/ablation_results.csv \
+    --output-dir outputs/poster-plots
+
+# Full suite with activation overlay (needs GPU)
+python scripts/generate_poster_plots.py \
+    --phase1-json outputs/phase1-profiling/seed_42/profiling_result.json \
+    --phase2-csv-a outputs/phase2-ablation-global-50k/ablation_results.csv \
+    --phase2-csv-b outputs/phase2-ablation-per-channel-50k/ablation_results.csv \
+    --output-dir outputs/poster-plots \
+    --histogram-data-dir data
+```
+
+### Post-hoc analysis
+```sh
+# Bootstrap CI + effective channels + degradation efficiency
+python scripts/analyze_ablation_results.py \
+    --csv-a outputs/phase2-ablation-global-50k/ablation_results.csv \
+    --csv-b outputs/phase2-ablation-per-channel-50k/ablation_results.csv \
+    --output-dir outputs/ablation-analysis
+
+# LN γ correlation
+python scripts/analyze_layernorm_gamma.py \
+    --layer-stats outputs/phase1-profiling/seed_42/profiling_result.json \
+    --output-dir outputs/layernorm-gamma-analysis
+```
 
 ---
 
 ## What to Read (and When)
 
-### Before Step 9 (integer GELU)
-- Kim et al. (2021), "I-BERT," ICML 2021 — integer-only GELU via polynomial approx.
-- Li & Gu (2023), "I-ViT," ICCV 2023 — ShiftGELU for ViT.
-- `src/profiler.py` — ``LayerStats`` fields available for quantization scale derivation.
+### Before running experiments
+- `docs/EXP1-IMPL.md` — Phase 1 profiling specification (statistical conventions, site naming).
+- `docs/EXP2-IMPL.md` — Phase 2 ablation specification (intervention logic, threshold definitions).
+- `docs/phase2-expansion.md` — research questions and experiment plan for per-channel deep dive.
 
-### Background (read anytime)
+### Understanding the codebase
+- `docs/NEXT-STEPS.md` — this file: implementation roadmap and current state.
+- `docs/issues.md` — open and closed tickets (T-001 through T-033).
+- `docs/MISTAKES.md` — historical wrong approaches and lessons learned.
+- `docs/CITATIONS.md` — verified bibliography with usage context.
+
+### Background reading
+- Xiao et al. (2023), "SmoothQuant," ICML 2023 — per-channel scaling and LN γ analysis.
+- Wei et al. (2022), "Outlier Suppression," NeurIPS 2022 (Spotlight) — outlier suppression.
 - Pébay (2008), SAND2008-6212 — parallel higher-moments merge.
 - Bondarenko et al. (2021), arXiv:2109.12948 — transformer quantization challenges.
 - Dettmers et al. (2022), "LLM.int8()," NeurIPS 2022 — outlier handling.
-- Wei et al. (2022), "Outlier Suppression," NeurIPS 2022 (Spotlight) — outlier suppression.
-- Xiao et al. (2023), "SmoothQuant," ICML 2023 — per-channel scaling.
 - Zhai et al. (2023), ICML, arXiv:2303.06296 — attention entropy collapse.
 - Maisonnave et al. (2025), arXiv:2508.16311 — CLS/patch entropy separation.

@@ -72,13 +72,13 @@ def _parse_args() -> argparse.Namespace:
         "Results saved to output_dir/seed_{s}/ for each seed.",
     )
     parser.add_argument(
-        "--skip-outlier-recount",
-        dest="skip_outlier_recount",
+        "--approximate-outliers",
+        dest="approximate_outliers",
         action="store_true",
         help=(
-            "Skip the second-pass global-σ outlier recount. "
-            "Outlier fractions in the output JSON will be approximate (per-batch-σ). "
-            "Use only for fast iteration, not for publishable results."
+            "Use approximate per-batch-σ outlier fractions (faster, but over-estimated). "
+            "By default, a second recount pass computes exact global-σ fractions. "
+            "Use this flag only for fast iteration, not for publishable results."
         ),
     )
     return parser.parse_args()
@@ -102,7 +102,7 @@ def main() -> None:
         device=get_device(),
         seed=args.seed,
         num_seeds=args.num_seeds,
-        skip_outlier_recount=args.skip_outlier_recount,
+        approximate_outliers=args.approximate_outliers,
     )
     run(config)
 

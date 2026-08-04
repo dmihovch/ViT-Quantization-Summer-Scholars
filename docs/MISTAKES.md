@@ -819,3 +819,31 @@ Serialized automatically via ``dataclasses.asdict``.  Phase 1 re-run with
 include all intermediate values needed for downstream consumers.  Per-channel
 standard deviation without per-channel mean is only half the picture — any
 mean-centered threshold or normalization requires both.
+
+---
+
+## 16. Phase 3 (integer GELU) was premature — deferred on 2026-08-03
+
+### 16.1 — Phase 3 was scoped as a standalone project before Phase 2 results were understood
+
+**What happened:** Phase 3 (integer GELU LUTs) was designed as the natural
+next step after Phase 1 profiling, before Phase 2 produced results.  When
+Phase 2 revealed a 3.76% per-channel benefit at k=3, the interesting scientific
+question shifted from "can we approximate GELU in integers?" to "why does
+per-channel thresholding preserve more accuracy, and what does that tell us
+about the role of outliers in ViTs?"
+
+**Why it's wrong:** Phase 3 would have answered an engineering question
+("how accurate is a 256-bin GELU LUT?") with a predictable answer ("within
+~10⁻³") that doesn't close the loop on the original motivation (end-to-end
+INT8 inference accuracy).  The per-channel result opens a more publishable
+line of questioning that Phase 3 would have delayed.
+
+**Resolution (2026-08-03):** Deleted all Phase 3 code and tests.  Shifted
+focus to Phase 2 expansion: per-channel ablation modes, layer-group ablation,
+multi-seed variance estimation, and LN γ analysis.
+
+**What to do instead:** Don't design Phase N+1 before Phase N produces results.
+The per-channel ablation was itself motivated by Phase 1 data (12× σ spread in
+block 10), so the lesson is: let the data drive the next experiment, not a
+pre-written roadmap.

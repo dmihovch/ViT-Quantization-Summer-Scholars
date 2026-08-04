@@ -77,9 +77,6 @@ def tiny_layer_stats() -> dict[str, LayerStats]:
     - ``kurtosis=1.5`` — leptokurtic (heavy-tailed)
     - ``outlier_fractions`` — small but non-zero fractions for each threshold
 
-    Keys use the ``"{layer_name}/{site}"`` format for backward compatibility
-    with the legacy hooks.LayerStats key convention.
-
     Returns:
         Mapping from ``"{layer_name}/{site}"`` to :class:`~src.profiler.LayerStats`.
     """
