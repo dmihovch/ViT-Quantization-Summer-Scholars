@@ -54,8 +54,12 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Callable
+from pathlib import Path
 
+import torch.nn as nn
 from nnsight import NNsight
+from PIL import Image
 
 from src.ablation import (
     AblationResult,
@@ -67,7 +71,7 @@ from src.config import AblationConfig
 from src.data_loader import build_val_loader
 from src.model import evaluate_accuracy, load_vit
 from src.profiler import LayerStats, load_profiling_result
-from src.utils import ensure_dir
+from src.utils import ensure_dir, seed_everything
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +110,7 @@ def _build_layer_results(
     baseline_top5: float,
     top1: float,
     top5: float,
+    seed: int,
     is_random: bool,
     granularity: str = "global",
     ablation_mode: str = "outlier",
@@ -132,6 +137,8 @@ def _build_layer_results(
         Unablated accuracy percentages.
     top1, top5:
         Accuracy percentages for this condition.
+    seed:
+        Random seed used for this run (for multi-seed aggregation).
     is_random:
         Whether this is the random control condition.
     granularity:
@@ -184,6 +191,7 @@ def _build_layer_results(
             top5_accuracy=top5,
             baseline_top1=baseline_top1,
             baseline_top5=baseline_top5,
+            seed=seed,
             is_random=is_random,
             granularity=granularity,
             ablation_mode=ablation_mode,
@@ -199,8 +207,12 @@ def _build_layer_results(
 def run(config: AblationConfig) -> None:
     """Execute the Phase 2 ablation pipeline end-to-end.
 
+    When ``config.num_seeds > 1``, the pipeline is repeated for each seed
+    ``config.seed``, ``config.seed+1``, ..., ``config.seed+num_seeds-1``.
+    Results are written to ``config.output_dir / seed_{s}/`` for each seed.
+
     Saves ``ablation_results.csv`` and ``entropy_deltas.csv`` to
-    ``config.output_dir``.  All plots are generated offline via
+    ``config.output_dir / seed_{s}/``.  All plots are generated offline via
     ``scripts/regenerate_plots.py``.
 
     Parameters
@@ -208,17 +220,62 @@ def run(config: AblationConfig) -> None:
     config:
         Fully-specified :class:`~config.AblationConfig` instance.
     """
-    # 1. Load model and wrap with NNsight.
+    # 1. Load model and wrap with NNsight (shared across all seeds).
     model, transform = load_vit(config.device)
     wrapped = NNsight(model)
 
-    # 2. Load Phase 1 stats.
+    # 2. Load Phase 1 stats (shared across all seeds).
     profiling_result = load_profiling_result(config.layer_stats_path)
     layer_stats: dict[str, LayerStats] = profiling_result.stats
     logger.info(
         "Loaded Phase 1 stats: %d sites from %s",
         len(layer_stats), config.layer_stats_path,
     )
+
+    seeds = [config.seed + s for s in range(config.num_seeds)]
+
+    for run_idx, run_seed in enumerate(seeds):
+        if config.num_seeds > 1:
+            logger.info(
+                "=== Seed %d/%d (seed=%d) ===",
+                run_idx + 1, config.num_seeds, run_seed,
+            )
+        run_output_dir = config.output_dir / f"seed_{run_seed}"
+
+        seed_everything(run_seed)
+        _run_single(wrapped, model, transform, config, run_seed, run_output_dir, layer_stats)
+
+    logger.info("Phase 2 complete. Outputs in %s", config.output_dir)
+
+
+def _run_single(
+    wrapped: NNsight,
+    model: nn.Module,
+    transform: Callable[[Image.Image], torch.Tensor],
+    config: AblationConfig,
+    run_seed: int,
+    output_dir: Path,
+    layer_stats: dict[str, LayerStats],
+) -> None:
+    """Run the ablation pipeline for a single seed.
+
+    Parameters
+    ----------
+    wrapped:
+        NNsight-wrapped model (already loaded and on the correct device).
+    model:
+        Underlying VisionTransformer (for baseline accuracy eval).
+    transform:
+        Preprocessing transform from ``load_vit``.
+    config:
+        Full ablation configuration.
+    run_seed:
+        Seed value for this run.
+    output_dir:
+        Directory for this seed's outputs (created if needed).
+    layer_stats:
+        Phase 1 per-site statistics.
+    """
 
     # 3. Build val loader (deterministic order for fair comparisons).
     loader = build_val_loader(
@@ -227,9 +284,9 @@ def run(config: AblationConfig) -> None:
     )
 
     # 4. Measure baseline accuracy (no intervention).
-    logger.info("Measuring baseline accuracy...")
+    logger.info("Measuring baseline accuracy (seed=%d)...", run_seed)
     baseline_top1, baseline_top5 = evaluate_accuracy(model, loader, config.device)
-    logger.info("Baseline: top-1=%.2f%%, top-5=%.2f%%", baseline_top1, baseline_top5)
+    logger.info("Baseline (seed=%d): top-1=%.2f%%, top-5=%.2f%%", run_seed, baseline_top1, baseline_top5)
 
     # 5. Sweep sites × thresholds.
     #    For pre_gelu and residual_stream, each batch is processed twice:
@@ -303,7 +360,7 @@ def run(config: AblationConfig) -> None:
                     rnd_logits, rnd_pct, _rnd_entropy = zero_outliers_in_trace(
                         wrapped, images, site, k, layer_stats,
                         random_fractions=random_fractions,
-                        random_seed=config.seed,
+                        random_seed=run_seed,
                     )
 
                     for sid, pct in rnd_pct.items():
@@ -335,6 +392,7 @@ def run(config: AblationConfig) -> None:
                 site, k, layer_stats,
                 baseline_top1, baseline_top5,
                 out_top1, out_top5,
+                seed=run_seed,
                 is_random=False,
                 granularity=config.granularity,
                 ablation_mode=config.ablation_mode,
@@ -355,21 +413,22 @@ def run(config: AblationConfig) -> None:
                     site, k, layer_stats,
                     baseline_top1, baseline_top5,
                     rnd_top1, rnd_top5,
+                    seed=run_seed,
                     is_random=True,
                     granularity=config.granularity,
                     ablation_mode=config.ablation_mode,
                 ))
 
     # 6. Save results.
-    ensure_dir(config.output_dir)
-    csv_path = config.output_dir / "ablation_results.csv"
+    ensure_dir(output_dir)
+    csv_path = output_dir / "ablation_results.csv"
     save_ablation_results(all_results, csv_path)
 
-    entropy_path = config.output_dir / "entropy_deltas.csv"
+    entropy_path = output_dir / "entropy_deltas.csv"
     save_entropy_deltas(all_results, entropy_path)
 
     logger.info(
-        "Phase 2 complete.  Data saved to %s.  "
+        "Seed %d complete.  Data saved to %s.  "
         "Run 'python scripts/regenerate_plots.py --phase2-csv %s --output-dir %s' for plots.",
-        config.output_dir, csv_path, config.output_dir,
+        run_seed, output_dir, csv_path, output_dir,
     )

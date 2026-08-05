@@ -95,6 +95,8 @@ class AblationResult:
     top5_accuracy: float
     baseline_top1: float
     baseline_top5: float
+    seed: int = 0
+    """Random seed used for this run (for multi-seed aggregation)."""
     is_random: bool = False
     """Whether this result used random (not outlier-threshold) zeroing."""
     granularity: str = "global"
@@ -695,7 +697,7 @@ def save_ablation_results(results: list[AblationResult], path: Path) -> None:
     fieldnames = [
         "site", "sigma_threshold", "site_identifier",
         "pct_zeroed", "top1_accuracy", "top5_accuracy",
-        "baseline_top1", "baseline_top5", "is_random", "granularity",
+        "baseline_top1", "baseline_top5", "seed", "is_random", "granularity",
         "ablation_mode",
         "cls_entropy", "patch_entropy",
         "baseline_cls_entropy", "baseline_patch_entropy",
@@ -714,6 +716,7 @@ def save_ablation_results(results: list[AblationResult], path: Path) -> None:
                 "top5_accuracy": r.top5_accuracy,
                 "baseline_top1": r.baseline_top1,
                 "baseline_top5": r.baseline_top5,
+                "seed": r.seed,
                 "is_random": r.is_random,
                 "granularity": r.granularity,
                 "ablation_mode": r.ablation_mode,
@@ -746,7 +749,7 @@ def save_entropy_deltas(
 
     pre_softmax_results = [r for r in results if r.site == "pre_softmax" and not r.is_random]
     if not pre_softmax_results:
-        logger.warning("No pre_softmax results; skipping entropy delta CSV.")
+        logger.info("No pre_softmax results; skipping entropy delta CSV.")
         return
 
     fieldnames = [

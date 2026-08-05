@@ -1,0 +1,81 @@
+
+================================================================
+  Validating prerequisites
+================================================================
+
+  Data: 50000 images in data
+OK
+  Python deps: OK
+OK
+  GPU: NVIDIA GeForce RTX 3070 (8.2 GB)
+  Batch size: 64
+  Output root: outputs/full-run-2026-8-4
+  Seeds: 42..44 (3 total)
+
+
+================================================================
+  Phase 1 — Baseline Activation Profiling (50000 images, 3 seeds)
+================================================================
+
+  Started at: 2026-08-04 18:57:45
+  Finished at: 2026-08-04 20:01:15
+
+  Phase 1 stats: outputs/full-run-2026-8-4/phase1-profiling/seed_42/profiling_result.json
+
+
+================================================================
+  Phase 2 — Global Granularity Ablation (3 seeds, k=3.0 4.0 6.0)
+================================================================
+
+  Started at: 2026-08-04 20:01:15
+  Finished at: 2026-08-04 23:33:14
+
+
+================================================================
+  Phase 2 — Per-Channel Granularity Ablation (3 seeds, k=3.0 4.0 6.0)
+================================================================
+
+  Started at: 2026-08-04 23:33:14
+  Finished at: 2026-08-05 00:16:31
+
+
+================================================================
+  Phase 2 — Per-Channel Ablation Modes at k=3 (RQ2) (3 seeds)
+================================================================
+
+  Started at: 2026-08-05 00:16:31
+  Finished at: 2026-08-05 00:37:16
+
+  Started at: 2026-08-05 00:37:16
+  Finished at: 2026-08-05 00:58:01
+
+
+================================================================
+  Experiment Complete
+================================================================
+
+Outputs:
+  Phase 1:              outputs/full-run-2026-8-4/phase1-profiling
+  Phase 2 (global):     outputs/full-run-2026-8-4/phase2-global
+  Phase 2 (per_channel): outputs/full-run-2026-8-4/phase2-per-channel
+  Phase 2 (mean_only):  outputs/full-run-2026-8-4/phase2-per-channel-mean-only
+  Phase 2 (var_only):   outputs/full-run-2026-8-4/phase2-per-channel-var-only
+
+To regenerate plots:
+  # Phase 1 plots
+  python scripts/regenerate_plots.py \
+    --phase1-json outputs/full-run-2026-8-4/phase1-profiling/seed_42/profiling_result.json \
+    --output-dir outputs/full-run-2026-8-4/phase1-profiling/seed_42/
+
+  # Phase 2 comparison (global vs per-channel)
+  python scripts/regenerate_plots.py \
+    --phase2-csv-a outputs/full-run-2026-8-4/phase2-global/seed_42/ablation_results.csv \
+    --phase2-csv-b outputs/full-run-2026-8-4/phase2-per-channel/seed_42/ablation_results.csv \
+    --output-dir outputs/full-run-2026-8-4/phase2-comparison/
+
+  # Poster plots
+  python scripts/generate_poster_plots.py \
+    --phase1-json outputs/full-run-2026-8-4/phase1-profiling/seed_42/profiling_result.json \
+    --phase2-csv-a outputs/full-run-2026-8-4/phase2-global/seed_42/ablation_results.csv \
+    --phase2-csv-b outputs/full-run-2026-8-4/phase2-per-channel/seed_42/ablation_results.csv \
+    --output-dir outputs/full-run-2026-8-4/poster-plots

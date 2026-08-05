@@ -96,8 +96,13 @@ class AblationConfig:
         ``(start, end)``, 0-based.  Blocks outside the range pass through
         unchanged.  Enables per-block-group ablation.
     seed:
-        Global random seed for reproducibility.  Used for the random-zeroing
-        control mask generation.
+        Base random seed for reproducibility.  When ``num_seeds > 1``,
+        seeds ``seed``, ``seed+1``, ..., ``seed+num_seeds-1`` are used.
+        Used for the random-zeroing control mask generation.
+    num_seeds:
+        Number of independent runs with different seeds.  Results are
+        saved to ``output_dir/seed_{s}/`` for each seed ``s``.  Default 1
+        produces a single run written directly to ``output_dir/``.
     """
 
     data_dir: Path
@@ -108,8 +113,13 @@ class AblationConfig:
     sigma_thresholds: tuple[float, ...]
     layer_stats_path: Path
     seed: int = 42
-    """Global random seed for reproducibility.  Used for the random-zeroing
-    control mask generation."""
+    """Base random seed for reproducibility.  When ``num_seeds > 1``,
+    seeds ``seed``, ``seed+1``, ..., ``seed+num_seeds-1`` are used.
+    Used for the random-zeroing control mask generation."""
+    num_seeds: int = 1
+    """Number of independent runs with different seeds.  Results are
+    saved to ``output_dir/seed_{s}/`` for each seed ``s``.  Default 1
+    produces a single run written directly to ``output_dir/``."""
     granularity: str = "global"
     """Zeroing granularity: ``"global"`` uses per-layer μ and σ;
     ``"per_channel"`` uses per-channel μ_c and σ_c for pre_gelu only.

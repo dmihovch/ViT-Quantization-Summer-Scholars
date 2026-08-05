@@ -1148,13 +1148,15 @@ def test_slow_e2e_exp2_run_pipeline(tmp_path: Path) -> None:
         sigma_thresholds=(3.0, 6.0),
         layer_stats_path=stats_path,
         seed=42,
+        num_seeds=1,
         granularity="global",
     )
     run(config)
 
-    # Verify output files.
-    csv_path = output_dir / "ablation_results.csv"
-    entropy_path = output_dir / "entropy_deltas.csv"
+    # Verify output files (written to seed_42/ subdirectory).
+    seed_dir = output_dir / "seed_42"
+    csv_path = seed_dir / "ablation_results.csv"
+    entropy_path = seed_dir / "entropy_deltas.csv"
     assert csv_path.exists(), f"{csv_path} not found"
     assert csv_path.stat().st_size > 0, "ablation_results.csv is empty"
     assert entropy_path.exists(), f"{entropy_path} not found"
@@ -1164,6 +1166,10 @@ def test_slow_e2e_exp2_run_pipeline(tmp_path: Path) -> None:
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    # Verify seed column is present.
+    assert "seed" in reader.fieldnames, f"Missing 'seed' column; got {reader.fieldnames}"
+    assert all(int(r["seed"]) == 42 for r in rows), "All rows should have seed=42"
 
     # 3 sites × 2 thresholds × N blocks for outlier + random control rows
     # pre_gelu: 12 blocks × 2 thresholds = 24 outlier + 24 random = 48

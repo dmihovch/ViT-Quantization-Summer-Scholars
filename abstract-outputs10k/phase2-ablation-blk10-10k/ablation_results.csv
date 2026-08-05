@@ -1,0 +1,2 @@
+site,sigma_threshold,site_identifier,pct_zeroed,top1_accuracy,top5_accuracy,baseline_top1,baseline_top5,is_random,granularity,ablation_mode,cls_entropy,patch_entropy,baseline_cls_entropy,baseline_patch_entropy
+pre_gelu,3.0,blocks.10/pre_gelu,0.19797531459302564,82.81,96.8,84.76,97.48,False,per_channel,outlier,[],[],[],[]
