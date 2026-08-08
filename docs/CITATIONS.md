@@ -1,4 +1,4 @@
-# Citations — ViT Quantization Summer Scholars
+# Citations: ViT Quantization Summer Scholars
 
 > **Purpose:** Centralised, verified bibliography for every literature reference,
 > formula, algorithm, and software dependency used across the entire project.
@@ -14,10 +14,10 @@ preprint; fixed Ref [2] missing arXiv ID; flagged suspicious Yadav & Das DOI).
 
 **Two things MUST be present for every citation in this file.** No exceptions.
 
-1. **🔗 Direct link** — Every citation must include a URL. Prefer arXiv
+1. **🔗 Direct link:** Every citation must include a URL. Prefer arXiv
    (`https://arxiv.org/abs/XXXX.XXXXX`) when available. Fall back to DOI
    (`https://doi.org/...`), publisher page, or OpenReview.
-2. **☐ Researcher sign-off** — Every citation must have a checkbox
+2. **☐ Researcher sign-off:** Every citation must have a checkbox
    (`**☐ Researcher sign-off: Not yet reviewed**` →
    `**☑ Researcher sign-off: Reviewed**`). You personally verify the source
    before checking it off. No second-hand trust.
@@ -30,27 +30,27 @@ When adding a new citation, include both before considering the entry complete.
 
 Each entry includes:
 
-- **Short key** — used inline in code and docs (e.g. `Pébay 2008`).
-- **Full citation** — author(s), title, venue, year, DOI/arXiv.
-- **🔗 Link** — direct URL to the article.
-- **Used in** — files and specific purposes.
-- **Verification status** — ✅ verified via arXiv/DOI/publisher, or ⚠️
+- **Short key:** used inline in code and docs (e.g. `Pébay 2008`).
+- **Full citation:** author(s), title, venue, year, DOI/arXiv.
+- **🔗 Link:** direct URL to the article.
+- **Used in:** files and specific purposes.
+- **Verification status:** ✅ verified via arXiv/DOI/publisher, or ⚠️
   preprint (not yet peer-reviewed).
-- **☐ Researcher sign-off** — checked off only after you personally read the
+- **☐ Researcher sign-off:** checked off only after you personally read the
   source.
 
 ---
 
 ## Primary references (core methodology)
 
-### Pébay 2008 — Parallel higher-moments merge
+### Pébay 2008: Parallel higher-moments merge
 
 - **Short key:** `Pébay 2008`
 - **Full citation:** P. Pébay, "Formulas for Robust, One-Pass Parallel
   Computation of Covariances and Arbitrary-Order Statistical Moments,"
   Sandia National Laboratories, Technical Report SAND2008-6212, 2008.
 - **🔗 Link:** https://prod-ng.sandia.gov/techlib-noauth/access-control.cgi/2008/086212.pdf
-- **⚠️ No arXiv:** Sandia National Laboratories technical report — not a journal/conference paper, no arXiv preprint exists.
+- **⚠️ No arXiv:** This is a Sandia National Laboratories technical report, not a journal/conference paper, and no arXiv preprint exists.
 - **Used in:**
   - `src/profiler.py` — `WelfordAccumulator`, `merge_batch_stats`,
     `finalize_accumulator`, `run_profiling_dataset_pass`. Eq. (3.1)-(3.4)
@@ -67,14 +67,14 @@ Each entry includes:
   parallel formula for M2 is a special case of this.
 - **☐ Researcher sign-off: Not yet reviewed**
 
-### Welford 1962 — Online algorithm for mean and variance
+### Welford 1962: Online algorithm for mean and variance
 
 - **Short key:** `Welford 1962`
 - **Full citation:** B. P. Welford, "Note on a Method for Calculating
   Corrected Sums of Squares and Products," *Technometrics*, vol. 4, no. 3,
   pp. 419–420, 1962.
 - **🔗 Link:** https://doi.org/10.1080/00401706.1962.10490022
-- **⚠️ No arXiv:** Published in 1962 — predates arXiv by ~30 years. DOI link is the canonical source.
+- **⚠️ No arXiv:** Published in 1962, this predates arXiv by ~30 years. The DOI link is the canonical source.
 - **Used in:**
   - `src/profiler.py` — `WelfordAccumulator` class name and the running
     mean/variance tracking pattern.
@@ -83,7 +83,7 @@ Each entry includes:
   generalises Welford's serial algorithm to the multi-batch setting.
 - **☐ Researcher sign-off: Not yet reviewed**
 
-### Dosovitskiy et al. 2021 — Vision Transformer (ViT)
+### Dosovitskiy et al. 2021: Vision Transformer (ViT)
 
 - **Short key:** `Dosovitskiy et al. 2021`
 - **Full citation:** A. Dosovitskiy, L. Beyer, A. Kolesnikov, D. Weissenborn,

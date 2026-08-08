@@ -3,9 +3,9 @@
 Performs three analyses on existing ablation CSV data (zero GPU cost) and
 delegates all plotting to ``src/plotting.py``:
 
-1. **Bootstrap CI on global vs per-channel delta**: Computes 95% bootstrap
-   confidence intervals on the accuracy difference between two conditions at
-   each sigma threshold.
+1. **95% CI on global vs per-channel delta**: Computes 95% confidence
+   intervals (closed-form two-proportion z-interval) on the accuracy
+   difference between two conditions at each sigma threshold.
 
 2. **Effective channels preserved**: Translates %-zeroed into "effective
    channels preserved" per block, comparing two conditions at each sigma
@@ -28,16 +28,20 @@ import argparse
 import csv
 import json
 import logging
+import sys
 from pathlib import Path
 
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 
+# Ensure project root is on sys.path so `src` imports work when run directly.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 matplotlib.use("Agg")
 
 from src.plotting import (
-    plot_bootstrap_ci_delta,
+    plot_ci_delta,
     plot_degradation_efficiency,
     plot_effective_channels,
 )
@@ -78,11 +82,11 @@ def _parse_args() -> argparse.Namespace:
         default=Path("outputs/ablation-analysis"),
         help="Directory for output plots and JSON.",
     )
+    # --run-dir convenience flag
     parser.add_argument(
-        "--num-bootstrap",
-        type=int,
-        default=10000,
-        help="Number of bootstrap resamples for CI estimation.",
+        "--run-dir", type=Path, default=None,
+        help="Convenience: auto-discover files from a run directory "
+             "(e.g. outputs/full-run-2026-8-4).",
     )
     return parser.parse_args()
 
@@ -130,22 +134,24 @@ def _load_pct_zeroed_by_block(
 
 
 # ---------------------------------------------------------------------------
-# Analysis 1: Bootstrap CI on delta
+# Analysis 1: 95% CI on accuracy delta
 # ---------------------------------------------------------------------------
 
 
-def _bootstrap_ci_delta(
+def _compute_ci_delta(
     acc_a: dict[float, float],
     acc_b: dict[float, float],
     n_images: int = 50000,
-    n_bootstrap: int = 10000,
-    seed: int = 42,
 ) -> dict[float, dict[str, float]]:
-    """Estimate 95% bootstrap CI for (B − A) accuracy delta.
+    """Compute 95% CI for (B − A) accuracy delta via two-proportion z-interval.
 
-    Uses vectorised numpy sampling: each bootstrap resample draws from a
-    Binomial(n_images, p) distribution.  For n_images=50000 and
-    n_bootstrap=10000, this runs in < 1 second.
+    For each pair of independent binomial proportions (top-1 accuracy on
+    n_images), computes the point estimate and closed-form 95% confidence
+    interval for the difference:
+
+        Δ̂ ± 1.96 · √(p̂_A(1−p̂_A)/n + p̂_B(1−p̂_B)/n)
+
+    where p̂ = accuracy / 100.
 
     Parameters
     ----------
@@ -154,11 +160,7 @@ def _bootstrap_ci_delta(
     acc_b:
         Mapping from sigma_k to condition B top-1 accuracy (%).
     n_images:
-        Number of images evaluated.
-    n_bootstrap:
-        Number of bootstrap resamples.
-    seed:
-        Random seed for reproducibility.
+        Number of images evaluated (denominator for each proportion).
 
     Returns
     -------
@@ -166,26 +168,23 @@ def _bootstrap_ci_delta(
         Mapping from sigma_k to {"delta_point_estimate", "delta_ci_low_pct",
         "delta_ci_high_pct", "acc_a", "acc_b"}.
     """
-    rng = np.random.default_rng(seed)
+    z = 1.96  # 95% CI
     results: dict[float, dict[str, float]] = {}
 
     for k in sorted(acc_a.keys()):
         p_a = acc_a[k] / 100.0
         p_b = acc_b.get(k, p_a) / 100.0
+        delta = p_b - p_a
 
-        correct_a = rng.binomial(n_images, p_a, size=n_bootstrap)
-        correct_b = rng.binomial(n_images, p_b, size=n_bootstrap)
-        acc_a_boot = 100.0 * correct_a / n_images
-        acc_b_boot = 100.0 * correct_b / n_images
-        deltas = acc_b_boot - acc_a_boot
+        se = np.sqrt(p_a * (1 - p_a) / n_images + p_b * (1 - p_b) / n_images)
+        margin = z * se
 
-        ci_low = float(np.percentile(deltas, 2.5))
-        ci_high = float(np.percentile(deltas, 97.5))
-        mean_delta = float(np.mean(deltas))
+        delta_pct = delta * 100.0
+        ci_low = (delta - margin) * 100.0
+        ci_high = (delta + margin) * 100.0
 
         results[k] = {
-            "delta_point_estimate": round(acc_b.get(k, acc_a[k]) - acc_a[k], 4),
-            "delta_mean_pct": round(mean_delta, 4),
+            "delta_point_estimate": round(delta_pct, 4),
             "delta_ci_low_pct": round(ci_low, 4),
             "delta_ci_high_pct": round(ci_high, 4),
             "acc_a": acc_a[k],
@@ -270,12 +269,46 @@ def _degradation_per_sparsity(
 # ---------------------------------------------------------------------------
 
 
+def _discover_files_from_run_dir(run_dir: Path) -> dict[str, Path | None]:
+    """Auto-discover ablation CSVs from a run directory."""
+    discovered: dict[str, Path | None] = {"csv_a": None, "csv_b": None}
+
+    global_dir = run_dir / "phase2-global"
+    if global_dir.is_dir():
+        for seed_dir in sorted(global_dir.iterdir()):
+            if seed_dir.is_dir() and seed_dir.name.startswith("seed_"):
+                candidate = seed_dir / "ablation_results.csv"
+                if candidate.is_file():
+                    discovered["csv_a"] = candidate
+                    break
+
+    pc_dir = run_dir / "phase2-per-channel"
+    if pc_dir.is_dir():
+        for seed_dir in sorted(pc_dir.iterdir()):
+            if seed_dir.is_dir() and seed_dir.name.startswith("seed_"):
+                candidate = seed_dir / "ablation_results.csv"
+                if candidate.is_file():
+                    discovered["csv_b"] = candidate
+                    break
+
+    return discovered
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     args = _parse_args()
+
+    # --- Handle --run-dir auto-discovery ---
+    if args.run_dir is not None:
+        discovered = _discover_files_from_run_dir(args.run_dir)
+        if args.csv_a == Path("outputs/phase2-ablation-global-50k/ablation_results.csv"):
+            args.csv_a = discovered["csv_a"] or args.csv_a
+        if args.csv_b == Path("outputs/phase2-ablation-per-channel-50k/ablation_results.csv"):
+            args.csv_b = discovered["csv_b"] or args.csv_b
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load data.
@@ -292,12 +325,9 @@ def main() -> None:
     logger.info("%s acc: %s", args.label_a, {f"k={k}": f"{v:.2f}%" for k, v in sorted(acc_a.items())})
     logger.info("%s acc: %s", args.label_b, {f"k={k}": f"{v:.2f}%" for k, v in sorted(acc_b.items())})
 
-    # --- Analysis 1: Bootstrap CI ---
-    logger.info("=== Bootstrap CI on delta (%s − %s) ===", args.label_b, args.label_a)
-    ci_results = _bootstrap_ci_delta(
-        acc_a, acc_b,
-        n_bootstrap=args.num_bootstrap,
-    )
+    # --- Analysis 1: 95% CI ---
+    logger.info("=== 95%% CI on delta (%s − %s) ===", args.label_b, args.label_a)
+    ci_results = _compute_ci_delta(acc_a, acc_b)
     for k in sorted(ci_results.keys()):
         r = ci_results[k]
         logger.info(
@@ -305,7 +335,7 @@ def main() -> None:
             k, r["delta_point_estimate"], r["delta_ci_low_pct"], r["delta_ci_high_pct"],
         )
 
-    plot_bootstrap_ci_delta(ci_results, args.output_dir / "bootstrap_ci_delta.png")
+    plot_ci_delta(ci_results, args.output_dir / "ci_delta.png")
 
     # --- Analysis 2: Effective channels ---
     logger.info("=== Effective channels preserved ===")
@@ -367,8 +397,7 @@ def main() -> None:
         "baseline_top1": baseline_top1,
         "label_a": args.label_a,
         "label_b": args.label_b,
-        "num_bootstrap": args.num_bootstrap,
-        "bootstrap_ci": {
+        "ci_95pct": {
             str(k): v for k, v in ci_results.items()
         },
     }

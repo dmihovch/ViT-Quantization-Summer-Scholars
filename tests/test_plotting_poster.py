@@ -13,13 +13,13 @@ import pytest
 
 from src.ablation import AblationResult
 from src.plotting_poster import (
-    plot_ablation_waterfall,
+    plot_ablation_comparison,
     plot_accuracy_vs_sparsity_scatter,
     plot_activation_distribution_overlay,
-    plot_attention_entropy_streamgraph,
+    plot_attention_entropy_heatmap,
     plot_outlier_site_grid,
-    plot_per_channel_mean_hinton,
-    plot_per_channel_sigma_ridgeline,
+    plot_per_channel_mean_histogram,
+    plot_per_channel_sigma_line,
 )
 
 
@@ -121,7 +121,7 @@ def test_plot_accuracy_vs_sparsity_scatter_creates_file(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_plot_per_channel_sigma_ridgeline_creates_file(tmp_path: Path) -> None:
+def test_plot_per_channel_sigma_line_creates_file(tmp_path: Path) -> None:
     rng = np.random.default_rng(seed=3)
     pc_stds: dict[str, list[float]] = {}
     for i in range(12):
@@ -135,16 +135,16 @@ def test_plot_per_channel_sigma_ridgeline_creates_file(tmp_path: Path) -> None:
             a2 = rng.gamma(6.0, 3.0, 1536).tolist()
             arr = a1 + a2
         pc_stds[f"blocks.{i}/pre_gelu"] = arr
-    output_path = tmp_path / "ridgeline.png"
-    plot_per_channel_sigma_ridgeline(pc_stds, output_path)
+    output_path = tmp_path / "sigma_line.png"
+    plot_per_channel_sigma_line(pc_stds, output_path)
     assert output_path.exists()
     assert output_path.stat().st_size > 0
 
 
-def test_plot_per_channel_sigma_ridgeline_no_pre_gelu(tmp_path: Path) -> None:
+def test_plot_per_channel_sigma_line_no_pre_gelu(tmp_path: Path) -> None:
     """Should skip gracefully if no pre_gelu data."""
-    output_path = tmp_path / "empty_ridge.png"
-    plot_per_channel_sigma_ridgeline({}, output_path)
+    output_path = tmp_path / "empty_line.png"
+    plot_per_channel_sigma_line({}, output_path)
     assert not output_path.exists()
 
 
@@ -153,7 +153,7 @@ def test_plot_per_channel_sigma_ridgeline_no_pre_gelu(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_plot_attention_entropy_streamgraph_creates_file(tmp_path: Path) -> None:
+def test_plot_attention_entropy_heatmap_creates_file(tmp_path: Path) -> None:
     rng = np.random.default_rng(seed=4)
     cls_ent: dict[str, list[float]] = {}
     for i in range(12):
@@ -162,15 +162,15 @@ def test_plot_attention_entropy_streamgraph_creates_file(tmp_path: Path) -> None
         cls_ent[f"blocks.{i}/post_softmax"] = [
             max(0.05, base + rng.normal(0, 0.3)) for _ in range(12)
         ]
-    output_path = tmp_path / "streamgraph.png"
-    plot_attention_entropy_streamgraph(cls_ent, output_path)
+    output_path = tmp_path / "heatmap.png"
+    plot_attention_entropy_heatmap(cls_ent, output_path)
     assert output_path.exists()
     assert output_path.stat().st_size > 0
 
 
-def test_plot_attention_entropy_streamgraph_empty(tmp_path: Path) -> None:
-    output_path = tmp_path / "empty_stream.png"
-    plot_attention_entropy_streamgraph({}, output_path)
+def test_plot_attention_entropy_heatmap_empty(tmp_path: Path) -> None:
+    output_path = tmp_path / "empty_heat.png"
+    plot_attention_entropy_heatmap({}, output_path)
     assert not output_path.exists()
 
 
@@ -179,9 +179,9 @@ def test_plot_attention_entropy_streamgraph_empty(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_plot_ablation_waterfall_creates_file(tmp_path: Path) -> None:
-    output_path = tmp_path / "waterfall.png"
-    plot_ablation_waterfall(
+def test_plot_ablation_comparison_creates_file(tmp_path: Path) -> None:
+    output_path = tmp_path / "comparison.png"
+    plot_ablation_comparison(
         baseline=85.03,
         global_acc=43.24,
         mean_only_acc=45.00,
@@ -199,20 +199,20 @@ def test_plot_ablation_waterfall_creates_file(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_plot_per_channel_mean_hinton_creates_file(tmp_path: Path) -> None:
+def test_plot_per_channel_mean_histogram_creates_file(tmp_path: Path) -> None:
     rng = np.random.default_rng(seed=5)
     # Block 10-like: asymmetric, large negatives.
     means = rng.normal(-5.0, 15.0, 3072).tolist()
     pc_means: dict[str, list[float]] = {
         "blocks.10/pre_gelu": means,
     }
-    output_path = tmp_path / "hinton.png"
-    plot_per_channel_mean_hinton(pc_means, 10, output_path)
+    output_path = tmp_path / "hist.png"
+    plot_per_channel_mean_histogram(pc_means, 10, output_path)
     assert output_path.exists()
     assert output_path.stat().st_size > 0
 
 
-def test_plot_per_channel_mean_hinton_missing_block(tmp_path: Path) -> None:
-    output_path = tmp_path / "missing_hinton.png"
-    plot_per_channel_mean_hinton({}, 10, output_path)
+def test_plot_per_channel_mean_histogram_missing_block(tmp_path: Path) -> None:
+    output_path = tmp_path / "missing_hist.png"
+    plot_per_channel_mean_histogram({}, 10, output_path)
     assert not output_path.exists()

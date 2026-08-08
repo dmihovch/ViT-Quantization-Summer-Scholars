@@ -129,3 +129,9 @@ class AblationConfig:
     ``"var_only"``.  Ignored in global granularity mode."""
     layer_range: tuple[int, int] | None = None
     """If not None, only ablate blocks in this inclusive range (0-based)."""
+    per_channel_sites: tuple[str, ...] = (
+        "pre_gelu", "post_layernorm_1", "post_layernorm_2", "residual_stream",
+    )
+    """Sites to ablate in per-channel mode.  Defaults to all four
+    channel-structured sites.  Override to ``("pre_gelu",)`` for RQ2
+    mean_only/var_only runs that are specifically about the MLP hidden dim."""

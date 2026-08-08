@@ -110,6 +110,42 @@ class AblationResult:
     baseline_patch_entropy: list[float] = field(default_factory=list)
 
 
+def load_ablation_results(path: Path) -> list[AblationResult]:
+    """Load ablation results from a CSV file.
+
+    Parameters
+    ----------
+    path:
+        Path to ``ablation_results.csv``.
+
+    Returns
+    -------
+    list[AblationResult]
+        Deserialised results.
+    """
+    results: list[AblationResult] = []
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            results.append(AblationResult(
+                site=row["site"],
+                sigma_threshold=float(row["sigma_threshold"]),
+                site_identifier=row["site_identifier"],
+                pct_zeroed=float(row["pct_zeroed"]),
+                top1_accuracy=float(row["top1_accuracy"]),
+                top5_accuracy=float(row["top5_accuracy"]),
+                baseline_top1=float(row["baseline_top1"]),
+                baseline_top5=float(row["baseline_top5"]),
+                is_random=row.get("is_random", "False") == "True",
+                granularity=row.get("granularity", "global"),
+                ablation_mode=row.get("ablation_mode", "outlier"),
+                cls_entropy=json.loads(row.get("cls_entropy", "[]")),
+                patch_entropy=json.loads(row.get("patch_entropy", "[]")),
+                baseline_cls_entropy=json.loads(row.get("baseline_cls_entropy", "[]")),
+                baseline_patch_entropy=json.loads(row.get("baseline_patch_entropy", "[]")),
+            ))
+    logger.info("Loaded %d ablation results from %s", len(results), path)
+    return results
 
 
 def compute_entropy_delta(
@@ -320,9 +356,11 @@ def zero_outliers_in_trace(
     matching the given fraction per layer instead of using the outlier
     threshold — this is the random-zeroing control condition.
 
-    If ``per_channel`` is True and ``site`` is ``"pre_gelu"``, uses
-    per-channel μ_c and σ_c for thresholding (see
-    :func:`_intervene_pre_gelu`).  Ignored for other sites.
+    If ``per_channel`` is True, uses per-channel μ_c and σ_c for
+    thresholding at all channel-structured sites (pre_gelu,
+    post_layernorm_1, post_layernorm_2, residual_stream).
+    ``pre_softmax`` and ``post_softmax`` are excluded from per-channel mode
+    because they have shape ``(B, H, N, N)`` with no channel dimension.
 
     For ``pre_softmax``, also captures per-head CLS and patch attention
     entropy on the zeroed attention weights for entropy delta computation.
@@ -335,7 +373,8 @@ def zero_outliers_in_trace(
         Float tensor of shape ``(B, C, H, W)`` on the model's device.
     site:
         Which measurement site to zero: ``"pre_gelu"``, ``"pre_softmax"``,
-        or ``"residual_stream"``.
+        ``"residual_stream"``, ``"post_layernorm_1"``, or
+        ``"post_layernorm_2"``.
     sigma_k:
         Threshold multiplier (e.g. ``3.0`` means zero elements > 3σ).
         Ignored when ``random_fractions`` is provided.
@@ -349,7 +388,14 @@ def zero_outliers_in_trace(
         Seed for the random mask generator.  Only used when
         ``random_fractions`` is provided.
     per_channel:
-        If True, use per-channel thresholds for pre_gelu ablation.
+        If True, use per-channel thresholds for all channel-structured
+        sites (pre_gelu, post_layernorm_1, post_layernorm_2,
+        residual_stream).
+    ablation_mode:
+        Per-channel ablation variant: ``"outlier"``, ``"mean_only"``, or
+        ``"var_only"``.  Ignored when ``per_channel`` is False.
+    layer_range:
+        If not None, only intervene on blocks in this inclusive range.
 
     Returns
     -------
@@ -362,11 +408,13 @@ def zero_outliers_in_trace(
     Raises
     ------
     ValueError:
-        If ``site`` is not one of the three supported values.
+        If ``site`` is not one of the five supported values.
     """
-    if site not in ("pre_gelu", "pre_softmax", "residual_stream"):
+    if site not in ("pre_gelu", "pre_softmax", "residual_stream",
+                     "post_layernorm_1", "post_layernorm_2"):
         raise ValueError(
-            f"Unknown site '{site}'.  Must be 'pre_gelu', 'pre_softmax', or 'residual_stream'."
+            f"Unknown site '{site}'.  Must be 'pre_gelu', 'pre_softmax', 'residual_stream', "
+            f"'post_layernorm_1', or 'post_layernorm_2'."
         )
 
     inner_model = wrapped_model._model
@@ -390,9 +438,40 @@ def zero_outliers_in_trace(
                         per_channel=per_channel, ablation_mode=ablation_mode,
                     )
                 elif site == "residual_stream":
-                    _intervene_residual_stream(
+                    if per_channel:
+                        _intervene_channel_structured(
+                            block, i, sigma_k, layer_stats, pct_zeroed,
+                            site_id=site,
+                            proxy_path="norm1.input",
+                            preserve_cls=True,
+                            random_fractions=random_fractions,
+                            random_seed=random_seed,
+                            ablation_mode=ablation_mode,
+                        )
+                    else:
+                        _intervene_residual_stream(
+                            block, i, sigma_k, layer_stats, pct_zeroed,
+                            random_fractions=random_fractions, random_seed=random_seed,
+                        )
+                elif site == "post_layernorm_1":
+                    _intervene_channel_structured(
                         block, i, sigma_k, layer_stats, pct_zeroed,
-                        random_fractions=random_fractions, random_seed=random_seed,
+                        site_id=site,
+                        proxy_path="norm1.output",
+                        preserve_cls=False,
+                        random_fractions=random_fractions,
+                        random_seed=random_seed,
+                        ablation_mode=ablation_mode,
+                    )
+                elif site == "post_layernorm_2":
+                    _intervene_channel_structured(
+                        block, i, sigma_k, layer_stats, pct_zeroed,
+                        site_id=site,
+                        proxy_path="norm2.output",
+                        preserve_cls=False,
+                        random_fractions=random_fractions,
+                        random_seed=random_seed,
+                        ablation_mode=ablation_mode,
                     )
                 elif site == "pre_softmax":
                     _intervene_pre_softmax(
@@ -582,6 +661,133 @@ def _intervene_residual_stream(
     mask[:, 0, :] = True
 
     block.norm1.input = tensor * mask
+
+
+def _intervene_channel_structured(
+    block: Any,
+    block_idx: int,
+    sigma_k: float,
+    layer_stats: dict[str, LayerStats],
+    pct_zeroed: dict[str, float],
+    site_id: str,
+    proxy_path: str,
+    preserve_cls: bool = False,
+    random_fractions: dict[str, float] | None = None,
+    random_seed: int | None = None,
+    ablation_mode: str = "outlier",
+) -> None:
+    """Zero outliers at a (B, N, D) site using per-channel or global thresholds.
+
+    Uses per-channel μ_c and σ_c when available; falls back to global μ and σ
+    otherwise.  Accesses the tensor at ``block.<proxy_path>`` (e.g.
+    ``norm1.output``, ``norm2.output``, or ``norm1.input``) and applies
+    zeroing using ``_build_per_channel_zeroing_mask`` with per-channel μ_c
+    and σ_c from ``layer_stats[full_site_id].per_channel_mean`` and
+    ``.per_channel_std`` when both are present, or ``_build_zeroing_mask``
+    with global μ and σ as a fallback.
+
+    This function handles both per-channel and global modes — it is the
+    single intervention path for all channel-structured sites
+    (residual_stream, post_layernorm_1, post_layernorm_2).
+
+    If ``random_fractions`` is provided, zeros a random subset of elements
+    matching the given fraction instead of using the outlier threshold.
+
+    Called inside an nnsight trace context — ``block`` is an nnsight proxy.
+
+    Parameters
+    ----------
+    block:
+        Nnsight proxy for ``wrapped_model.blocks[i]``.
+    block_idx:
+        Index of this encoder block (0-based).
+    sigma_k:
+        Threshold multiplier.
+    layer_stats:
+        Per-site statistics from Phase 1.
+    pct_zeroed:
+        Dict mutated in-place with ``site_identifier`` → percentage zeroed.
+    site_id:
+        Short site name: ``"residual_stream"``, ``"post_layernorm_1"``,
+        or ``"post_layernorm_2"``.
+    proxy_path:
+        Dotted attribute path from ``block`` to the target tensor, e.g.
+        ``"norm1.input"``, ``"norm1.output"``, ``"norm2.output"``.
+    preserve_cls:
+        If True, preserve the CLS token (position 0) by setting
+        ``mask[:, 0, :] = True``.  Required for residual_stream.
+    random_fractions:
+        If provided, maps ``site_identifier`` → fraction (0–1) of elements
+        to zero randomly.  Overrides the outlier threshold logic.
+    random_seed:
+        Seed for the random mask generator.
+    ablation_mode:
+        Per-channel ablation variant: ``"outlier"``, ``"mean_only"``, or
+        ``"var_only"``.
+    """
+    # Build the fully-qualified site identifier.
+    if site_id == "residual_stream":
+        full_site_id = (
+            "patch_embed/residual_stream" if block_idx == 0
+            else f"blocks.{block_idx - 1}/residual_stream"
+        )
+    else:
+        full_site_id = f"blocks.{block_idx}/{site_id}"
+
+    if full_site_id not in layer_stats:
+        return
+
+    # Access the tensor via dotted attribute path.
+    tensor = block
+    for attr in proxy_path.split("."):
+        tensor = getattr(tensor, attr)
+
+    if random_fractions is not None and full_site_id in random_fractions:
+        mask = _build_random_mask(
+            tensor, random_fractions[full_site_id], random_seed, block_idx,
+        )
+        pct_zeroed[full_site_id] = 100.0 * random_fractions[full_site_id]
+    else:
+        stats = layer_stats[full_site_id]
+        if stats.per_channel_std is None or stats.per_channel_mean is None:
+            logger.warning(
+                "Per-channel stats missing for %s; falling back to global.",
+                full_site_id,
+            )
+            sigma = stats.std
+            if sigma == 0.0:
+                return
+            mean = stats.mean
+            mask = _build_zeroing_mask(tensor, sigma_k, sigma, mean)
+        elif ablation_mode == "mean_only":
+            d_ch = len(stats.per_channel_std)
+            mask = _build_per_channel_zeroing_mask(
+                tensor, sigma_k, [stats.std] * d_ch,
+                stats.per_channel_mean, device=tensor.device,
+            )
+        elif ablation_mode == "var_only":
+            d_ch = len(stats.per_channel_std)
+            mask = _build_per_channel_zeroing_mask(
+                tensor, sigma_k, stats.per_channel_std,
+                [stats.mean] * d_ch, device=tensor.device,
+            )
+        else:
+            mask = _build_per_channel_zeroing_mask(
+                tensor, sigma_k, stats.per_channel_std, stats.per_channel_mean,
+                device=tensor.device,
+            )
+        pct_zeroed[full_site_id] = 100.0 * (~mask).float().mean().item()
+
+    if preserve_cls:
+        mask[:, 0, :] = True
+
+    # Write the masked tensor back to the proxy path.
+    # Re-traverse to get the parent object and set the final attribute.
+    parts = proxy_path.split(".")
+    parent = block
+    for attr in parts[:-1]:
+        parent = getattr(parent, attr)
+    setattr(parent, parts[-1], tensor * mask)
 
 
 def _intervene_pre_softmax(

@@ -11,18 +11,71 @@
 # Named output directory:
 #   bash scripts/run_full_experiment.sh --name run-2026-08-04
 #
-# Override defaults via environment variables:
-#   NUM_SEEDS=5 bash scripts/run_full_experiment.sh
+# Custom configuration:
+#   bash scripts/run_full_experiment.sh --num-seeds 5 --batch-size 128
+#
+# Show all options:
+#   bash scripts/run_full_experiment.sh --help
 # =============================================================================
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Parse flags
+# Defaults
 # ---------------------------------------------------------------------------
 
 SMOKE=false
 RUN_NAME=""
+DATA_DIR="data"
+BATCH_SIZE=64
+NUM_SEEDS=3
+BASE_SEED=42
+
+# Derived defaults (set after parsing)
+OUTPUT_ROOT=""
+PHASE1_OUTPUT=""
+PHASE2_GLOBAL_OUTPUT=""
+PHASE2_PER_CHANNEL_OUTPUT=""
+
+# Sigma thresholds: Phase 1 convention {3, 4, 6}.
+DEFAULT_SIGMAS="3.0 4.0 6.0"
+
+# ---------------------------------------------------------------------------
+# Help
+# ---------------------------------------------------------------------------
+
+print_help() {
+    cat <<EOF
+Usage: bash scripts/run_full_experiment.sh [OPTIONS]
+
+Runs the full ViT quantization experiment pipeline: Phase 1 profiling,
+Phase 2 global ablation, Phase 2 per-channel ablation, and per-channel
+ablation modes (mean_only, var_only).
+
+Options:
+  --smoke                     Run a smoke test (128 images, 1 seed).
+  --name <name>               Run name (default: "final" or "smoke").
+  --data-dir <path>           ImageNet val directory (default: data).
+  --output-root <path>        Output root directory (default: outputs/<name>).
+  --batch-size <int>          Batch size (default: 64 full, 32 smoke).
+  --num-seeds <int>           Number of seeds (default: 3 full, 1 smoke).
+  --base-seed <int>           First seed value (default: 42).
+  --phase1-output <path>      Phase 1 output dir (default: <output-root>/phase1-profiling).
+  --phase2-global-output <path>  Phase 2 global output dir (default: <output-root>/phase2-global).
+  --phase2-per-channel-output <path>  Phase 2 per-channel output dir (default: <output-root>/phase2-per-channel).
+  -h, --help                  Show this help message and exit.
+
+Examples:
+  bash scripts/run_full_experiment.sh
+  bash scripts/run_full_experiment.sh --smoke
+  bash scripts/run_full_experiment.sh --name my-run --num-seeds 5
+  bash scripts/run_full_experiment.sh --data-dir /path/to/imagenet --batch-size 128
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Parse flags
+# ---------------------------------------------------------------------------
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -34,19 +87,53 @@ while [[ $# -gt 0 ]]; do
             RUN_NAME="$2"
             shift 2
             ;;
+        --data-dir)
+            DATA_DIR="$2"
+            shift 2
+            ;;
+        --output-root)
+            OUTPUT_ROOT="$2"
+            shift 2
+            ;;
+        --batch-size)
+            BATCH_SIZE="$2"
+            shift 2
+            ;;
+        --num-seeds)
+            NUM_SEEDS="$2"
+            shift 2
+            ;;
+        --base-seed)
+            BASE_SEED="$2"
+            shift 2
+            ;;
+        --phase1-output)
+            PHASE1_OUTPUT="$2"
+            shift 2
+            ;;
+        --phase2-global-output)
+            PHASE2_GLOBAL_OUTPUT="$2"
+            shift 2
+            ;;
+        --phase2-per-channel-output)
+            PHASE2_PER_CHANNEL_OUTPUT="$2"
+            shift 2
+            ;;
+        --help|-h)
+            print_help
+            exit 0
+            ;;
         *)
             echo "Unknown argument: $1"
-            echo "Usage: bash scripts/run_full_experiment.sh [--smoke] [--name <name>]"
+            echo "Usage: bash scripts/run_full_experiment.sh [--smoke] [--name <name>] [--help]"
             exit 1
             ;;
     esac
 done
 
 # ---------------------------------------------------------------------------
-# Configuration — override via environment
+# Apply smoke defaults and derive remaining paths
 # ---------------------------------------------------------------------------
-
-DATA_DIR="${DATA_DIR:-data}"
 
 if $SMOKE; then
     RUN_NAME="${RUN_NAME:-smoke}"
@@ -67,13 +154,9 @@ else
     PHASE2_FLAGS="--num-images $NUM_IMAGES"
 fi
 
-BASE_SEED="${BASE_SEED:-42}"
 PHASE1_OUTPUT="${PHASE1_OUTPUT:-${OUTPUT_ROOT}/phase1-profiling}"
 PHASE2_GLOBAL_OUTPUT="${PHASE2_GLOBAL_OUTPUT:-${OUTPUT_ROOT}/phase2-global}"
 PHASE2_PER_CHANNEL_OUTPUT="${PHASE2_PER_CHANNEL_OUTPUT:-${OUTPUT_ROOT}/phase2-per-channel}"
-
-# Sigma thresholds: Phase 1 convention {3, 4, 6}.
-DEFAULT_SIGMAS="3.0 4.0 6.0"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -136,6 +219,11 @@ echo ""
 
 # ---------------------------------------------------------------------------
 # Phase 1: Profiling
+#
+# NOTE: Phase 1 MUST be re-run if the profiler has changed since the last
+# profiling output was produced (e.g., new track_per_channel sites added,
+# LayerStats fields changed).  Per-channel Phase 2 ablation will refuse to
+# run with stale profiling data.
 # ---------------------------------------------------------------------------
 
 _print_header "Phase 1 — Baseline Activation Profiling ($NUM_IMAGES images, $NUM_SEEDS seeds)"
@@ -210,6 +298,7 @@ python run_phase2_ablation.py \
     --sigma-thresholds 3.0 \
     --granularity per_channel \
     --ablation-mode mean_only \
+    --per-channel-sites pre_gelu \
     --layer-stats "$PHASE1_STATS" \
     --output-dir "$P2_MEAN_ONLY_OUTPUT"
 _end_timer "Phase 2 (mean_only)"
@@ -224,6 +313,7 @@ python run_phase2_ablation.py \
     --sigma-thresholds 3.0 \
     --granularity per_channel \
     --ablation-mode var_only \
+    --per-channel-sites pre_gelu \
     --layer-stats "$PHASE1_STATS" \
     --output-dir "$P2_VAR_ONLY_OUTPUT"
 _end_timer "Phase 2 (var_only)"
@@ -241,21 +331,6 @@ echo "  Phase 2 (per_channel): $PHASE2_PER_CHANNEL_OUTPUT"
 echo "  Phase 2 (mean_only):  $P2_MEAN_ONLY_OUTPUT"
 echo "  Phase 2 (var_only):   $P2_VAR_ONLY_OUTPUT"
 echo ""
-echo "To regenerate plots:"
-echo "  # Phase 1 plots"
-echo "  python scripts/regenerate_plots.py \\"
-echo "    --phase1-json ${PHASE1_OUTPUT}/seed_${BASE_SEED}/profiling_result.json \\"
-echo "    --output-dir ${PHASE1_OUTPUT}/seed_${BASE_SEED}/"
+echo "To regenerate all plots:"
+echo "  bash scripts/regenerate_all.sh --run-dir $OUTPUT_ROOT"
 echo ""
-echo "  # Phase 2 comparison (global vs per-channel)"
-echo "  python scripts/regenerate_plots.py \\"
-echo "    --phase2-csv-a ${PHASE2_GLOBAL_OUTPUT}/seed_${BASE_SEED}/ablation_results.csv \\"
-echo "    --phase2-csv-b ${PHASE2_PER_CHANNEL_OUTPUT}/seed_${BASE_SEED}/ablation_results.csv \\"
-echo "    --output-dir ${OUTPUT_ROOT}/phase2-comparison/"
-echo ""
-echo "  # Poster plots"
-echo "  python scripts/generate_poster_plots.py \\"
-echo "    --phase1-json ${PHASE1_OUTPUT}/seed_${BASE_SEED}/profiling_result.json \\"
-echo "    --phase2-csv-a ${PHASE2_GLOBAL_OUTPUT}/seed_${BASE_SEED}/ablation_results.csv \\"
-echo "    --phase2-csv-b ${PHASE2_PER_CHANNEL_OUTPUT}/seed_${BASE_SEED}/ablation_results.csv \\"
-echo "    --output-dir ${OUTPUT_ROOT}/poster-plots"

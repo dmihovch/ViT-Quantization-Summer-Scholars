@@ -847,3 +847,104 @@ multi-seed variance estimation, and LN γ analysis.
 The per-channel ablation was itself motivated by Phase 1 data (12× σ spread in
 block 10), so the lesson is: let the data drive the next experiment, not a
 pre-written roadmap.
+
+## 17. Per-channel ablation only covered pre_gelu — fixed 2026-08-05
+
+### 17.1 — Per-channel site list was hardcoded to `("pre_gelu",)`
+
+**What happened:** Phase 1 profiling computed per-channel μ_c and σ_c for
+`post_layernorm_1`, `post_layernorm_2`, and (after the fix) `residual_stream`
+via `track_per_channel=True`, but Phase 2 per-channel ablation only zeroed
+`pre_gelu`.  The per-channel data for the other three channel-structured sites
+was collected but never used.
+
+**Why it's wrong:** A reviewer would flag this as an obvious gap — if you
+have per-channel statistics for four sites, why ablate only one?  The
+`post_layernorm` sites are particularly interesting because they sit at the
+boundary between attention and MLP sublayers, and their per-channel variance
+patterns may differ from pre_gelu.
+
+**Resolution (2026-08-05):**
+1. Added `track_per_channel=True` to residual stream saves in Phase 1
+   (requires re-running Phase 1 to populate the new data).
+2. Created `_intervene_per_channel_generic()` in `ablation.py` — a single
+   function that handles per-channel zeroing at any `(B, N, D)` site via a
+   configurable proxy path and optional CLS preservation.
+3. Expanded per-channel site list from `("pre_gelu",)` to all four
+   channel-structured sites: `pre_gelu`, `post_layernorm_1`,
+   `post_layernorm_2`, `residual_stream`.
+4. Added `--per-channel-sites` CLI flag (defaults to all four) so RQ2
+   mean_only/var_only runs can restrict to `pre_gelu` only.
+5. Enabled random-zeroing control for per-channel mode (was previously
+   disabled with `and not is_per_channel` guard).
+6. `pre_softmax` and `post_softmax` remain correctly excluded — they have
+   shape `(B, H, N, N)` with no channel dimension.
+
+**What to do instead:** When adding per-channel profiling to Phase 1, add
+per-channel ablation to Phase 2 at the same time.  Don't collect data you
+don't plan to use.
+
+---
+
+## 18. Per-channel expansion issues — fixed 2026-08-05
+
+### 18.1 — Random control missing for post_layernorm_1 and post_layernorm_2
+
+**What happened:** The ``do_random`` check in ``exp2_ablation._run_single``
+read ``do_random = site in ("pre_gelu", "residual_stream")``.  This was
+correct before the per-channel expansion (only those two sites existed in
+per-channel mode), but after expanding to all four channel-structured sites,
+``post_layernorm_1`` and ``post_layernorm_2`` were also ablated in per-channel
+mode and got no random control.
+
+**Why it's wrong:** A reviewer comparing global results (which have random
+controls) against per-channel results will flag the asymmetry.  Without
+random controls for the post_layernorm sites, you cannot attribute their
+accuracy degradation to outliers specifically vs. activation sparsity.
+
+**Resolution (2026-08-05):** Changed to ``do_random = site != "pre_softmax"``.
+This enables random control for all four channel-structured sites.
+``pre_softmax`` is excluded because random zeroing of attention logits is not
+meaningful (the softmax would normalize away uniform random perturbations) —
+the same reason it has no random control in global mode.
+
+### 18.2 — ``_intervene_per_channel_generic`` misnamed
+
+**What happened:** The function ``_intervene_per_channel_generic`` in
+``ablation.py`` actually handles both per-channel and global modes — it falls
+back to ``_build_zeroing_mask`` when per-channel stats are missing.  The name
+implied it was per-channel-only, which was misleading.
+
+**Resolution (2026-08-05):** Renamed to ``_intervene_channel_structured``
+throughout the file (function definition and all three call sites in
+``zero_outliers_in_trace``).  Updated docstring to clarify: "Uses per-channel
+μ_c and σ_c when available; falls back to global μ and σ otherwise."
+
+### 18.3 — Phase 1 must be re-run for residual stream per-channel stats
+
+**What happened:** ``profiler.py`` was updated to add ``track_per_channel=True``
+to residual stream saves, but the existing ``profiling_result.json`` was
+produced before this change.  Per-channel residual stream ablation would
+silently fall back to global σ, producing misleading results.
+
+**Why it's wrong:** This is a data dependency, not a code bug, but it's a
+silent correctness hazard.  A researcher running per-channel ablation with
+stale profiling data would get results that look valid but are actually
+global-threshold results for the residual stream site — and there would be
+no indication that anything was wrong.
+
+**Resolution (2026-08-05):**
+1. Added ``_check_residual_stream_per_channel_stats()`` in
+   ``exp2_ablation.py`` — a runtime guard that checks whether at least one
+   residual_stream site in ``layer_stats`` has non-None ``per_channel_std``
+   when per-channel ablation is requested for residual_stream.  If not,
+   logs a clear ERROR message and exits with ``sys.exit(1)`` rather than
+   silently falling back to global σ.
+2. Added a comment in ``scripts/run_full_experiment.sh`` above the Phase 1
+   invocation noting that Phase 1 MUST be re-run if the profiler has changed
+   since the last profiling output was produced.
+
+**What to do instead:** When adding new profiling data fields, add a runtime
+check in the consumer that verifies the data is present and exits with a
+clear error message if it isn't.  Silent fallback to a different code path
+is a reproducibility hazard.

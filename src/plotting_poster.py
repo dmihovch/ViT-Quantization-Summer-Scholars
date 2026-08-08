@@ -37,41 +37,29 @@ Plot index
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 
 import matplotlib
 import matplotlib.colors as mcolors
-import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 
 matplotlib.use("Agg")
 
 from src.ablation import AblationResult  # noqa: E402
+from src.plotting_utils import (
+    LABELS,
+    POSTER_PALETTE,
+    extract_block_index,
+    format_site_label,
+    site_sort_key,
+)
 
 logger = logging.getLogger(__name__)
 
-_BLOCK_RE = re.compile(r"blocks\.(\d+)")
-
-
-# ---------------------------------------------------------------------------
-# Shared poster styling
-# ---------------------------------------------------------------------------
-
-# Paul Tol-inspired qualitative palette (colourblind-safe, print-friendly).
-_PALETTE: dict[str, str] = {
-    "blue": "#4477AA",
-    "cyan": "#66CCEE",
-    "green": "#228833",
-    "yellow": "#CCBB44",
-    "red": "#EE6677",
-    "purple": "#AA3377",
-    "gray": "#BBBBBB",
-    "dark": "#222222",
-    "coral": "#CC3311",
-    "teal": "#009988",
-}
+# Backward-compatible aliases.
+_PALETTE = POSTER_PALETTE
+_site_sort_key = site_sort_key
 
 _DIVERGING = mcolors.LinearSegmentedColormap.from_list(
     "coolwarm_poster", ["#3B6FB6", "#EEEEEE", "#CC3311"]
@@ -118,12 +106,10 @@ def plot_activation_distribution_overlay(
 ) -> None:
     """Plot activation histogram with outlier threshold overlays.
 
-    This is the hero figure: it shows the raw activation distribution
-    overlaid with the global 3σ threshold (dashed red), the range of
-    per-channel thresholds (orange band), and the zeroed regions (light
-    red shading).  A single glance communicates: global thresholds
-    over-zero activations that fall within their own channel's normal
-    range.
+    This is the hero figure. It shows the raw activation distribution
+    overlaid with the global 3σ threshold (dashed red) and specific examples
+    of per-channel thresholds. A single glance communicates how global thresholds
+    can incorrectly clip activations that fall within a channel's normal range.
 
     Parameters
     ----------
@@ -157,38 +143,60 @@ def plot_activation_distribution_overlay(
     # --- Histogram ---
     counts, edges, _patches = ax.hist(
         flat, bins=bins,
-        color=_PALETTE["gray"], alpha=0.6, density=False,
+        color=_PALETTE["teal"], alpha=0.6, density=True,
         edgecolor="white", linewidth=0.2, zorder=1,
     )
 
     # --- Global threshold lines ---
     lo_global = global_mean - sigma_k * global_std
     hi_global = global_mean + sigma_k * global_std
-    ax.axvline(lo_global, color=_PALETTE["red"], linestyle="--", linewidth=2.0,
-               zorder=4, label=f"Global ±{sigma_k}σ = [{lo_global:.1f}, {hi_global:.1f}]")
-    ax.axvline(hi_global, color=_PALETTE["red"], linestyle="--", linewidth=2.0, zorder=4)
+    ax.axvline(lo_global, color=_PALETTE["coral"], linestyle="--", linewidth=2.0,
+               zorder=4)
+    ax.axvline(hi_global, color=_PALETTE["coral"], linestyle="--", linewidth=2.0, zorder=4,
+               label=f"Global ±{sigma_k}σ [{lo_global:.1f}, {hi_global:.1f}]")
 
-    # --- Per-channel threshold band ---
+    # --- Per-channel exemplar threshold lines ---
     if per_channel_stds is not None and per_channel_means is not None and len(per_channel_stds) > 0:
         pc_stds = np.asarray(per_channel_stds)
         pc_means = np.asarray(per_channel_means)
-        pc_lo = pc_means - sigma_k * pc_stds
-        pc_hi = pc_means + sigma_k * pc_stds
-        # Shade the region between min per-channel lower and max per-channel upper.
-        band_lo = float(np.min(pc_lo))
-        band_hi = float(np.max(pc_hi))
-        ax.axvspan(band_lo, band_hi, alpha=0.08, color=_PALETTE["yellow"], zorder=0)
-        ax.axvline(band_lo, color=_PALETTE["yellow"], linestyle="-.", linewidth=1.5,
-                   zorder=3, label=f"Per-channel ±{sigma_k}σ range [{band_lo:.1f}, {band_hi:.1f}]")
-        ax.axvline(band_hi, color=_PALETTE["yellow"], linestyle="-.", linewidth=1.5, zorder=3)
+
+        # Find exemplar channels
+        min_std_idx = np.argmin(pc_stds)
+        max_std_idx = np.argmax(pc_stds)
+
+        # Thresholds for the least volatile channel
+        lo_min_ch = pc_means[min_std_idx] - sigma_k * pc_stds[min_std_idx]
+        hi_min_ch = pc_means[min_std_idx] + sigma_k * pc_stds[min_std_idx]
+        ax.axvline(lo_min_ch, color=_PALETTE["blue"], linestyle=":", linewidth=2.0, zorder=3)
+        ax.axvline(hi_min_ch, color=_PALETTE["blue"], linestyle=":", linewidth=2.0, zorder=3,
+                   label=f"Ch. {min_std_idx} (min σ) bounds [{lo_min_ch:.1f}, {hi_min_ch:.1f}]")
+
+        # Thresholds for the most volatile channel
+        lo_max_ch = pc_means[max_std_idx] - sigma_k * pc_stds[max_std_idx]
+        hi_max_ch = pc_means[max_std_idx] + sigma_k * pc_stds[max_std_idx]
+        ax.axvline(lo_max_ch, color="#006400", linestyle="-.", linewidth=2.0, zorder=3) # Dark Green
+        ax.axvline(hi_max_ch, color="#006400", linestyle="-.", linewidth=2.0, zorder=3,
+                   label=f"Ch. {max_std_idx} (max σ) bounds [{lo_max_ch:.1f}, {hi_max_ch:.1f}]")
 
     # --- Zeroed regions ---
-    if xlim is None:
-        xlim = (float(np.percentile(flat, 0.1)), float(np.percentile(flat, 99.9)))
-    ax.set_xlim(xlim)
+    # Determine x-limits dynamically to include all lines and data percentiles.
+    x_values_to_include = [
+        float(np.percentile(flat, 0.1)),
+        float(np.percentile(flat, 99.9)),
+        lo_global, hi_global,
+    ]
+    if 'lo_min_ch' in locals(): # Check if exemplar vars were created
+        x_values_to_include.extend([lo_min_ch, hi_min_ch, lo_max_ch, hi_max_ch])
+    
+    x_min = min(x_values_to_include)
+    x_max = max(x_values_to_include)
+    padding = (x_max - x_min) * 0.05
+    ax.set_xlim(x_min - padding, x_max + padding)
+    final_xlim = ax.get_xlim()
+
     ymax = ax.get_ylim()[1]
-    ax.fill_between([xlim[0], lo_global], 0, ymax, color=_PALETTE["red"], alpha=0.04, zorder=0)
-    ax.fill_between([hi_global, xlim[1]], 0, ymax, color=_PALETTE["red"], alpha=0.04, zorder=0)
+    ax.fill_between([final_xlim[0], lo_global], 0, ymax, color=_PALETTE["red"], alpha=0.04, zorder=0)
+    ax.fill_between([hi_global, final_xlim[1]], 0, ymax, color=_PALETTE["red"], alpha=0.04, zorder=0)
 
     # --- Mean line ---
     ax.axvline(global_mean, color=_PALETTE["dark"], linestyle="-", linewidth=1.0,
@@ -196,19 +204,10 @@ def plot_activation_distribution_overlay(
 
     # --- Labels ---
     ax.set_xlabel("Activation value", fontsize=16, color=_PALETTE["dark"])
-    ax.set_ylabel("Count", fontsize=16, color=_PALETTE["dark"])
+    ax.set_ylabel("Probability Density", fontsize=16, color=_PALETTE["dark"])
     ax.set_title(layer_name, fontsize=18, color=_PALETTE["dark"], fontweight="bold")
     ax.legend(fontsize=12, loc="upper left", frameon=True, facecolor="white",
               edgecolor="#DDDDDD")
-
-    # Add annotation: what fraction lives in the zeroed regions.
-    frac_zeroed = float(np.mean((flat < lo_global) | (flat > hi_global)))
-    ax.annotate(
-        f"{frac_zeroed * 100:.1f}% zeroed\nby global ±{sigma_k}σ",
-        xy=(lo_global, ymax * 0.7),
-        fontsize=11, color=_PALETTE["red"],
-        ha="right", va="top",
-    )
 
     fig.tight_layout(pad=1.2)
     fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
@@ -227,14 +226,17 @@ def plot_outlier_site_grid(
     *,
     sigma_key: str = "3.0_sigma",
     title: str | None = None,
+    vmin: float = 0.0,
+    vmax: float | None = None,
+    add_colorbar: bool = True,
 ) -> None:
     """Plot a small-multiples grid of outlier fractions across all sites.
 
-    Renders a 12×6 grid of coloured tiles where each tile's intensity
-    encodes the outlier fraction at that (block, site) pair.  This
-    communicates "where are the outliers?" in a single glance — no
-    colorbar cross-referencing needed at poster distance if the colour
-    saturation is strong enough.
+    Renders a 12x6 grid of coloured tiles where each tile's intensity
+    encodes the outlier fraction at that (block, site) pair. This
+    communicates "where are the outliers?" in a single glance. The color
+    saturation is strong enough to be clear without cross-referencing a
+    colorbar, even at a poster-viewing distance.
 
     Parameters
     ----------
@@ -253,8 +255,16 @@ def plot_outlier_site_grid(
         "post_softmax", "post_layernorm_2", "pre_gelu",
     ]
 
-    # Build matrix: blocks 0..11 × sites.
-    matrix = np.full((12, len(site_order)), np.nan)
+    # Determine number of blocks from data.
+    block_indices: set[int] = set()
+    for sid in outlier_fractions:
+        bi = extract_block_index(sid)
+        if bi is not None:
+            block_indices.add(bi)
+    num_blocks = max(block_indices) + 1 if block_indices else 12
+
+    # Build matrix: blocks × sites.
+    matrix = np.full((num_blocks, len(site_order)), np.nan)
     for sid, fracs in outlier_fractions.items():
         if sigma_key not in fracs:
             continue
@@ -270,19 +280,19 @@ def plot_outlier_site_grid(
             continue
         if site not in site_order:
             continue
-        if 0 <= blk < 12:
+        if 0 <= blk < num_blocks:
             matrix[blk, site_order.index(site)] = fracs[sigma_key]
 
-    fig, axes = plt.subplots(12, len(site_order),
-                              figsize=(len(site_order) * 1.6, 12 * 0.45),
+    fig, axes = plt.subplots(num_blocks, len(site_order),
+                              figsize=(len(site_order) * 1.6, num_blocks * 0.45),
                               facecolor="white")
     if title:
         fig.suptitle(title, fontsize=16, fontweight="bold", color=_PALETTE["dark"], y=0.98)
 
-    vmax = float(np.nanmax(matrix)) if np.any(~np.isnan(matrix)) else 0.01
-    vmin = 0.0
+    _vmax = vmax if vmax is not None else (float(np.nanmax(matrix)) if np.any(~np.isnan(matrix)) else 0.01)
+    _vmin = vmin
 
-    for row in range(12):
+    for row in range(num_blocks):
         for col in range(len(site_order)):
             ax = axes[row, col]
             val = matrix[row, col]
@@ -290,9 +300,14 @@ def plot_outlier_site_grid(
             if np.isnan(val):
                 ax.set_facecolor("#F0F0F0")
             else:
-                # Map fraction to colour intensity.
-                intensity = min(val / max(vmax, 1e-8), 1.0)
-                ax.set_facecolor(mcolors.to_rgba(_PALETTE["red"], alpha=0.15 + 0.85 * intensity))
+                # Map fraction to colour intensity clamped to [_vmin, _vmax].
+                # Interpolate: light pink (#FFD0D0) → deep red (#8B0000).
+                clamped = np.clip(val, _vmin, _vmax)
+                intensity = (clamped - _vmin) / max(_vmax - _vmin, 1e-8)
+                r = int(255 * (1.0 - intensity) + 139 * intensity)
+                g = int(208 * (1.0 - intensity))
+                b = int(208 * (1.0 - intensity))
+                ax.set_facecolor((r / 255, g / 255, b / 255))
 
             ax.set_xticks([])
             ax.set_yticks([])
@@ -305,11 +320,11 @@ def plot_outlier_site_grid(
                 ax.text(0.5, 0.5, f"{val * 100:.1f}%",
                         ha="center", va="center",
                         fontsize=7, fontweight="bold",
-                        color=_PALETTE["dark"] if val < 0.5 * vmax else "white",
+                        color=_PALETTE["dark"] if val < 0.5 * _vmax else "white",
                         transform=ax.transAxes)
 
     # Row labels.
-    for row in range(12):
+    for row in range(num_blocks):
         axes[row, 0].set_ylabel(f"Blk {row}", fontsize=8, color=_PALETTE["dark"],
                                 rotation=0, ha="right", va="center",
                                 labelpad=15)
@@ -319,14 +334,42 @@ def plot_outlier_site_grid(
         axes[0, col].set_title(site.replace("_", " "), fontsize=7,
                                color=_PALETTE["dark"], pad=3)
 
-    fig.tight_layout(pad=0.8)
+    # Optional colorbar - placed to the right of the grid using a
+    # manually-positioned axis so tight_layout cannot override it.
+    if add_colorbar:
+        sm = plt.cm.ScalarMappable(
+            norm=mcolors.Normalize(vmin=_vmin * 100, vmax=_vmax * 100),
+            cmap=mcolors.LinearSegmentedColormap.from_list(
+                "outlier_red", ["#FFD0D0", "#8B0000"]
+            ),
+        )
+        sm.set_array([])
+        # Place colorbar axis manually: right edge of the last column + gap.
+        # tight_layout will be called first, then we add the colorbar after.
+
+    # Let tight_layout handle the grid first.
+    fig.tight_layout(pad=1.2)
+
+    if add_colorbar:
+        # Get the bounding box of the last column's axes.
+        last_col_axes = [axes[r, -1] for r in range(num_blocks)]
+        # Compute the rightmost extent of the grid.
+        right_edge = max(ax.get_position().x1 for ax in last_col_axes)
+        bottom = axes[-1, 0].get_position().y0
+        top = axes[0, 0].get_position().y1
+        cbar_width = 0.015
+        cbar_left = right_edge + 0.04  # ~one column-width gap
+        cax = fig.add_axes([cbar_left, bottom, cbar_width, top - bottom])
+        cbar = fig.colorbar(sm, cax=cax)
+        cbar.set_label("Outlier fraction (%)", fontsize=10, color=_PALETTE["dark"])
+        cbar.ax.tick_params(labelsize=8)
     fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     logger.info("Saved outlier site grid to %s", output_path)
 
 
 # ===========================================================================
-# 3. Connected scatter — accuracy vs %-zeroed
+# 3. Grouped bar chart — accuracy at discrete sigma thresholds
 # ===========================================================================
 
 
@@ -340,13 +383,10 @@ def plot_accuracy_vs_sparsity_scatter(
     sigma_ks: tuple[float, ...] = (3.0, 4.0, 6.0),
     title: str | None = None,
 ) -> None:
-    """Plot accuracy against fraction zeroed as a connected scatter.
+    """Plot accuracy as a grouped bar chart at discrete sigma thresholds.
 
-    Each point is (mean %-zeroed across layers, top-1 accuracy).
-    Points are connected in k-order and colour-coded by condition.
-    The per-channel curve sits to the right of the global curve —
-    same accuracy at higher sparsity — visually communicating
-    efficiency without requiring the viewer to cross-reference axes.
+    The x-axis has three discrete clusters ("3.0 σ", "4.0 σ", "6.0 σ"),
+    # each with two bars side-by-side: one for Global, one for Per-channel.
 
     Parameters
     ----------
@@ -365,62 +405,76 @@ def plot_accuracy_vs_sparsity_scatter(
     title:
         Override plot title.
     """
-    def _extract(results: list[AblationResult]) -> dict[float, tuple[float, float]]:
-        """Extract (mean_pct_zeroed, accuracy) per k for non-random results."""
-        by_k: dict[float, tuple[list[float], list[float]]] = {}
-        for r in results:
-            if r.is_random:
-                continue
-            k = r.sigma_threshold
-            by_k.setdefault(k, ([], []))
-            by_k[k][0].append(r.top1_accuracy)
-            by_k[k][1].append(r.pct_zeroed)
-        out: dict[float, tuple[float, float]] = {}
-        for k in sorted(by_k.keys()):
-            accs, pcts = by_k[k]
-            out[k] = (float(np.mean(accs)), float(np.mean(pcts)))
-        return out
+    def _acc_at_k(
+        results: list[AblationResult], k: float,
+    ) -> tuple[float, float]:
+        """Return (mean_accuracy, std_accuracy) at threshold k."""
+        accs = [r.top1_accuracy for r in results
+                if r.sigma_threshold == k and not r.is_random]
+        if not accs:
+            return (0.0, 0.0)
+        return (float(np.mean(accs)), float(np.std(accs)))
 
-    pts_a = _extract(results_a)
-    pts_b = _extract(results_b)
     baseline = results_a[0].baseline_top1 if results_a else 0.0
 
-    fig, ax = plt.subplots(figsize=(9, 6), facecolor="white")
+    # Build per-k accuracy lookups.
+    a_vals = {k: _acc_at_k(results_a, k) for k in sigma_ks}
+    b_vals = {k: _acc_at_k(results_b, k) for k in sigma_ks}
+
+    means_a = [a_vals[k][0] for k in sigma_ks]
+    stds_a = [a_vals[k][1] for k in sigma_ks]
+    means_b = [b_vals[k][0] for k in sigma_ks]
+    stds_b = [b_vals[k][1] for k in sigma_ks]
+
+    fig, ax = plt.subplots(figsize=(10, 7), facecolor="white")
     _poster_style(ax, fontsize=16)
 
-    for pts, color, label, marker in [
-        (pts_a, _PALETTE["coral"], label_a, "o"),
-        (pts_b, _PALETTE["teal"], label_b, "s"),
-    ]:
-        ks = sorted(pts.keys())
-        xs = [pts[k][1] for k in ks]
-        ys = [pts[k][0] for k in ks]
-        ax.plot(xs, ys, "-", color=color, linewidth=2, alpha=0.5, zorder=2)
-        ax.scatter(xs, ys, c=color, s=120, marker=marker, zorder=3,
-                   edgecolors="white", linewidth=1, label=label)
-        for k, x, y in zip(ks, xs, ys):
-            ax.annotate(f"k={k:.0f}", (x, y),
-                        textcoords="offset points", xytext=(8, -4),
-                        fontsize=10, color=color, alpha=0.9)
+    x = np.arange(len(sigma_ks))
+    width = 0.30
 
-    # Baseline horizontal.
-    ax.axhline(baseline, color=_PALETTE["gray"], linestyle="--", linewidth=1.5,
-               zorder=1, label=f"Baseline {baseline:.1f}%")
+    bars_a = ax.bar(
+        x - width / 2, means_a, width,
+        color=_PALETTE["coral"], edgecolor="white", linewidth=1.2,
+        yerr=stds_a, capsize=6, label=label_a, zorder=3,
+    )
+    bars_b = ax.bar(
+        x + width / 2, means_b, width,
+        color=_PALETTE["teal"], edgecolor="white", linewidth=1.2,
+        yerr=stds_b, capsize=6, label=label_b, zorder=3,
+    )
 
-    ax.set_xlabel("% Elements Zeroed", fontsize=16, color=_PALETTE["dark"])
-    ax.set_ylabel("Top-1 Accuracy (%)", fontsize=16, color=_PALETTE["dark"])
-    ax.set_title(title or f"Accuracy vs Sparsity — {results_a[0].site}",
+    # Baseline reference line.
+    ax.axhline(baseline, color=_PALETTE["gray"], linestyle="--", linewidth=2.0,
+               zorder=1, alpha=0.8, label=f"Baseline {baseline:.1f}%")
+
+    # Value annotations on bars.
+    for bar_group, color in [(bars_a, _PALETTE["coral"]), (bars_b, _PALETTE["teal"])]:
+        for bar in bar_group:
+            height = bar.get_height()
+            if height > 0:
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2, height + 1.5,
+                    f"{height:.2f}",
+                    ha="center", va="bottom", fontsize=12,
+                    fontweight="bold", color=_PALETTE["dark"],
+                )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{k:.0f} σ" for k in sigma_ks], fontsize=14)
+    ax.set_xlabel(LABELS["sigma_threshold"], fontsize=16, color=_PALETTE["dark"])
+    ax.set_ylabel(LABELS["accuracy"], fontsize=16, color=_PALETTE["dark"])
+    ax.set_title(title or f"Accuracy by Threshold - {results_a[0].site}",
                  fontsize=18, color=_PALETTE["dark"], fontweight="bold")
     ax.legend(fontsize=13, loc="lower left", frameon=True,
               facecolor="white", edgecolor="#DDDDDD")
 
-    # Invert x-axis: moving right = more zeroed.
-    ax.invert_xaxis()
+    # Consistent y-axis: start from 0, leave room for the baseline line.
+    ax.set_ylim(0, baseline + 10)
 
     fig.tight_layout(pad=1.2)
     fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
     plt.close(fig)
-    logger.info("Saved accuracy vs sparsity scatter to %s", output_path)
+    logger.info("Saved accuracy grouped bar chart to %s", output_path)
 
 
 # ===========================================================================
@@ -428,20 +482,20 @@ def plot_accuracy_vs_sparsity_scatter(
 # ===========================================================================
 
 
-def plot_per_channel_sigma_ridgeline(
+def plot_per_channel_sigma_line(
     per_channel_stds: dict[str, list[float]],
     output_path: Path,
     *,
     title: str | None = None,
-    colourmap_name: str = "viridis",
-    overlap: float = 0.6,
+    cmap_name: str = "viridis",
 ) -> None:
-    """Plot ridgeline (joyplot) of per-channel σ distributions across blocks.
+    """Plot mean per-channel σ with ±1σ band across blocks.
 
-    Each block is a filled density curve, vertically offset and coloured
-    by block depth.  Late blocks show bimodal, wide distributions; early
-    blocks are tight Gaussian-like clusters.  Much more visceral than a
-    heatmap.
+    Each block is a single point: the mean of its per-channel σ_c values
+    with a shaded band showing ±1 standard deviation of the σ_c
+    distribution.  Uses a continuous sequential colormap tied to block
+    depth so that early (narrow) and late (wide) blocks are visually
+    comparable without log-axes.
 
     Parameters
     ----------
@@ -451,79 +505,62 @@ def plot_per_channel_sigma_ridgeline(
         Destination PNG path.
     title:
         Override plot title.
-    colourmap_name:
+    cmap_name:
         Matplotlib sequential colormap name.
-    overlap:
-        Vertical overlap between curves (0=no overlap, 1=full overlap).
     """
-    # Filter to pre_gelu sites only and sort by block index.
     gelu_stds: list[tuple[int, np.ndarray]] = []
     for sid, stds in per_channel_stds.items():
         if "/pre_gelu" not in sid:
             continue
-        m = _BLOCK_RE.search(sid)
-        if not m:
+        bi = extract_block_index(sid)
+        if bi is None:
             continue
-        blk = int(m.group(1))
-        gelu_stds.append((blk, np.asarray(stds, dtype=np.float32)))
+        gelu_stds.append((bi, np.asarray(stds, dtype=np.float32)))
     gelu_stds.sort(key=lambda x: x[0])
 
     if not gelu_stds:
-        logger.warning("No pre_gelu per-channel σ data found; skipping ridgeline.")
+        logger.warning("No pre_gelu per-channel σ data found; skipping line chart.")
         return
 
+    blocks = [b for b, _ in gelu_stds]
+    means = [float(np.mean(arr)) for _, arr in gelu_stds]
+    stds_of_stds = [float(np.std(arr)) for _, arr in gelu_stds]
     n = len(gelu_stds)
-    fig, ax = plt.subplots(figsize=(12, n * 0.65), facecolor="white")
+
+    fig, ax = plt.subplots(figsize=(10, 5), facecolor="white")
     _poster_style(ax, fontsize=14)
 
-    cmap = plt.get_cmap(colourmap_name)
-    # Global x-range (shared across all blocks).
-    all_vals = np.concatenate([arr for _, arr in gelu_stds])
-    x_min = 0.0
-    x_max = float(np.percentile(all_vals, 99))
+    cmap = plt.get_cmap(cmap_name)
+    colors = [cmap(i / max(n - 1, 1)) for i in range(n)]
 
-    # Build KDE for each block.
-    xs = np.linspace(x_min, x_max, 500)
+    ax.fill_between(
+        blocks,
+        [m - s for m, s in zip(means, stds_of_stds)],
+        [m + s for m, s in zip(means, stds_of_stds)],
+        color=colors[0] if colors else _PALETTE["teal"],
+        alpha=0.15,
+        label="±1 std of per-channel σ",
+        linewidth=0,
+    )
 
-    for idx, (blk, arr) in enumerate(gelu_stds):
-        # Simple Gaussian KDE approximation using histogram smoothing.
-        hist, edges = np.histogram(arr, bins=100, range=(x_min, x_max), density=True)
-        centres = (edges[:-1] + edges[1:]) / 2
-        from scipy.ndimage import gaussian_filter1d
-        density = gaussian_filter1d(hist.astype(np.float64), sigma=2.0)
-        # Interpolate to common x grid.
-        density_interp = np.interp(xs, centres, density)
-        density_interp = density_interp / (density_interp.max() + 1e-10)  # normalise peak=1
+    ax.plot(
+        blocks, means, marker="o", markersize=8, linewidth=2.5,
+        color=_PALETTE["teal"], zorder=4, label="Mean per-channel σ",
+    )
 
-        # Colour by block depth.
-        color = cmap(idx / max(n - 1, 1))
-
-        # Vertical offset.
-        baseline = (n - 1 - idx) * overlap
-        ax.fill_between(xs, baseline, baseline + density_interp,
-                        color=color, alpha=0.85, zorder=idx, linewidth=0)
-
-        # Block label.
-        ax.text(x_max * 1.01, baseline + 0.1, f"Blk {blk}",
-                fontsize=9, color=color, va="bottom", ha="left",
-                fontweight="bold")
-
-    # Per-channel σ mean reference line.
-    mean_sigma = float(np.mean(all_vals))
-    ax.axvline(mean_sigma, color=_PALETTE["gray"], linestyle=":", linewidth=1,
-               zorder=n + 1, alpha=0.6)
-
-    ax.set_xlim(x_min, x_max * 1.15)
-    ax.set_ylim(-0.3, n * overlap + 0.3)
-    ax.set_yticks([])
-    ax.set_xlabel("Per-channel σ", fontsize=14, color=_PALETTE["dark"])
-    ax.set_title(title or "Per-Channel σ Distribution — pre-GELU",
+    ax.set_xticks(blocks)
+    ax.set_xticklabels([str(b) for b in blocks], fontsize=11)
+    ax.set_xlabel(LABELS["block"], fontsize=14, color=_PALETTE["dark"])
+    ax.set_ylabel("Per-channel standard deviation", fontsize=14, color=_PALETTE["dark"])
+    ax.set_title(title or "Per-Channel Standard Deviation by Block Depth — pre-GELU",
                  fontsize=16, color=_PALETTE["dark"], fontweight="bold")
+    ax.legend(fontsize=11, loc="upper left", frameon=True,
+              facecolor="white", edgecolor="#DDDDDD")
 
     fig.tight_layout(pad=1.2)
     fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
     plt.close(fig)
-    logger.info("Saved per-channel σ ridgeline to %s", output_path)
+    logger.info("Saved per-channel σ line chart to %s", output_path)
 
 
 # ===========================================================================
@@ -531,18 +568,17 @@ def plot_per_channel_sigma_ridgeline(
 # ===========================================================================
 
 
-def plot_attention_entropy_streamgraph(
+def plot_attention_entropy_heatmap(
     cls_entropies: dict[str, list[float]],
     output_path: Path,
     *,
     title: str | None = None,
 ) -> None:
-    """Plot a streamgraph of CLS attention entropy across blocks.
+    """Plot CLS attention entropy as a 2D heatmap (heads × blocks).
 
-    Each attention head is a coloured band.  The stream narrows in later
-    blocks as entropy collapses — the attention sink phenomenon
-    (Zhai et al. 2023, ICML).  At poster distance, the narrowing stream
-    communicates the collapse more viscerally than a heatmap.
+    Each cell's colour intensity encodes entropy in nats for a specific
+    (head, block) pair.  Unlike a stacked area chart, every head is
+    independently readable — its baseline is always zero.
 
     Parameters
     ----------
@@ -554,19 +590,17 @@ def plot_attention_entropy_streamgraph(
     title:
         Override plot title.
     """
-    # Build (num_blocks, num_heads) matrix.
     entries: list[tuple[int, list[float]]] = []
     for sid, ent in cls_entropies.items():
-        m = _BLOCK_RE.search(sid)
-        if not m:
+        bi = extract_block_index(sid)
+        if bi is None:
             continue
-        blk = int(m.group(1))
-        if blk < 0 or blk > 11:
+        if bi < 0 or bi > 11:
             continue
-        entries.append((blk, ent))
+        entries.append((bi, ent))
 
     if not entries:
-        logger.warning("No CLS entropy data; skipping streamgraph.")
+        logger.warning("No CLS entropy data; skipping heatmap.")
         return
 
     entries.sort(key=lambda x: x[0])
@@ -579,58 +613,31 @@ def plot_attention_entropy_streamgraph(
         for h in range(min(num_heads, len(ent))):
             matrix[h, blk] = ent[h]
 
-    # Baseline: shift each head so that all curves are positive and stack.
-    # Use a gallery-style baseline (wiggle).
-    baseline = np.zeros(num_blocks)
-    stacked = np.zeros((num_heads + 1, num_blocks))
-    for h in range(num_heads):
-        stacked[h + 1] = stacked[h] + matrix[h]
-    centre = 0.5 * (stacked[0] + stacked[-1])
-    centred = matrix - centre[np.newaxis, :]  # centre each column at 0
-
-    # Head colour palette.
-    head_colors = [plt.get_cmap("tab20")(i % 20) for i in range(num_heads)]
-
     fig, ax = plt.subplots(figsize=(12, 6), facecolor="white")
     _poster_style(ax, fontsize=14)
 
-    x = np.arange(num_blocks)
-    cumsum = np.zeros(num_blocks)
-    for h in range(num_heads):
-        vals = centred[h]
-        ax.fill_between(x, cumsum, cumsum + vals,
-                        color=head_colors[h], alpha=0.85, linewidth=0,
-                        zorder=num_heads - h)
-        cumsum += vals
-
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"{i}" for i in range(num_blocks)], fontsize=11)
-    ax.set_xlabel("Encoder Block", fontsize=14, color=_PALETTE["dark"])
-    ax.set_ylabel("CLS Entropy (nats)", fontsize=14, color=_PALETTE["dark"])
-    ax.set_title(title or "CLS Attention Entropy — Streamgraph",
-                 fontsize=16, color=_PALETTE["dark"], fontweight="bold")
-    ax.set_yticks([])
-
-    # Annotate the collapse.
-    mid_entropy = float(np.mean(matrix[:, :4]))
-    late_entropy = float(np.mean(matrix[:, -4:]))
-    ax.annotate(
-        f"Early blocks\nmean: {mid_entropy:.2f} nats",
-        xy=(2, 0), fontsize=11, color=_PALETTE["dark"],
-        ha="center", va="bottom",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="#DDDDDD", alpha=0.9),
+    im = ax.imshow(
+        matrix, aspect="auto", origin="lower",
+        cmap="viridis", interpolation="nearest",
     )
-    ax.annotate(
-        f"Late blocks\nmean: {late_entropy:.2f} nats",
-        xy=(9, 0), fontsize=11, color=_PALETTE["dark"],
-        ha="center", va="bottom",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="#DDDDDD", alpha=0.9),
-    )
+
+    ax.set_xticks(np.arange(num_blocks))
+    ax.set_xticklabels([str(i) for i in range(num_blocks)], fontsize=11)
+    ax.set_yticks(np.arange(num_heads))
+    ax.set_yticklabels([f"Head {h}" for h in range(num_heads)], fontsize=10)
+    ax.set_xlabel(LABELS["block"], fontsize=14, color=_PALETTE["dark"])
+    ax.set_ylabel("Head", fontsize=14, color=_PALETTE["dark"])
+    ax.set_title(title or "CLS Attention Entropy — Heatmap",
+                 fontsize=16, color=_PALETTE["dark"], fontweight="bold", pad=12)
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.85, pad=0.02)
+    cbar.set_label("Entropy (nats)", fontsize=13, color=_PALETTE["dark"])
+    cbar.ax.tick_params(labelsize=11)
 
     fig.tight_layout(pad=1.2)
     fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
     plt.close(fig)
-    logger.info("Saved attention entropy streamgraph to %s", output_path)
+    logger.info("Saved attention entropy heatmap to %s", output_path)
 
 
 # ===========================================================================
@@ -638,7 +645,7 @@ def plot_attention_entropy_streamgraph(
 # ===========================================================================
 
 
-def plot_ablation_waterfall(
+def plot_ablation_comparison(
     baseline: float,
     global_acc: float,
     mean_only_acc: float,
@@ -649,22 +656,23 @@ def plot_ablation_waterfall(
     title: str | None = None,
     sigma_k: float = 3.0,
 ) -> None:
-    """Plot a waterfall chart decomposing the per-channel accuracy benefit.
+    """Plot a grouped bar chart comparing ablation conditions at threshold k.
 
-    Shows how the accuracy degrades from baseline through each ablation
-    variant, revealing whether the per-channel benefit comes from mean
-    correction, variance correction, or both.
+    Shows baseline accuracy alongside four independent ablation conditions
+    (global, mean_only, var_only, outlier) as grouped bars.  Unlike the
+    previous waterfall design, this does not imply additivity between
+    conditions — they are independent experiments.
 
     Parameters
     ----------
     baseline:
         Unablated top-1 accuracy (%).
     global_acc:
-        Global-σ ablation accuracy at k.
+        Global-sigma ablation accuracy at k.
     mean_only_acc:
-        ``mean_only`` ablation accuracy at k (per-channel μ_c, global σ).
+        ``mean_only`` ablation accuracy at k (per-channel mu_c, global sigma).
     var_only_acc:
-        ``var_only`` ablation accuracy at k (global μ, per-channel σ_c).
+        ``var_only`` ablation accuracy at k (global mu, per-channel sigma_c).
     outlier_acc:
         Full per-channel outlier ablation accuracy at k.
     output_path:
@@ -674,91 +682,56 @@ def plot_ablation_waterfall(
     sigma_k:
         Sigma threshold for the annotation.
     """
-    labels = ["Baseline", "Global\n±kσ",
-              "+ Per-ch.\nμ_c", "+ Per-ch.\nσ_c",
-              "+ Interaction",
-              "Per-channel\n(total)"]
-    values = [baseline,
-              global_acc - baseline,
-              mean_only_acc - global_acc,
-              var_only_acc - mean_only_acc,
-              outlier_acc - var_only_acc,
-              0.0]  # final is sum of increments
+    labels = ["Baseline", "Global\nμ + global σ",
+              "Per-ch. μ +\nglobal σ",
+              "Global μ +\n per-ch. σ",
+              "Per-ch. μ +\n per-ch. σ"]
+    values = [baseline, global_acc, mean_only_acc, var_only_acc, outlier_acc]
+    diffs = [0.0] + [v - baseline for v in values[1:]]
 
-    # Compute running total for bar positions.
-    running = [baseline]
-    for v in values[1:-1]:
-        running.append(running[-1] + v)
-    running.append(outlier_acc)
-
-    # Bar bottoms and heights.
-    bottoms = [running[0]] + [min(running[i], running[i + 1]) for i in range(len(running) - 1)]
-    heights = [0] + [values[i] for i in range(1, len(values) - 1)] + [0]
-    # The final "total" bar should span from 0 to outlier_acc (not from the running sum).
-    bottoms[-1] = 0
-    heights[-1] = outlier_acc
-
-    colors = [_PALETTE["gray"],
-              _PALETTE["red"],
-              _PALETTE["yellow"],
-              _PALETTE["blue"],
-              _PALETTE["green"],
-              _PALETTE["teal"]]
-    color_labels = ["Starting\nvalue", "Change",
-                    "Change", "Change",
-                    "Change", "Final\nvalue"]
+    colors = [
+        _PALETTE["gray"],
+        _PALETTE["coral"],
+        _PALETTE["yellow"],
+        _PALETTE["blue"],
+        _PALETTE["teal"],
+    ]
 
     fig, ax = plt.subplots(figsize=(10, 6), facecolor="white")
     _poster_style(ax, fontsize=15)
 
     x = np.arange(len(labels))
-    bars = ax.bar(x, heights, bottom=bottoms, color=colors,
-                  edgecolor="white", linewidth=1.5, width=0.55, zorder=3)
+    bars = ax.bar(x, values, color=colors, edgecolor="white", linewidth=1.5,
+                  width=0.55, zorder=3)
 
     # Value annotations on bars.
-    for i in range(len(labels)):
-        val = running[i]
-        bar_top = bottoms[i] + heights[i]
-        mid = (bottoms[i] + bar_top) / 2
-        ax.text(i, mid + 1.5, f"{val:.2f}%",
-                ha="center", va="center", fontsize=14,
-                fontweight="bold", color="white" if i > 0 else _PALETTE["dark"])
+    for i, (val, diff) in enumerate(zip(values, diffs)):
+        ax.text(i, val + 1.5, f"{val:.2f}%",
+                ha="center", va="bottom", fontsize=13,
+                fontweight="bold", color=_PALETTE["dark"])
+        if i > 0:
+            sign = "+" if diff > 0 else ""
+            ax.annotate(f"{sign}{diff:.2f} pp vs baseline",
+                        xy=(i, val), xytext=(i, val + 6),
+                        fontsize=11,
+                        color=_PALETTE["red"] if diff < 0 else _PALETTE["teal"],
+                        ha="center")
 
-    # Delta annotations.
-    deltas = [0,
-              global_acc - baseline,
-              mean_only_acc - global_acc,
-              var_only_acc - mean_only_acc,
-              outlier_acc - var_only_acc,
-              outlier_acc - baseline]
-    for i in range(1, len(labels)):
-        d = deltas[i]
-        if abs(d) > 0.01:
-            sign = "+" if d > 0 else ""
-            ax.annotate(f"{sign}{d:.2f} pp",
-                        xy=(i, running[i]), xytext=(i, running[i] + 3.5 * np.sign(d)),
-                        fontsize=13, fontweight="bold",
-                        color=_PALETTE["red"] if d < 0 else _PALETTE["teal"],
-                        ha="center",
-                        arrowprops=dict(arrowstyle="->", color="#999999", lw=1.2))
+    # Baseline reference line.
+    ax.axhline(baseline, color=_PALETTE["gray"], linestyle="--", linewidth=1.5,
+               zorder=1, alpha=0.7)
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=13, color=_PALETTE["dark"])
-    ax.set_ylabel("Top-1 Accuracy (%)", fontsize=15, color=_PALETTE["dark"])
-    ax.set_title(title or f"Decomposing the Per-Channel Benefit at k={sigma_k}σ",
+    ax.set_ylabel(LABELS["accuracy"], fontsize=15, color=_PALETTE["dark"])
+    ax.set_title(title or f"Ablation Condition Comparison at k={sigma_k}",
                  fontsize=17, color=_PALETTE["dark"], fontweight="bold")
-    ax.set_ylim(0, baseline + 10)
-
-    # Legend for bar colors.
-    legend_patches = [mpatches.Patch(color=c, label=l)
-                      for c, l in zip(colors, color_labels)]
-    ax.legend(handles=legend_patches, fontsize=11, loc="upper right",
-              frameon=True, facecolor="white", edgecolor="#DDDDDD")
+    ax.set_ylim(0, baseline + 15)
 
     fig.tight_layout(pad=1.2)
     fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
     plt.close(fig)
-    logger.info("Saved ablation waterfall to %s", output_path)
+    logger.info("Saved ablation comparison to %s", output_path)
 
 
 # ===========================================================================
@@ -766,19 +739,20 @@ def plot_ablation_waterfall(
 # ===========================================================================
 
 
-def plot_per_channel_mean_hinton(
+def plot_per_channel_mean_histogram(
     per_channel_means: dict[str, list[float]],
     block_idx: int,
     output_path: Path,
     *,
-    max_squares_per_row: int = 40,
+    bins: int = 80,
     title: str | None = None,
 ) -> None:
-    """Plot a Hinton diagram of per-channel means for a single block.
+    """Plot a histogram of per-channel means for a single block.
 
-    Each channel is a square whose area encodes |μ| and colour encodes sign
-    (blue = positive, red = negative).  Ideal for showing the asymmetric
-    mean structure of block 10 pre-GELU where μ ranges −71 to +26.
+    The x-axis is the per-channel mean value and the y-axis is
+    frequency (channel count).  Outliers like a single -71.2 channel
+    sit visibly isolated, and the overall distribution shape around
+    zero is immediately apparent.
 
     Parameters
     ----------
@@ -788,63 +762,49 @@ def plot_per_channel_mean_hinton(
         Which encoder block to visualise (0-based).
     output_path:
         Destination PNG path.
-    max_squares_per_row:
-        Number of squares per row in the grid layout.
+    bins:
+        Number of histogram bins.
     title:
         Override plot title.
     """
     site_id = f"blocks.{block_idx}/pre_gelu"
     if site_id not in per_channel_means:
-        logger.warning("No per-channel mean data for %s; skipping Hinton.", site_id)
+        logger.warning("No per-channel mean data for %s; skipping histogram.", site_id)
         return
 
     means = np.asarray(per_channel_means[site_id], dtype=np.float64)
-    D = len(means)
+    fig, ax = plt.subplots(figsize=(10, 5), facecolor="white")
+    _poster_style(ax, fontsize=14)
 
-    # Grid layout.
-    n_cols = max_squares_per_row
-    n_rows = int(np.ceil(D / n_cols))
+    ax.hist(means, bins=bins, color=_PALETTE["teal"], alpha=0.7,
+            edgecolor="white", linewidth=0.3, zorder=2)
 
-    fig, ax = plt.subplots(figsize=(n_cols * 0.33, n_rows * 0.33 + 1),
-                           facecolor="white")
-    ax.set_xlim(0, n_cols)
-    ax.set_ylim(0, n_rows)
-    ax.set_aspect("equal")
-    ax.axis("off")
+    mean_val = float(np.mean(means))
+    median_val = float(np.median(means))
+    ax.axvline(mean_val, color=_PALETTE["red"], linestyle="--", linewidth=1.5,
+               zorder=4, label=f"Mean = {mean_val:.2f}")
+    ax.axvline(median_val, color=_PALETTE["dark"], linestyle=":", linewidth=1.5,
+               zorder=4, label=f"Median = {median_val:.2f}")
 
-    max_abs = float(max(np.max(np.abs(means)), 1e-10))
+    # Annotate the most extreme value if it's far out.
+    min_val = float(np.min(means))
+    max_val = float(np.max(means))
+    ax.annotate(
+        f"Min: {min_val:.1f}\nMax: {max_val:.1f}",
+        xy=(0.02, 0.95), xycoords="axes fraction",
+        fontsize=11, color=_PALETTE["dark"], ha="left", va="top",
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                  edgecolor="#DDDDDD", alpha=0.9),
+    )
 
-    for i in range(D):
-        row = n_rows - 1 - (i // n_cols)
-        col = i % n_cols
-        val = means[i]
+    ax.set_xlabel("Per-channel mean", fontsize=14, color=_PALETTE["dark"])
+    ax.set_ylabel("Number of channels", fontsize=14, color=_PALETTE["dark"])
+    ax.set_title(title or f"Per-Channel μ Distribution — Block {block_idx} pre-GELU",
+                 fontsize=16, color=_PALETTE["dark"], fontweight="bold")
+    ax.legend(fontsize=12, loc="upper right", frameon=True,
+              facecolor="white", edgecolor="#DDDDDD")
 
-        # Square size proportional to |μ|.
-        size = 0.85 * np.sqrt(abs(val) / max_abs)
-        half = size / 2
-        color = _PALETTE["blue"] if val > 0 else _PALETTE["red"]
-        alpha = 0.3 + 0.7 * (abs(val) / max_abs)
-
-        rect = mpatches.Rectangle(
-            (col + 0.5 - half, row + 0.5 - half),
-            size, size,
-            facecolor=color, edgecolor="none", alpha=alpha,
-        )
-        ax.add_patch(rect)
-
-    ax.set_title(title or f"Per-Channel μ — Block {block_idx} pre-GELU\n"
-                 f"Blue = +μ, Red = −μ, area ∝ |μ|, max |μ| = {max_abs:.1f}",
-                 fontsize=16, color=_PALETTE["dark"], fontweight="bold", pad=10)
-
-    # Legend.
-    legend_patches = [
-        mpatches.Patch(color=_PALETTE["blue"], alpha=0.6, label="μ > 0"),
-        mpatches.Patch(color=_PALETTE["red"], alpha=0.6, label="μ < 0"),
-    ]
-    ax.legend(handles=legend_patches, fontsize=12, loc="lower right",
-              frameon=True, facecolor="white", edgecolor="#DDDDDD")
-
-    fig.tight_layout(pad=1.5)
+    fig.tight_layout(pad=1.2)
     fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
     plt.close(fig)
-    logger.info("Saved per-channel mean Hinton diagram to %s", output_path)
+    logger.info("Saved per-channel mean histogram to %s", output_path)

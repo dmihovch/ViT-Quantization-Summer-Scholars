@@ -1232,6 +1232,95 @@ accuracy at k=3 (47.00% vs 43.24%).  At k≥4 the difference vanishes.
 
 ---
 
+### T-048 — Random control missing for post_layernorm_1 and post_layernorm_2 in per-channel mode
+
+**Severity:** MEDIUM
+**Status:** ✅ Closed (2026-08-05)
+**Category:** Bug — missing experimental control
+**Source:** Per-channel expansion review, 2026-08-05
+
+**Evidence**
+
+The ``do_random`` check in ``exp2_ablation._run_single`` read:
+```python
+do_random = site in ("pre_gelu", "residual_stream")
+```
+
+This was correct before the per-channel expansion (only those two sites existed
+in per-channel mode), but after expanding to all four channel-structured sites,
+``post_layernorm_1`` and ``post_layernorm_2`` were also ablated in per-channel
+mode and got no random control.  A reviewer comparing global results (which have
+random controls) against per-channel results would flag this asymmetry.
+
+**Resolution:** Changed to ``do_random = site != "pre_softmax"``.  This enables
+random control for all four channel-structured sites.  ``pre_softmax`` is excluded
+because random zeroing of attention logits is not meaningful (the softmax would
+normalize away uniform random perturbations) — the same reason it has no random
+control in global mode.
+
+**Affected files**
+- ``src/exp2_ablation.py`` — ``_run_single`` line 314
+- ``docs/MISTAKES.md`` — §18.1 added
+
+---
+
+### T-049 — ``_intervene_per_channel_generic`` misnamed
+
+**Severity:** LOW
+**Status:** ✅ Closed (2026-08-05)
+**Category:** Code clarity
+**Source:** Per-channel expansion review, 2026-08-05
+
+**Evidence**
+
+The function ``_intervene_per_channel_generic`` in ``ablation.py`` actually
+handles both per-channel and global modes — it falls back to
+``_build_zeroing_mask`` when per-channel stats are missing.  The name implied
+it was per-channel-only, which was misleading.
+
+**Resolution:** Renamed to ``_intervene_channel_structured`` throughout the file
+(function definition and all three call sites in ``zero_outliers_in_trace``).
+Updated docstring to clarify: "Uses per-channel μ_c and σ_c when available;
+falls back to global μ and σ otherwise."
+
+**Affected files**
+- ``src/ablation.py`` — function definition and 3 call sites
+- ``docs/MISTAKES.md`` — §18.2 added
+
+---
+
+### T-050 — Phase 1 must be re-run for residual stream per-channel stats
+
+**Severity:** MEDIUM
+**Status:** ✅ Closed (2026-08-05)
+**Category:** Data dependency / silent correctness hazard
+**Source:** Per-channel expansion review, 2026-08-05
+
+**Evidence**
+
+``profiler.py`` was updated to add ``track_per_channel=True`` to residual stream
+saves, but the existing ``profiling_result.json`` was produced before this change.
+Per-channel residual stream ablation would silently fall back to global σ,
+producing misleading results with no indication that anything was wrong.
+
+**Resolution:**
+1. Added ``_check_residual_stream_per_channel_stats()`` in ``exp2_ablation.py`` —
+   a runtime guard that checks whether at least one residual_stream site in
+   ``layer_stats`` has non-None ``per_channel_std`` when per-channel ablation is
+   requested for residual_stream.  If not, logs a clear ERROR message and exits
+   with ``sys.exit(1)`` rather than silently falling back to global σ.
+2. Added a comment in ``scripts/run_full_experiment.sh`` above the Phase 1
+   invocation noting that Phase 1 MUST be re-run if the profiler has changed
+   since the last profiling output was produced.
+
+**Affected files**
+- ``src/exp2_ablation.py`` — ``_check_residual_stream_per_channel_stats`` (new),
+  ``_run_single`` (guard call)
+- ``scripts/run_full_experiment.sh`` — comment above Phase 1 invocation
+- ``docs/MISTAKES.md`` — §18.3 added
+
+---
+
 ## Summary
 
 | Ticket | Severity | Status | Title |
@@ -1279,11 +1368,11 @@ encoded in the interaction of fc1.weight and LN2 γ.
 - ``scripts/analyze_effective_gain.py`` (new)
 - ``docs/phase2-expansion.md`` — RQ1 follow-up updated
 - ``docs/NEXT-STEPS.md`` — effective gain analysis section added
-| T-027 | MEDIUM | 🔲 Open | Per-channel mean-only and var-only ablation experiments
+| T-027 | MEDIUM | ✅ Closed (2026-08-08) | Per-channel mean-only and var-only ablation experiments — mean_only: 63.32%, var_only: 6.56% |
 | T-028 | MEDIUM | 🔲 Open | Layer-group per-channel ablation experiments
-| T-029 | MEDIUM | 🔲 Open | Multi-seed per-channel variance estimation
+| T-029 | MEDIUM | ✅ Closed (2026-08-08) | Multi-seed per-channel variance estimation — 5 seeds run, ablation is deterministic |
 | T-030 | LOW | 🔲 Open | Finer k-sweep for per-channel crossover point
-| T-031 | LOW | ✅ Closed (2026-08-03) | Bootstrap CI: k=3 delta 95% CI [3.12%, 4.36%] — significant
+| T-031 | LOW | ✅ Closed (2026-08-03) | 95% CI: k=3 delta 95% CI [3.12%, 4.36%] — significant
 | T-032 | LOW | ✅ Closed (2026-08-03) | Effective channels preserved sufficiency analysis
 | T-033 | LOW | ✅ Closed (2026-08-03) | Degradation per sparsity: per-channel 1.89× more efficient at k=3 |
 | T-034 | MEDIUM | ✅ Closed (2026-08-03) | `compute_pct_zeroed` was zero-centered; fixed to mean-centered |x−μ| > threshold |
@@ -1300,3 +1389,6 @@ encoded in the interaction of fc1.weight and LN2 γ.
 | T-045 | LOW | ✅ Closed (2026-08-03) | Poster plot tests added (12 fast, `tests/test_plotting_poster.py`) |
 | T-046 | LOW | ✅ Closed (2026-08-03) | `conftest.py` stale `hooks.LayerStats` reference removed |
 | T-047 | INFO | ✅ Closed (2026-08-03) | Documentation updated: README, NEXT-STEPS, issues — all plotting commands |
+| T-048 | MEDIUM | ✅ Closed (2026-08-05) | Random control missing for post_layernorm_1/2 in per-channel mode |
+| T-049 | LOW | ✅ Closed (2026-08-05) | `_intervene_per_channel_generic` misnamed — renamed to `_intervene_channel_structured` |
+| T-050 | MEDIUM | ✅ Closed (2026-08-05) | Phase 1 must be re-run for residual stream per-channel stats; added runtime guard |

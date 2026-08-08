@@ -18,13 +18,19 @@ import argparse
 import json
 import logging
 import math
+import sys
 from pathlib import Path
 
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 
+# Ensure project root is on sys.path so `src` imports work when run directly.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 matplotlib.use("Agg")
+
+from src.plotting_utils import ANALYTICAL_COLORS, LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +50,12 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("outputs/layernorm-gamma-analysis"),
         help="Directory for output table and scatter plots.",
+    )
+    # --run-dir convenience flag
+    parser.add_argument(
+        "--run-dir", type=Path, default=None,
+        help="Convenience: auto-discover files from a run directory "
+             "(e.g. outputs/full-run-2026-8-4).",
     )
     return parser.parse_args()
 
@@ -74,12 +86,30 @@ def pearson_r(x: list[float], y: list[float]) -> float:
     return cov / math.sqrt(var_x * var_y)
 
 
+def _discover_layer_stats(run_dir: Path) -> Path | None:
+    """Auto-discover profiling_result.json from a run directory."""
+    phase1_dir = run_dir / "phase1-profiling"
+    if phase1_dir.is_dir():
+        for seed_dir in sorted(phase1_dir.iterdir()):
+            if seed_dir.is_dir() and seed_dir.name.startswith("seed_"):
+                candidate = seed_dir / "profiling_result.json"
+                if candidate.is_file():
+                    return candidate
+    return None
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     args = _parse_args()
+
+    # --- Handle --run-dir auto-discovery ---
+    if args.run_dir is not None:
+        discovered = _discover_layer_stats(args.run_dir)
+        if discovered is not None:
+            args.layer_stats = discovered
 
     # Load Phase 1 stats.
     with open(args.layer_stats, "r", encoding="utf-8") as f:
@@ -141,31 +171,21 @@ def main() -> None:
     mean_r = sum(r["pearson_r"] for r in results) / len(results) if results else 0.0
     print(f"\nMean Pearson r across all blocks: {mean_r:+.4f}")
 
-    # Generate bar chart of per-block Pearson r.
-    # NOTE: LN2 γ is 768-dim (embedding) while pre-GELU σ_c is 3072-dim
-    # (MLP hidden).  These are different spaces — the relationship is mediated
-    # by fc1.weight (3072×768).  We cannot scatter them directly.
-    # Instead, we plot per-block Pearson r as a bar chart.
+    # NOTE: We do NOT generate a bar chart of per-block Pearson r here.
+    # LN2 γ is 768-dim (embedding) while pre-GELU σ_c is 3072-dim
+    # (MLP hidden).  These are different spaces — a valid element-wise
+    # Pearson r cannot be computed without arbitrary broadcasting, and
+    # the resulting r ≈ 0.0003 is just statistical noise.  Plotting
+    # microscopic noise as giant coloured bars misleads the reader.
+    #
+    # The correct analysis is in ``analyze_effective_gain.py``, which
+    # computes ‖fc1.weight[c,:] ⊙ γ‖₂ (3072-dim) vs σ_c (3072-dim).
     args.output_dir.mkdir(parents=True, exist_ok=True)
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    blocks = [r["block"] for r in results]
-    rs = [r["pearson_r"] for r in results]
-    colors = ["steelblue" if r >= 0 else "coral" for r in rs]
-    ax.bar(blocks, rs, color=colors, edgecolor="black", linewidth=0.5)
-    ax.axhline(y=0, color="black", linewidth=0.5)
-    ax.set_xlabel("Encoder Block")
-    ax.set_ylabel("Pearson r(LN2 γ, pre-GELU σ_c)")
-    ax.set_title(
-        "LayerNorm γ vs Per-Channel pre-GELU σ Correlation\n"
-        "(768-dim γ vs 3072-dim σ_c — different spaces, r ≈ 0 as expected)"
+    logger.info(
+        "Skipping LN2 γ correlation bar chart: γ (768-dim) and σ_c "
+        "(3072-dim) live in different spaces.  See analyze_effective_gain.py "
+        "for the correct analysis."
     )
-    ax.set_xticks(blocks)
-    fig.tight_layout()
-    bar_path = args.output_dir / "ln_gamma_correlation_bars.png"
-    fig.savefig(bar_path, dpi=150)
-    plt.close(fig)
-    logger.info("Saved bar chart to %s", bar_path)
 
     # Save JSON summary.
     summary_path = args.output_dir / "ln_gamma_correlation.json"

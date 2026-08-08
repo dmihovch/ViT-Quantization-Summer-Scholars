@@ -1370,7 +1370,8 @@ def profile_vit(
                 skip_norm_proxy = block.norm1.input.norm(dim=-1).mean().save()
 
                 residual_savers = _register_stat_saves(
-                    block.norm1.input, residual_label, n_residual
+                    block.norm1.input, residual_label, n_residual,
+                    track_per_channel=True,
                 )
                 # Attach LN2 amplification ratio computed from the previous iteration's
                 # skip_norm and LN2 output.  For i=0 (patch_embed/residual_stream),
@@ -1457,6 +1458,7 @@ def profile_vit(
                 wrapped_model.norm.input,
                 f"blocks.{num_blocks - 1}/residual_stream",
                 n_residual,
+                track_per_channel=True,
             )
             # Attach the LN2 amplification ratio from the final block.
             if pending_skip_norm is not None:

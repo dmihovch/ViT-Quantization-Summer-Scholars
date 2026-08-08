@@ -25,6 +25,7 @@ import argparse
 import json
 import logging
 import math
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+# Ensure project root is on sys.path so `src` imports work when run directly.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 matplotlib.use("Agg")
+
+from src.plotting_utils import ANALYTICAL_COLORS, LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +59,12 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("outputs/effective-gain-analysis"),
         help="Directory for output table and bar chart.",
+    )
+    # --run-dir convenience flag
+    parser.add_argument(
+        "--run-dir", type=Path, default=None,
+        help="Convenience: auto-discover files from a run directory "
+             "(e.g. outputs/full-run-2026-8-4).",
     )
     return parser.parse_args()
 
@@ -111,12 +123,30 @@ def _compute_effective_gain(
     return np.linalg.norm(weighted, axis=1)
 
 
+def _discover_layer_stats(run_dir: Path) -> Path | None:
+    """Auto-discover profiling_result.json from a run directory."""
+    phase1_dir = run_dir / "phase1-profiling"
+    if phase1_dir.is_dir():
+        for seed_dir in sorted(phase1_dir.iterdir()):
+            if seed_dir.is_dir() and seed_dir.name.startswith("seed_"):
+                candidate = seed_dir / "profiling_result.json"
+                if candidate.is_file():
+                    return candidate
+    return None
+
+
 def main() -> None:  # noqa: C901
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     args = _parse_args()
+
+    # --- Handle --run-dir auto-discovery ---
+    if args.run_dir is not None:
+        discovered = _discover_layer_stats(args.run_dir)
+        if discovered is not None:
+            args.layer_stats = discovered
 
     # ------------------------------------------------------------------
     # 1. Load Phase 1 stats.
@@ -244,21 +274,29 @@ def main() -> None:  # noqa: C901
     fig, ax = plt.subplots(figsize=(10, 5))
     blocks = [r["block"] for r in results]
     rs = [r["pearson_r"] for r in results]
-    colors = ["steelblue" if r >= 0 else "coral" for r in rs]
-    ax.bar(blocks, rs, color=colors, edgecolor="black", linewidth=0.5)
-    ax.axhline(y=0, color="black", linewidth=0.5)
-    ax.set_xlabel("Encoder Block")
+
+    # Use a dot plot with a zero-reference line instead of bars.
+    # Correlation coefficients are not additive volumes — bars give them
+    # too much visual weight and make r≈0 look like missing data.
+    colors = [ANALYTICAL_COLORS["positive"] if r >= 0 else ANALYTICAL_COLORS["negative"] for r in rs]
+    ax.scatter(blocks, rs, c=colors, s=120, zorder=3, edgecolors="black", linewidth=0.5)
+    # Connect with a thin line to show the trend across blocks.
+    ax.plot(blocks, rs, "-", color="#888888", linewidth=1, alpha=0.5, zorder=2)
+    ax.axhline(y=0, color="black", linewidth=0.5, zorder=1)
+    ax.set_xlabel(LABELS["block"])
     ax.set_ylabel("Pearson r(‖fc1⊙γ‖, pre-GELU σ_c)")
     ax.set_title(
         "Effective per-Channel Gain vs Per-Channel pre-GELU σ Correlation\n"
         r"(‖fc1.weight[c, :] $\odot$ LN2 $\gamma$‖₂  —  both 3072-dim)"
     )
     ax.set_xticks(blocks)
+    ax.set_ylim(-1.05, 1.05)
+    ax.grid(True, alpha=0.3, axis="y")
     fig.tight_layout()
     bar_path = args.output_dir / "effective_gain_correlation_bars.png"
     fig.savefig(bar_path, dpi=150)
     plt.close(fig)
-    logger.info("Saved bar chart to %s", bar_path)
+    logger.info("Saved correlation dot plot to %s", bar_path)
 
     # ------------------------------------------------------------------
     # 6. Save JSON summary.

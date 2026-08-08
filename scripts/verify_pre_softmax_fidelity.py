@@ -1,6 +1,13 @@
 """Verify pre_softmax reconstruction is bit-identical to native when zeroing is a no-op."""
+import sys
+from pathlib import Path
+
 import torch
 from nnsight import NNsight
+
+# Ensure project root is on sys.path so `src` imports work when run directly.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from src.model import load_vit
 from src.utils import get_device, seed_everything
 from src.ablation import zero_outliers_in_trace

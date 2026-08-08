@@ -592,6 +592,113 @@ def test_site_matches_pre_softmax() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _intervene_channel_structured (renamed from _intervene_per_channel_generic)
+# ---------------------------------------------------------------------------
+
+
+def test_intervene_channel_structured_exists() -> None:
+    """Verify the function was renamed and the old name is gone."""
+    from src import ablation
+    assert hasattr(ablation, "_intervene_channel_structured")
+    assert not hasattr(ablation, "_intervene_per_channel_generic")
+
+
+# ---------------------------------------------------------------------------
+# _check_residual_stream_per_channel_stats
+# ---------------------------------------------------------------------------
+
+
+def test_check_residual_stream_per_channel_stats_all_present() -> None:
+    """Should not exit when per_channel_std is populated."""
+    from src.exp2_ablation import _check_residual_stream_per_channel_stats
+    from src.profiler import LayerStats
+
+    stats: dict[str, LayerStats] = {
+        "blocks.0/residual_stream": LayerStats(
+            site_identifier="blocks.0/residual_stream",
+            mean=0.0, std=0.5, kurtosis=0.0, outlier_fractions={}, n_samples=1000,
+            per_channel_std=[0.5] * 768,
+            per_channel_mean=[0.0] * 768,
+        ),
+        "blocks.1/residual_stream": LayerStats(
+            site_identifier="blocks.1/residual_stream",
+            mean=0.0, std=0.5, kurtosis=0.0, outlier_fractions={}, n_samples=1000,
+            per_channel_std=[0.5] * 768,
+            per_channel_mean=[0.0] * 768,
+        ),
+    }
+    # Should not raise SystemExit.
+    _check_residual_stream_per_channel_stats(stats)
+
+
+def test_check_residual_stream_per_channel_stats_some_missing() -> None:
+    """Should not exit when at least one residual_stream site has per_channel_std."""
+    from src.exp2_ablation import _check_residual_stream_per_channel_stats
+    from src.profiler import LayerStats
+
+    stats: dict[str, LayerStats] = {
+        "blocks.0/residual_stream": LayerStats(
+            site_identifier="blocks.0/residual_stream",
+            mean=0.0, std=0.5, kurtosis=0.0, outlier_fractions={}, n_samples=1000,
+            per_channel_std=None,  # missing
+            per_channel_mean=None,
+        ),
+        "blocks.1/residual_stream": LayerStats(
+            site_identifier="blocks.1/residual_stream",
+            mean=0.0, std=0.5, kurtosis=0.0, outlier_fractions={}, n_samples=1000,
+            per_channel_std=[0.5] * 768,  # present
+            per_channel_mean=[0.0] * 768,
+        ),
+    }
+    # Should not raise — at least one site has per_channel_std.
+    _check_residual_stream_per_channel_stats(stats)
+
+
+def test_check_residual_stream_per_channel_stats_all_missing() -> None:
+    """Should exit when no residual_stream site has per_channel_std."""
+    from src.exp2_ablation import _check_residual_stream_per_channel_stats
+    from src.profiler import LayerStats
+
+    stats: dict[str, LayerStats] = {
+        "blocks.0/residual_stream": LayerStats(
+            site_identifier="blocks.0/residual_stream",
+            mean=0.0, std=0.5, kurtosis=0.0, outlier_fractions={}, n_samples=1000,
+            per_channel_std=None,
+            per_channel_mean=None,
+        ),
+        "blocks.1/residual_stream": LayerStats(
+            site_identifier="blocks.1/residual_stream",
+            mean=0.0, std=0.5, kurtosis=0.0, outlier_fractions={}, n_samples=1000,
+            per_channel_std=None,
+            per_channel_mean=None,
+        ),
+    }
+    with pytest.raises(SystemExit):
+        _check_residual_stream_per_channel_stats(stats)
+
+
+def test_check_residual_stream_per_channel_stats_no_residual_sites() -> None:
+    """Should be a no-op when there are no residual_stream sites at all."""
+    from src.exp2_ablation import _check_residual_stream_per_channel_stats
+    from src.profiler import LayerStats
+
+    stats: dict[str, LayerStats] = {
+        "blocks.0/pre_gelu": LayerStats(
+            site_identifier="blocks.0/pre_gelu",
+            mean=0.0, std=1.0, kurtosis=0.0, outlier_fractions={}, n_samples=1000,
+        ),
+    }
+    # Should not raise — no residual_stream sites to check.
+    _check_residual_stream_per_channel_stats(stats)
+
+
+def test_check_residual_stream_per_channel_stats_empty_dict() -> None:
+    """Should be a no-op with an empty stats dict."""
+    from src.exp2_ablation import _check_residual_stream_per_channel_stats
+    _check_residual_stream_per_channel_stats({})
+
+
+# ---------------------------------------------------------------------------
 # Slow tests — zero_outliers_in_trace (require model + nnsight trace)
 # ---------------------------------------------------------------------------
 
@@ -607,29 +714,53 @@ def _vit_model():
 
 
 def _make_fake_layer_stats(num_blocks: int) -> dict[str, LayerStats]:
-    """Build a fake layer_stats dict with plausible sigma and mean values."""
+    """Build a fake layer_stats dict with plausible sigma and mean values.
+
+    Includes per-channel stats for all channel-structured sites
+    (pre_gelu, post_layernorm_1, post_layernorm_2, residual_stream).
+    """
     stats: dict[str, LayerStats] = {}
     stats["patch_embed/residual_stream"] = LayerStats(
         site_identifier="patch_embed/residual_stream",
         mean=0.0, std=0.5, kurtosis=0.0, outlier_fractions={}, n_samples=1000,
+        per_channel_std=[0.5] * 768,
+        per_channel_mean=[0.0] * 768,
     )
     for i in range(num_blocks):
         stats[f"blocks.{i}/pre_gelu"] = LayerStats(
             site_identifier=f"blocks.{i}/pre_gelu",
             mean=-2.0, std=28.0, kurtosis=10.0, outlier_fractions={}, n_samples=1000,
+            per_channel_std=[28.0] * 3072,
+            per_channel_mean=[-2.0] * 3072,
         )
         stats[f"blocks.{i}/pre_softmax"] = LayerStats(
             site_identifier=f"blocks.{i}/pre_softmax",
             mean=0.0, std=3.4, kurtosis=5.0, outlier_fractions={}, n_samples=1000,
         )
+        stats[f"blocks.{i}/post_layernorm_1"] = LayerStats(
+            site_identifier=f"blocks.{i}/post_layernorm_1",
+            mean=0.0, std=1.0, kurtosis=0.0, outlier_fractions={}, n_samples=1000,
+            per_channel_std=[1.0] * 768,
+            per_channel_mean=[0.0] * 768,
+        )
+        stats[f"blocks.{i}/post_layernorm_2"] = LayerStats(
+            site_identifier=f"blocks.{i}/post_layernorm_2",
+            mean=0.0, std=1.0, kurtosis=0.0, outlier_fractions={}, n_samples=1000,
+            per_channel_std=[1.0] * 768,
+            per_channel_mean=[0.0] * 768,
+        )
         if i > 0:
             stats[f"blocks.{i - 1}/residual_stream"] = LayerStats(
                 site_identifier=f"blocks.{i - 1}/residual_stream",
                 mean=0.0, std=0.5, kurtosis=0.0, outlier_fractions={}, n_samples=1000,
+                per_channel_std=[0.5] * 768,
+                per_channel_mean=[0.0] * 768,
             )
     stats[f"blocks.{num_blocks - 1}/residual_stream"] = LayerStats(
         site_identifier=f"blocks.{num_blocks - 1}/residual_stream",
         mean=0.0, std=0.5, kurtosis=0.0, outlier_fractions={}, n_samples=1000,
+        per_channel_std=[0.5] * 768,
+        per_channel_mean=[0.0] * 768,
     )
     return stats
 
@@ -814,16 +945,6 @@ class TestZeroOutliersInTrace:
         """Per-channel zeroing at aggressive k should change logits."""
         wrapped, model, device = _vit_model
         layer_stats = _make_fake_layer_stats(len(model.blocks))
-        # Add per-channel stats to the fake layer_stats.
-        for i in range(len(model.blocks)):
-            sid = f"blocks.{i}/pre_gelu"
-            layer_stats[sid] = LayerStats(
-                site_identifier=sid,
-                mean=-2.0, std=28.0, kurtosis=10.0,
-                outlier_fractions={}, n_samples=1000,
-                per_channel_std=[28.0] * 3072,
-                per_channel_mean=[-2.0] * 3072,
-            )
         batch = torch.randn(2, 3, 224, 224, device=device)
         with torch.no_grad():
             with wrapped.trace(batch):
@@ -841,15 +962,6 @@ class TestZeroOutliersInTrace:
         """Per-channel mode should return per-layer pct_zeroed."""
         wrapped, model, device = _vit_model
         layer_stats = _make_fake_layer_stats(len(model.blocks))
-        for i in range(len(model.blocks)):
-            sid = f"blocks.{i}/pre_gelu"
-            layer_stats[sid] = LayerStats(
-                site_identifier=sid,
-                mean=-2.0, std=28.0, kurtosis=10.0,
-                outlier_fractions={}, n_samples=1000,
-                per_channel_std=[28.0] * 3072,
-                per_channel_mean=[-2.0] * 3072,
-            )
         batch = torch.randn(2, 3, 224, 224, device=device)
         _logits, pct, _entropy = zero_outliers_in_trace(
             wrapped, batch, "pre_gelu", sigma_k=3.0,
@@ -863,15 +975,6 @@ class TestZeroOutliersInTrace:
         """Per-channel mode with very high k should zero nothing."""
         wrapped, model, device = _vit_model
         layer_stats = _make_fake_layer_stats(len(model.blocks))
-        for i in range(len(model.blocks)):
-            sid = f"blocks.{i}/pre_gelu"
-            layer_stats[sid] = LayerStats(
-                site_identifier=sid,
-                mean=-2.0, std=28.0, kurtosis=10.0,
-                outlier_fractions={}, n_samples=1000,
-                per_channel_std=[28.0] * 3072,
-                per_channel_mean=[-2.0] * 3072,
-            )
         batch = torch.randn(2, 3, 224, 224, device=device)
         with torch.no_grad():
             with wrapped.trace(batch):
@@ -890,15 +993,6 @@ class TestZeroOutliersInTrace:
         """mean_only mode: per-channel μ_c but global σ."""
         wrapped, model, device = _vit_model
         layer_stats = _make_fake_layer_stats(len(model.blocks))
-        for i in range(len(model.blocks)):
-            sid = f"blocks.{i}/pre_gelu"
-            layer_stats[sid] = LayerStats(
-                site_identifier=sid,
-                mean=-2.0, std=28.0, kurtosis=10.0,
-                outlier_fractions={}, n_samples=1000,
-                per_channel_std=[28.0] * 3072,
-                per_channel_mean=[-2.0] * 3072,
-            )
         batch = torch.randn(2, 3, 224, 224, device=device)
         logits, pct, _entropy = zero_outliers_in_trace(
             wrapped, batch, "pre_gelu", sigma_k=3.0,
@@ -914,15 +1008,6 @@ class TestZeroOutliersInTrace:
         """var_only mode: global μ but per-channel σ_c."""
         wrapped, model, device = _vit_model
         layer_stats = _make_fake_layer_stats(len(model.blocks))
-        for i in range(len(model.blocks)):
-            sid = f"blocks.{i}/pre_gelu"
-            layer_stats[sid] = LayerStats(
-                site_identifier=sid,
-                mean=-2.0, std=28.0, kurtosis=10.0,
-                outlier_fractions={}, n_samples=1000,
-                per_channel_std=[28.0] * 3072,
-                per_channel_mean=[-2.0] * 3072,
-            )
         batch = torch.randn(2, 3, 224, 224, device=device)
         logits, pct, _entropy = zero_outliers_in_trace(
             wrapped, batch, "pre_gelu", sigma_k=3.0,
@@ -945,6 +1030,142 @@ class TestZeroOutliersInTrace:
             layer_stats=layer_stats, per_channel=True,
         )
         # Should not crash — falls back to global σ.
+        assert logits.shape == (2, 1000)
+        assert len(pct) == len(model.blocks)
+
+    # --- New per-channel site tests ---
+
+    def test_post_layernorm_1_per_channel_logits_change(self, _vit_model) -> None:
+        """Per-channel zeroing at post_layernorm_1 should change logits."""
+        wrapped, model, device = _vit_model
+        layer_stats = _make_fake_layer_stats(len(model.blocks))
+        batch = torch.randn(2, 3, 224, 224, device=device)
+        with torch.no_grad():
+            with wrapped.trace(batch):
+                baseline = wrapped.output.save()
+            baseline_logits = baseline.clone()
+        logits, pct, entropy = zero_outliers_in_trace(
+            wrapped, batch, "post_layernorm_1", sigma_k=0.001,
+            layer_stats=layer_stats, per_channel=True,
+        )
+        diff = (baseline_logits - logits).abs().max().item()
+        assert diff > 1e-3, f"max diff = {diff:.6f}"
+        assert len(entropy) == 0
+
+    def test_post_layernorm_1_per_channel_returns_pct_zeroed(self, _vit_model) -> None:
+        """Per-channel post_layernorm_1 should return per-layer pct_zeroed."""
+        wrapped, model, device = _vit_model
+        layer_stats = _make_fake_layer_stats(len(model.blocks))
+        batch = torch.randn(2, 3, 224, 224, device=device)
+        _logits, pct, _entropy = zero_outliers_in_trace(
+            wrapped, batch, "post_layernorm_1", sigma_k=3.0,
+            layer_stats=layer_stats, per_channel=True,
+        )
+        assert len(pct) == len(model.blocks)
+        for v in pct.values():
+            assert 0.0 <= v <= 100.0
+
+    def test_post_layernorm_2_per_channel_logits_change(self, _vit_model) -> None:
+        """Per-channel zeroing at post_layernorm_2 should change logits."""
+        wrapped, model, device = _vit_model
+        layer_stats = _make_fake_layer_stats(len(model.blocks))
+        batch = torch.randn(2, 3, 224, 224, device=device)
+        with torch.no_grad():
+            with wrapped.trace(batch):
+                baseline = wrapped.output.save()
+            baseline_logits = baseline.clone()
+        logits, pct, entropy = zero_outliers_in_trace(
+            wrapped, batch, "post_layernorm_2", sigma_k=0.001,
+            layer_stats=layer_stats, per_channel=True,
+        )
+        diff = (baseline_logits - logits).abs().max().item()
+        assert diff > 1e-3, f"max diff = {diff:.6f}"
+        assert len(entropy) == 0
+
+    def test_post_layernorm_2_per_channel_returns_pct_zeroed(self, _vit_model) -> None:
+        """Per-channel post_layernorm_2 should return per-layer pct_zeroed."""
+        wrapped, model, device = _vit_model
+        layer_stats = _make_fake_layer_stats(len(model.blocks))
+        batch = torch.randn(2, 3, 224, 224, device=device)
+        _logits, pct, _entropy = zero_outliers_in_trace(
+            wrapped, batch, "post_layernorm_2", sigma_k=3.0,
+            layer_stats=layer_stats, per_channel=True,
+        )
+        assert len(pct) == len(model.blocks)
+        for v in pct.values():
+            assert 0.0 <= v <= 100.0
+
+    def test_residual_stream_per_channel_logits_change(self, _vit_model) -> None:
+        """Per-channel zeroing at residual_stream should change logits."""
+        wrapped, model, device = _vit_model
+        layer_stats = _make_fake_layer_stats(len(model.blocks))
+        batch = torch.randn(2, 3, 224, 224, device=device)
+        with torch.no_grad():
+            with wrapped.trace(batch):
+                baseline = wrapped.output.save()
+            baseline_logits = baseline.clone()
+        logits, pct, entropy = zero_outliers_in_trace(
+            wrapped, batch, "residual_stream", sigma_k=0.001,
+            layer_stats=layer_stats, per_channel=True,
+        )
+        diff = (baseline_logits - logits).abs().max().item()
+        assert diff > 1e-3, f"max diff = {diff:.6f}"
+        assert len(entropy) == 0
+
+    def test_residual_stream_per_channel_returns_pct_zeroed(self, _vit_model) -> None:
+        """Per-channel residual_stream should return per-layer pct_zeroed."""
+        wrapped, model, device = _vit_model
+        layer_stats = _make_fake_layer_stats(len(model.blocks))
+        batch = torch.randn(2, 3, 224, 224, device=device)
+        _logits, pct, _entropy = zero_outliers_in_trace(
+            wrapped, batch, "residual_stream", sigma_k=3.0,
+            layer_stats=layer_stats, per_channel=True,
+        )
+        assert len(pct) == len(model.blocks)
+        for v in pct.values():
+            assert 0.0 <= v <= 100.0
+
+    def test_residual_stream_per_channel_no_zeroing_at_high_k(self, _vit_model) -> None:
+        """Per-channel residual_stream with very high k should zero nothing."""
+        wrapped, model, device = _vit_model
+        layer_stats = _make_fake_layer_stats(len(model.blocks))
+        batch = torch.randn(2, 3, 224, 224, device=device)
+        with torch.no_grad():
+            with wrapped.trace(batch):
+                baseline = wrapped.output.save()
+            baseline_logits = baseline.clone()
+        logits, pct, _entropy = zero_outliers_in_trace(
+            wrapped, batch, "residual_stream", sigma_k=10000.0,
+            layer_stats=layer_stats, per_channel=True,
+        )
+        for v in pct.values():
+            assert v == 0.0
+        diff = (baseline_logits - logits).abs().max().item()
+        assert diff < 1e-3, f"max diff = {diff:.6f}"
+
+    def test_post_layernorm_1_per_channel_mean_only(self, _vit_model) -> None:
+        """mean_only mode at post_layernorm_1 should work."""
+        wrapped, model, device = _vit_model
+        layer_stats = _make_fake_layer_stats(len(model.blocks))
+        batch = torch.randn(2, 3, 224, 224, device=device)
+        logits, pct, _entropy = zero_outliers_in_trace(
+            wrapped, batch, "post_layernorm_1", sigma_k=3.0,
+            layer_stats=layer_stats, per_channel=True,
+            ablation_mode="mean_only",
+        )
+        assert logits.shape == (2, 1000)
+        assert len(pct) == len(model.blocks)
+
+    def test_post_layernorm_2_per_channel_var_only(self, _vit_model) -> None:
+        """var_only mode at post_layernorm_2 should work."""
+        wrapped, model, device = _vit_model
+        layer_stats = _make_fake_layer_stats(len(model.blocks))
+        batch = torch.randn(2, 3, 224, 224, device=device)
+        logits, pct, _entropy = zero_outliers_in_trace(
+            wrapped, batch, "post_layernorm_2", sigma_k=3.0,
+            layer_stats=layer_stats, per_channel=True,
+            ablation_mode="var_only",
+        )
         assert logits.shape == (2, 1000)
         assert len(pct) == len(model.blocks)
 

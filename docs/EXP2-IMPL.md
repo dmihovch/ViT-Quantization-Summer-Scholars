@@ -66,11 +66,14 @@ Phase 2 uses the same nnsight trace mechanism as Phase 1, but with **tensor repl
 
 ### 2.1 Intervention sites
 
-| Site | Intervention point | Shape | σ/μ source |
-|------|-------------------|-------|----------|
-| `pre_gelu` | `block.mlp.act.input` | `(B, N, 3072)` | `blocks.{i}/pre_gelu` |
-| `pre_softmax` | Reconstructed QKᵀ/√d → `attn.proj.input` | `(B, H, N, N)` | `blocks.{i}/pre_softmax` |
-| `residual_stream` | `block.norm1.input` (CLS preserved) | `(B, N, 768)` | `blocks.{i-1}/residual_stream` |
+| Site | Intervention point | Shape | σ/μ source | Per-channel? |
+|------|-------------------|-------|----------|-------------|
+| `pre_gelu` | `block.mlp.act.input` | `(B, N, 3072)` | `blocks.{i}/pre_gelu` | Yes |
+| `pre_softmax` | Reconstructed QKᵀ/√d → `attn.proj.input` | `(B, H, N, N)` | `blocks.{i}/pre_softmax` | No (no channel dim) |
+| `post_softmax` | `attn.attn_drop.input` | `(B, H, N, N)` | `blocks.{i}/post_softmax` | No (no channel dim) |
+| `residual_stream` | `block.norm1.input` (CLS preserved) | `(B, N, 768)` | `blocks.{i-1}/residual_stream` | Yes |
+| `post_layernorm_1` | `block.norm1.output` | `(B, N, 768)` | `blocks.{i}/post_layernorm_1` | Yes |
+| `post_layernorm_2` | `block.norm2.output` | `(B, N, 768)` | `blocks.{i}/post_layernorm_2` | Yes |
 
 ### 2.2 Threshold definition (mean-centered)
 
@@ -104,9 +107,11 @@ attributing accuracy degradation to outliers specifically.
 Random-control results are marked with `is_random=True` in `ablation_results.csv`
 and plotted separately (`accuracy_vs_threshold_{site}_random.png`).
 
-`pre_softmax` is excluded from the random control because random zeroing of
-attention logits would require reconstructing QKᵀ/√d inside the random path,
-which is architecturally different from the outlier path.
+`pre_softmax`, `post_layernorm_1`, and `post_layernorm_2` are excluded from the
+random control because random zeroing of attention logits would require
+reconstructing QKᵀ/√d inside the random path, and the post_layernorm sites are
+primarily of interest in per-channel mode where the outlier vs. random comparison
+is less informative (per-channel statistics already isolate the effect).
 
 ### 2.4 pre_softmax reconstruction
 
@@ -140,11 +145,16 @@ scalar μ and σ.  The threshold for channel ``c`` is:
 |x_c − μ_c| > k·σ_c
 ```
 
-This is only meaningful for ``pre_gelu``, where the MLP hidden dimension
-(3,072) has a natural channel structure.  Per-channel mode:
-- Only ablates ``pre_gelu`` (skips ``pre_softmax`` and ``residual_stream``).
-- Does not run the random-zeroing control (per-channel random zeroing would
-  require per-channel random fractions, which is over-parameterized).
+This is meaningful for all channel-structured sites — any tensor of shape
+``(B, N, D)`` where ``D`` is a channel dimension.  Per-channel mode:
+- Ablates all four channel-structured sites by default: ``pre_gelu``,
+  ``post_layernorm_1``, ``post_layernorm_2``, ``residual_stream``.
+- Excludes ``pre_softmax`` and ``post_softmax`` — they have shape
+  ``(B, H, N, N)`` with no channel dimension.
+- Runs the random-zeroing control for ``pre_gelu`` and ``residual_stream``
+  (enabled 2026-08-05; was previously disabled).
+- Supports ``--per-channel-sites`` CLI flag to restrict to a subset of sites
+  (e.g. ``--per-channel-sites pre_gelu`` for RQ2 mean_only/var_only runs).
 - Writes ``granularity=per_channel`` in the CSV output.
 
 Enabled via ``--granularity per_channel`` on the CLI or
@@ -155,8 +165,11 @@ outlier-dependent signal.  A global threshold over-zeroes them while
 under-zeroing low-variance channels.  Per-channel thresholds redistribute
 the zeroing budget, preserving more accuracy at aggressive thresholds.
 
-**Result (50k images):** Confirmed.  At k=3, per-channel preserves 47.00%
-vs 43.24% global (+3.76%).  At k≥4 the difference vanishes.
+**Result (50k images, pre_gelu only):** Confirmed.  At k=3, per-channel
+preserves 47.00% vs 43.24% global (+3.76%).  At k≥4 the difference vanishes.
+Results for post_layernorm_1, post_layernorm_2, and residual_stream per-channel
+ablation are pending Phase 1 re-run with ``track_per_channel=True`` on residual
+stream saves.
 
 ---
 
@@ -167,7 +180,8 @@ vs 43.24% global (+3.76%).  At k≥4 the difference vanishes.
 ```python
 @dataclass
 class AblationResult:
-    site: str              # "pre_gelu", "pre_softmax", "residual_stream"
+    site: str              # "pre_gelu", "pre_softmax", "residual_stream",
+                           # "post_layernorm_1", "post_layernorm_2"
     sigma_threshold: float # k value
     site_identifier: str   # e.g. "blocks.3/pre_gelu"
     pct_zeroed: float      # [0, 100]
@@ -177,6 +191,7 @@ class AblationResult:
     baseline_top5: float
     is_random: bool        # True for random-zeroing control condition
     granularity: str       # "global" or "per_channel"
+    ablation_mode: str     # "outlier", "mean_only", or "var_only"
     cls_entropy: list[float]           # per-head CLS entropy after ablation [H]
     patch_entropy: list[float]         # per-head patch entropy after ablation [H]
     baseline_cls_entropy: list[float]  # Phase 1 baseline [H]
@@ -198,7 +213,8 @@ required and must always be provided from `layer_stats`.
 
 Builds a boolean keep-mask where `|x_c − μ_c| ≤ k·σ_c` per channel.
 Broadcasts per-channel statistics of shape `(D,)` against tensor of shape
-`(B, N, D)`.  Only valid for pre_gelu (MLP hidden dimension).
+`(B, N, D)`.  Valid for any channel-structured site (pre_gelu, post_layernorm_1,
+post_layernorm_2, residual_stream).
 
 ### 3.5 `_build_random_mask(tensor, fraction, seed=None, salt=0) -> Tensor`
 
@@ -209,12 +225,16 @@ at uniformly random positions.  Used for the random-zeroing control condition.
 
 Returns `{"mean_cls_delta": float, "mean_patch_delta": float}`. Positive means entropy increased (more uniform attention) after zeroing.
 
-### 3.7 `zero_outliers_in_trace(wrapped_model, input_batch, site, sigma_k, layer_stats, random_fractions=None, random_seed=None, per_channel=False) -> (logits, pct_zeroed, entropy_data)`
+### 3.7 `zero_outliers_in_trace(wrapped_model, input_batch, site, sigma_k, layer_stats, random_fractions=None, random_seed=None, per_channel=False, ablation_mode="outlier", layer_range=None) -> (logits, pct_zeroed, entropy_data)`
 
 Core intervention function. Runs one forward pass with outlier zeroing (or
-random zeroing if `random_fractions` is provided).  If `per_channel=True` and
-`site="pre_gelu"`, uses per-channel μ_c and σ_c for thresholding.  Returns
+random zeroing if `random_fractions` is provided).  If `per_channel=True`,
+uses per-channel μ_c and σ_c for thresholding at all channel-structured sites
+(pre_gelu, post_layernorm_1, post_layernorm_2, residual_stream).  Returns
 3-tuple with logits, per-layer %-zeroed, and per-layer entropy (for pre_softmax).
+
+Accepts five site values: ``"pre_gelu"``, ``"pre_softmax"``, ``"residual_stream"``,
+``"post_layernorm_1"``, ``"post_layernorm_2"``.
 
 ### 3.8 `save_ablation_results(results, path) -> None`
 
@@ -245,13 +265,21 @@ Pipeline:
 
 ## 5. Test coverage
 
-### Fast tests (29)
+### Fast tests (39)
 
-### Slow tests (13, marked `@pytest.mark.slow`)
+### Slow tests (23, marked `@pytest.mark.slow`)
 - 4 pre_gelu tests (logits-change, returns-pct, shape, random-mode)
 - 3 residual_stream tests (logits-change, no-zeroing-at-high-k, random-mode)
 - 3 pre_softmax tests (logits-change, returns-pct, returns-entropy)
 - 3 edge case tests (invalid-site-raises, missing-stats, zero-sigma)
+- 5 pre_gelu per-channel tests (logits-change, returns-pct, no-zeroing-at-high-k, mean_only, var_only)
+- 1 pre_gelu per-channel missing-stats fallback test
+- 4 layer_range tests (restricts-intervention, multi-block, no-blocks-outside-range, single-block-no-zeroing)
+- 2 post_layernorm_1 per-channel tests (logits-change, returns-pct)
+- 2 post_layernorm_2 per-channel tests (logits-change, returns-pct)
+- 3 residual_stream per-channel tests (logits-change, returns-pct, no-zeroing-at-high-k)
+- 1 post_layernorm_1 per-channel mean_only test
+- 1 post_layernorm_2 per-channel var_only test
 
 ---
 
@@ -313,8 +341,9 @@ confound of differing zeroing rates between conditions — the only difference i
 
 ### 6.9 Per-channel ablation (T-024)
 
-**Decision:** Add per-channel zeroing as a separate granularity mode for
-pre_gelu, using per-channel μ_c and σ_c from Phase 1.
+**Decision:** Add per-channel zeroing as a separate granularity mode for all
+channel-structured sites (pre_gelu, post_layernorm_1, post_layernorm_2,
+residual_stream), using per-channel μ_c and σ_c from Phase 1.
 
 **Rationale:** Phase 1 profiling showed per-channel σ varies 12× within
 block 10 (2.06–25.54).  A global threshold over-zeroes high-variance
@@ -322,7 +351,15 @@ channels while under-zeroing low-variance channels.  Per-channel ablation
 tests whether this concentration drives accuracy degradation — and whether
 per-channel quantization of the MLP hidden dimension would reduce the
 accuracy penalty of INT8 range clipping.  The 3.76% improvement at k=3
-confirms this hypothesis.
+(pre_gelu only) confirms this hypothesis.  Expanding to post_layernorm_1,
+post_layernorm_2, and residual_stream (2026-08-05) tests whether the same
+pattern holds at other channel-structured sites.
+
+**Implementation:** A single generic function ``_intervene_per_channel_generic``
+handles per-channel zeroing at any ``(B, N, D)`` site via a configurable proxy
+path and optional CLS preservation.  The ``--per-channel-sites`` CLI flag allows
+restricting to a subset of sites (e.g. ``--per-channel-sites pre_gelu`` for RQ2
+mean_only/var_only runs that are specifically about the MLP hidden dimension).
 
 ### 6.10 Per-channel mean added to Phase 1 (T-023)
 
@@ -341,17 +378,19 @@ Phase 1 was re-run to regenerate the JSON with this field.
 - `fused_attn=False` must be set before wrapping with NNsight (done by `load_vit`).
 - Model must be in `eval()` mode (done by `load_vit`, asserted in `profile_vit`).
 - Phase 1 `profiling_result.json` must exist at `config.layer_stats_path` and contain `mean`, `std`, `outlier_fractions`, and `attention_entropy_cls`/`attention_entropy_patches`.
-- For per-channel ablation, `profiling_result.json` must also contain `per_channel_mean` and `per_channel_std` for all pre_gelu sites (requires Phase 1 re-run after 2026-08-02).
+- For per-channel ablation, `profiling_result.json` must also contain `per_channel_mean` and `per_channel_std` for all channel-structured sites (pre_gelu, post_layernorm_1, post_layernorm_2, residual_stream).  Requires Phase 1 re-run after 2026-08-05 (residual stream `track_per_channel=True` was added).
 - The `pre_softmax` intervention reconstructs QKᵀ/√d and injects via `attn.proj.input`. This bypasses the attention dropout (`attn_drop`) — acceptable since dropout is disabled in eval mode.
 - Random-zeroing control uses per-batch per-layer %-zeroed from the outlier pass
   as the target fraction — no dependency on Phase 1 `outlier_fractions`.
-- Per-channel mode only ablates `pre_gelu`; `pre_softmax` and `residual_stream` are skipped.
+- Per-channel mode ablates all four channel-structured sites by default;
+  `pre_softmax` and `post_softmax` are excluded (no channel dimension).
+- `--per-channel-sites` can restrict to a subset (e.g. `pre_gelu` only for RQ2).
 
 ---
 
 ## 8. Test checklist
 
-- [ ] `pytest -m "not slow" tests/test_ablation.py` — 29 fast tests
-- [ ] `pytest -m "slow" tests/test_ablation.py` — 13 slow tests
+- [ ] `pytest -m "not slow" tests/test_ablation.py` — 39 fast tests
+- [ ] `pytest -m "slow" tests/test_ablation.py` — 23 slow tests
 - [ ] End-to-end smoke test: `python run_phase2_ablation.py --data-dir data --num-images 1024 --sigma-thresholds 3.0 6.0`
 - [ ] Full run: `python run_phase2_ablation.py --data-dir data --num-images 50000`

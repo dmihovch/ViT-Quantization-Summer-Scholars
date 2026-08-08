@@ -1,7 +1,8 @@
 # Phase 2 Expansion — Per-Channel Ablation Deep Dive
 
 > **Created:** 2026-08-03
-> **Status:** Implementation complete; experiments pending.
+> **Updated:** 2026-08-08 — RQ2 and RQ4 complete; 5-seed multi-condition full run finished.
+> **Status:** Implementation complete. RQ2 (mean_only/var_only at k=3) and RQ4 (multi-seed) ✅ done. RQ3 (layer-group), RQ5 (finer k-sweep) remain open.
 
 ---
 
@@ -70,7 +71,23 @@ channels carry signal."
 - `mean_only`: per-channel μ_c + global σ
 - `var_only`: global μ + per-channel σ_c
 
-**Status:** 🔲 Pending.  CLI flag `--ablation-mode` implemented.
+**Status:** ✅ Complete (2026-08-08).  5-seed multi-condition full run (
+``outputs/5-seed-full-run-2026-08-05/``).  Results:
+
+| Condition | top-1 (k=3) | Δ vs global |
+|-----------|-------------|-------------|
+| Baseline | 85.03% | — |
+| Global outlier | 43.24% | — |
+| Per-channel outlier | 47.00% | +3.76 pp |
+| Per-channel mean_only | **63.32%** | **+20.08 pp** |
+| Per-channel var_only | 6.56% | −36.68 pp |
+
+**Key finding:** Mean correction dominates — it recovers 20 pp over the
+global condition.  Variance correction alone is catastrophic (6.56%), confirming
+that per-channel σ_c without μ_c zeros activations that are genuinely
+within-channel normal.  The dominant mechanism is correcting for shifted
+channel means (μ_c ∈ [−71.18, 26.01] at Block 10), not adapting to variable
+channel spread.
 
 ### RQ3: Which layers drive the per-channel benefit?
 
@@ -93,7 +110,11 @@ single-seed results are inadmissible for claims of improvement.
 **Experiment:** Re-run per-channel at k=3 with seeds 42, 123, 456.  Report
 mean ± std of the delta.
 
-**Status:** 🔲 Pending.
+**Status:** ✅ Complete (2026-08-08).  5-seed run (42, 43, 44, 45, 46).
+Ablation is deterministic given fixed Phase 1 stats, so all seeds produce
+identical accuracies (no variance).  The 3.76 pp delta is statistically
+significant on 50k images (95% CI: [3.12%, 4.36%], two-proportion z-test).
+See ``scripts/analyze_ablation_results.py`` for CI computation.
 
 ### RQ5: Where is the crossover point?
 
@@ -117,10 +138,17 @@ thresholds (k < 4).  A finer sweep would reveal the crossover.
 # Layer range restriction
 --layer-range START END
 
-# Example: mean-only per-channel on block 10 only
+# Per-channel site subset (default: all four channel-structured sites)
+--per-channel-sites SITE [SITE ...]
+
+# Example: mean-only per-channel on pre_gelu only (RQ2)
 python run_phase2_ablation.py --num-images 50000 --granularity per_channel \
-    --ablation-mode mean_only --layer-range 10 10 \
+    --ablation-mode mean_only --per-channel-sites pre_gelu \
     --sigma-thresholds 3.0
+
+# Example: full per-channel on all four sites
+python run_phase2_ablation.py --num-images 50000 --granularity per_channel \
+    --sigma-thresholds 3.0 4.0 6.0
 ```
 
 ### New config fields (`AblationConfig`)
@@ -129,11 +157,23 @@ python run_phase2_ablation.py --num-images 50000 --granularity per_channel \
 |-------|------|---------|-------------|
 | `ablation_mode` | `str` | `"outlier"` | `"outlier"`, `"mean_only"`, or `"var_only"` |
 | `layer_range` | `tuple[int, int] \| None` | `None` | Inclusive block range to ablate |
+| `per_channel_sites` | `tuple[str, ...]` | `("pre_gelu", "post_layernorm_1", "post_layernorm_2", "residual_stream")` | Sites to ablate in per-channel mode |
 
-### New analysis script
+### Per-channel site expansion (2026-08-05)
 
-`scripts/analyze_layernorm_gamma.py` — Computes Pearson r between LN2 γ and
-pre-GELU per-channel σ for each block.  Outputs a table and bar chart.
+Per-channel ablation now covers all four channel-structured sites:
+- `pre_gelu` — MLP hidden dimension (3,072)
+- `post_layernorm_1` — pre-attention LN output (768)
+- `post_layernorm_2` — pre-MLP LN output (768)
+- `residual_stream` — residual stream entering each block (768)
+
+`pre_softmax` and `post_softmax` remain excluded — they have shape `(B, H, N, N)`
+with no channel dimension.
+
+A single generic function `_intervene_per_channel_generic()` in `ablation.py`
+handles per-channel zeroing at any `(B, N, D)` site via a configurable proxy
+path and optional CLS preservation.  Random-zeroing control is now enabled for
+per-channel mode (was previously disabled).
 
 ---
 
@@ -166,11 +206,11 @@ Cleaned references in:
 
 ## Experiment Priority
 
-| Priority | Experiment | GPU hrs | RQ |
-|----------|-----------|---------|-----|
-| 1 | LN γ correlation (done) | 0 | RQ1 |
-| 2 | fc1.weight ⊙ γ effective gain analysis (done) | 0 | RQ1 |
-| 3 | mean_only + var_only at k=3 | ~1 | RQ2 |
-| 4 | Layer-group ablation at k=3 | ~3 | RQ3 |
-| 5 | Multi-seed variance at k=3 | ~12 | RQ4 |
-| 6 | Finer k sweep [2.5..3.5] | ~5 | RQ5 |
+| Priority | Experiment | GPU hrs | RQ | Status |
+|----------|-----------|---------|-----|--------|
+| 1 | LN γ correlation (done) | 0 | RQ1 | ✅ |
+| 2 | fc1.weight ⊙ γ effective gain analysis (done) | 0 | RQ1 | ✅ |
+| 3 | mean_only + var_only at k=3 | ~1 | RQ2 | ✅ Complete (2026-08-08) |
+| 4 | Layer-group ablation at k=3 | ~3 | RQ3 | 🔲 Pending |
+| 5 | Multi-seed variance at k=3 | ~12 | RQ4 | ✅ Complete (2026-08-08) |
+| 6 | Finer k sweep [2.5..3.5] | ~5 | RQ5 | 🔲 Pending |

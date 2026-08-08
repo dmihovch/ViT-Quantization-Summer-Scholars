@@ -19,7 +19,7 @@ from src.plotting import (
     plot_accuracy_vs_threshold,
     plot_activation_histogram,
     plot_attention_entropy_heatmap,
-    plot_bootstrap_ci_delta,
+    plot_ci_delta,
     plot_degradation_efficiency,
     plot_effective_channels,
     plot_entropy_delta_heatmap,
@@ -279,12 +279,14 @@ def test_plot_ablation_mode_comparison_empty_input(tmp_path: Path) -> None:
 
 
 def test_plot_entropy_delta_heatmap_creates_file(tmp_path: Path) -> None:
-    deltas: dict[str, dict[str, float]] = {
-        f"blocks.{i}/pre_softmax": {"mean_cls_delta": float(i) * 0.1 - 0.5}
+    # Per-head deltas: 12 heads per block, 12 blocks.
+    rng = np.random.default_rng(seed=7)
+    deltas: dict[str, list[float]] = {
+        f"blocks.{i}/pre_softmax": (rng.normal(0, 0.2, 12) - i * 0.05).tolist()
         for i in range(12)
     }
     output_path = tmp_path / "entropy_delta.png"
-    plot_entropy_delta_heatmap(deltas, output_path, delta_key="mean_cls_delta")
+    plot_entropy_delta_heatmap(deltas, output_path, title="CLS entropy delta")
     assert output_path.exists()
     assert output_path.stat().st_size > 0
 
@@ -296,25 +298,25 @@ def test_plot_entropy_delta_heatmap_empty_input(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — bootstrap CI
+# Phase 2 — 95% CI delta
 # ---------------------------------------------------------------------------
 
 
-def test_plot_bootstrap_ci_delta_creates_file(tmp_path: Path) -> None:
+def test_plot_ci_delta_creates_file(tmp_path: Path) -> None:
     ci: dict[float, dict[str, float]] = {
         3.0: {"delta_point_estimate": 3.76, "delta_ci_low_pct": 3.12, "delta_ci_high_pct": 4.36},
         4.0: {"delta_point_estimate": 0.42, "delta_ci_low_pct": -0.11, "delta_ci_high_pct": 0.96},
         6.0: {"delta_point_estimate": -0.47, "delta_ci_low_pct": -0.93, "delta_ci_high_pct": -0.03},
     }
-    output_path = tmp_path / "bootstrap_ci.png"
-    plot_bootstrap_ci_delta(ci, output_path)
+    output_path = tmp_path / "ci_delta.png"
+    plot_ci_delta(ci, output_path)
     assert output_path.exists()
     assert output_path.stat().st_size > 0
 
 
-def test_plot_bootstrap_ci_delta_empty_input(tmp_path: Path) -> None:
+def test_plot_ci_delta_empty_input(tmp_path: Path) -> None:
     output_path = tmp_path / "empty_ci.png"
-    plot_bootstrap_ci_delta({}, output_path)
+    plot_ci_delta({}, output_path)
     assert not output_path.exists()
 
 

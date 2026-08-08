@@ -103,6 +103,16 @@ def _parse_args() -> argparse.Namespace:
         help="Only ablate blocks in this inclusive range (0-based).  "
         "E.g. '--layer-range 10 10' for block 10 only.",
     )
+    parser.add_argument(
+        "--per-channel-sites",
+        type=str,
+        nargs="+",
+        default=["pre_gelu", "post_layernorm_1", "post_layernorm_2", "residual_stream"],
+        metavar="SITE",
+        help="Sites to ablate in per-channel mode (default: all four "
+        "channel-structured sites).  Use '--per-channel-sites pre_gelu' to "
+        "restrict to pre_gelu only (e.g. for RQ2 mean_only/var_only runs).",
+    )
     return parser.parse_args()
 
 
@@ -137,6 +147,7 @@ def _build_config(args: argparse.Namespace, granularity: str) -> AblationConfig:
         granularity=granularity,
         ablation_mode=args.ablation_mode,
         layer_range=layer_range,
+        per_channel_sites=tuple(args.per_channel_sites),
     )
 
 

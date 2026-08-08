@@ -82,34 +82,38 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _load_ablation_results(path: Path) -> list[AblationResult]:
-    """Load ablation results from a CSV file."""
+def _load_ablation_results(paths: list[Path]) -> list[AblationResult]:
+    """Load ablation results from a list of CSV files."""
     results: list[AblationResult] = []
-    with open(path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            results.append(AblationResult(
-                site=row["site"],
-                sigma_threshold=float(row["sigma_threshold"]),
-                site_identifier=row["site_identifier"],
-                pct_zeroed=float(row["pct_zeroed"]),
-                top1_accuracy=float(row["top1_accuracy"]),
-                top5_accuracy=float(row["top5_accuracy"]),
-                baseline_top1=float(row["baseline_top1"]),
-                baseline_top5=float(row["baseline_top5"]),
-                is_random=row.get("is_random", "False") == "True",
-                granularity=row.get("granularity", "global"),
-                ablation_mode=row.get("ablation_mode", "outlier"),
-                cls_entropy=json.loads(row.get("cls_entropy", "[]")),
-                patch_entropy=json.loads(row.get("patch_entropy", "[]")),
-                baseline_cls_entropy=json.loads(
-                    row.get("baseline_cls_entropy", "[]"),
-                ),
-                baseline_patch_entropy=json.loads(
-                    row.get("baseline_patch_entropy", "[]"),
-                ),
-            ))
-    logger.info("Loaded %d ablation results from %s", len(results), path)
+    for path in paths:
+        if not path.exists():
+            logger.warning("Skipping non-existent file: %s", path)
+            continue
+        with open(path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                results.append(AblationResult(
+                    site=row["site"],
+                    sigma_threshold=float(row["sigma_threshold"]),
+                    site_identifier=row["site_identifier"],
+                    pct_zeroed=float(row["pct_zeroed"]),
+                    top1_accuracy=float(row["top1_accuracy"]),
+                    top5_accuracy=float(row["top5_accuracy"]),
+                    baseline_top1=float(row["baseline_top1"]),
+                    baseline_top5=float(row["baseline_top5"]),
+                    is_random=row.get("is_random", "False") == "True",
+                    granularity=row.get("granularity", "global"),
+                    ablation_mode=row.get("ablation_mode", "outlier"),
+                    cls_entropy=json.loads(row.get("cls_entropy", "[]")),
+                    patch_entropy=json.loads(row.get("patch_entropy", "[]")),
+                    baseline_cls_entropy=json.loads(
+                        row.get("baseline_cls_entropy", "[]"),
+                    ),
+                    baseline_patch_entropy=json.loads(
+                        row.get("baseline_patch_entropy", "[]"),
+                    ),
+                ))
+    logger.info("Loaded %d total ablation results from %d files", len(results), len(paths))
     return results
 
 
@@ -198,8 +202,7 @@ def _generate_phase2_poster_plots(
 
     # 6. Ablation waterfall at k=3.
     # Requires ablation data for all modes: global, mean_only, var_only, outlier.
-    # If any mode's data is missing, the waterfall chart is skipped rather than
-    # filled with fake numbers.
+    # If any mode's data is missing, the waterfall chart is skipped.
     def _acc_at_k(results, k, granularity, mode="outlier"):
         subset = [r for r in results
                   if r.site == "pre_gelu" and not r.is_random
@@ -208,7 +211,20 @@ def _generate_phase2_poster_plots(
                   and r.ablation_mode == mode]
         return float(np.mean([r.top1_accuracy for r in subset])) if subset else 0.0
 
-    baseline = pre_gelu_a[0].baseline_top1 if pre_gelu_a else 85.0
+    # Verify baselines are consistent.
+    baseline_a = pre_gelu_a[0].baseline_top1 if pre_gelu_a else None
+    baseline_b = pre_gelu_b[0].baseline_top1 if pre_gelu_b else None
+    if baseline_a is None or baseline_b is None:
+        logger.warning("Skipping waterfall: missing baseline data.")
+        return written
+    if not np.isclose(baseline_a, baseline_b):
+        logger.error(
+            f"Baseline mismatch: A={baseline_a:.2f}%, B={baseline_b:.2f}%. "
+            "Cannot generate waterfall."
+        )
+        return written
+    baseline = baseline_a
+
     global_k3 = _acc_at_k(results_a, 3.0, "global")
     pc_outlier_k3 = _acc_at_k(results_b, 3.0, "per_channel", mode="outlier")
     mean_only_k3 = _acc_at_k(results_b, 3.0, "per_channel", mode="mean_only")
@@ -305,12 +321,12 @@ def _parse_args() -> argparse.Namespace:
         help="Path to profiling_result.json (Phase 1).",
     )
     parser.add_argument(
-        "--phase2-csv-a", type=Path, default=None,
-        help="Path to first ablation_results.csv (e.g. global).",
+        "--phase2-dir-a", type=Path, default=None,
+        help="Path to the root directory for the first multi-seed run (e.g. global).",
     )
     parser.add_argument(
-        "--phase2-csv-b", type=Path, default=None,
-        help="Path to second ablation_results.csv (e.g. per-channel).",
+        "--phase2-dir-b", type=Path, default=None,
+        help="Path to the root directory for the second multi-seed run (e.g. per-channel).",
     )
     parser.add_argument(
         "--label-a", type=str, default="Global",
@@ -362,10 +378,19 @@ def main() -> None:
         total_written.extend(_generate_phase1_poster_plots(stats, args.output_dir))
 
     # --- Phase 2 ---
-    if args.phase2_csv_a is not None and args.phase2_csv_b is not None:
-        logger.info("=== Phase 2 poster plots ===")
-        results_a = _load_ablation_results(args.phase2_csv_a)
-        results_b = _load_ablation_results(args.phase2_csv_b)
+    if args.phase2_dir_a is not None and args.phase2_dir_b is not None:
+        logger.info("=== Phase 2 poster plots (multi-seed aggregation) ===")
+        
+        paths_a = sorted(args.phase2_dir_a.glob("**/ablation_results.csv"))
+        paths_b = sorted(args.phase2_dir_b.glob("**/ablation_results.csv"))
+
+        if not paths_a or not paths_b:
+            logger.error("Could not find ablation_results.csv in the provided directories.")
+            sys.exit(1)
+
+        results_a = _load_ablation_results(paths_a)
+        results_b = _load_ablation_results(paths_b)
+        
         total_written.extend(
             _generate_phase2_poster_plots(
                 results_a, results_b, args.output_dir,
@@ -374,8 +399,8 @@ def main() -> None:
                 histogram_data_dir=args.histogram_data_dir,
             ),
         )
-    elif args.phase2_csv_a is not None or args.phase2_csv_b is not None:
-        logger.error("Both --phase2-csv-a and --phase2-csv-b are required for comparison.")
+    elif args.phase2_dir_a is not None or args.phase2_dir_b is not None:
+        logger.error("Both --phase2-dir-a and --phase2-dir-b are required for comparison.")
         sys.exit(1)
 
     logger.info("Generated %d poster plots in %s", len(total_written), args.output_dir)

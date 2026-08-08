@@ -53,6 +53,7 @@ baseline entropy values from ``profiling_result.json``.
 from __future__ import annotations
 
 import logging
+import sys
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
@@ -248,6 +249,46 @@ def run(config: AblationConfig) -> None:
     logger.info("Phase 2 complete. Outputs in %s", config.output_dir)
 
 
+def _check_residual_stream_per_channel_stats(
+    layer_stats: dict[str, LayerStats],
+) -> None:
+    """Verify that residual_stream sites have per_channel_std populated.
+
+    When per-channel ablation is requested for residual_stream, Phase 1
+    profiling must have been run with ``track_per_channel=True`` on
+    residual stream saves.  If the profiling_result.json was produced
+    before this profiler update, per_channel_std will be None for all
+    residual_stream sites and the ablation would silently fall back to
+    global σ — producing misleading results.
+
+    Raises
+    ------
+    SystemExit
+        If no residual_stream site in ``layer_stats`` has non-None
+        ``per_channel_std``.
+    """
+    residual_sites = [
+        k for k in layer_stats
+        if k.endswith("/residual_stream") or k == "patch_embed/residual_stream"
+    ]
+    if not residual_sites:
+        return  # No residual stream sites at all — nothing to check.
+
+    has_per_channel = any(
+        layer_stats[s].per_channel_std is not None
+        for s in residual_sites
+    )
+    if not has_per_channel:
+        logger.error(
+            "Per-channel residual_stream ablation requested but "
+            "profiling_result.json lacks per_channel_std for "
+            "residual_stream sites. Re-run Phase 1 with the "
+            "updated profiler (track_per_channel=True was added "
+            "to residual_stream saves)."
+        )
+        sys.exit(1)
+
+
 def _run_single(
     wrapped: NNsight,
     model: nn.Module,
@@ -292,19 +333,35 @@ def _run_single(
     #    For pre_gelu and residual_stream, each batch is processed twice:
     #    first with outlier thresholding, then with random zeroing using
     #    the exact per-batch per-layer %-zeroed from the outlier pass.
-    #    In per_channel mode, only pre_gelu is ablated (per-channel μ_c, σ_c
-    #    thresholds are only meaningful for the channel-structured MLP hidden dim).
+    #    In per_channel mode, all channel-structured sites are ablated
+    #    (pre_gelu, post_layernorm_1, post_layernorm_2, residual_stream)
+    #    using per-channel μ_c and σ_c thresholds.
     is_per_channel = config.granularity == "per_channel"
     if is_per_channel:
-        sites: tuple[str, ...] = ("pre_gelu",)
-        logger.info("Per-channel granularity: only ablating pre_gelu site.")
+        # Per-channel ablation covers all channel-structured sites.
+        # pre_softmax and post_softmax are excluded because they have
+        # shape (B, H, N, N) with no channel dimension — per-channel
+        # μ_c and σ_c are not meaningful for attention logits/weights.
+        sites: tuple[str, ...] = config.per_channel_sites
+        logger.info(
+            "Per-channel granularity: ablating sites %s", sites,
+        )
     else:
         sites = ("pre_gelu", "pre_softmax", "residual_stream")
+
+    # Guard: per-channel residual_stream ablation requires per_channel_std
+    # in profiling_result.json.  If Phase 1 was run before the profiler
+    # was updated to track per-channel stats on residual stream saves,
+    # the data will be missing and the ablation would silently fall back
+    # to global σ — producing misleading results.
+    if is_per_channel and "residual_stream" in sites:
+        _check_residual_stream_per_channel_stats(layer_stats)
+
     all_results: list[AblationResult] = []
 
     for site in sites:
         logger.info("=== Ablating site: %s ===", site)
-        do_random = site in ("pre_gelu", "residual_stream") and not is_per_channel
+        do_random = site != "pre_softmax"
 
         for k in config.sigma_thresholds:
             logger.info("  Threshold k=%.1f ...", k)
@@ -429,6 +486,6 @@ def _run_single(
 
     logger.info(
         "Seed %d complete.  Data saved to %s.  "
-        "Run 'python scripts/regenerate_plots.py --phase2-csv %s --output-dir %s' for plots.",
+        "Run 'python scripts/regenerate_plots.py --csv %s --output-dir %s' for plots.",
         run_seed, output_dir, csv_path, output_dir,
     )

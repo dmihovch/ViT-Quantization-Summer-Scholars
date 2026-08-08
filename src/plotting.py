@@ -22,7 +22,7 @@ Phase 2 — from ``ablation_results.csv``
     * ``plot_accuracy_comparison`` — overlay two accuracy curves (e.g. global vs per-channel)
     * ``plot_ablation_mode_comparison`` — overlay outlier / mean_only / var_only
     * ``plot_entropy_delta_heatmap`` — per-head entropy change after ablation
-    * ``plot_bootstrap_ci_delta`` — bootstrap CI on accuracy delta
+    * ``plot_ci_delta`` — 95% CI on accuracy delta
     * ``plot_effective_channels`` — effective channels preserved per block
     * ``plot_degradation_efficiency`` — accuracy loss per unit sparsity
 """
@@ -30,7 +30,6 @@ Phase 2 — from ``ablation_results.csv``
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 
 import matplotlib
@@ -40,56 +39,20 @@ import numpy as np
 matplotlib.use("Agg")
 
 from src.ablation import AblationResult  # noqa: E402 — must follow matplotlib.use()
+from src.plotting_utils import (
+    ANALYTICAL_COLORS,
+    LABELS,
+    block_sort_key,
+    extract_block_index,
+    format_site_label,
+    site_sort_key,
+)
+
+# Backward-compatible aliases (used by tests).
+_site_sort_key = site_sort_key
+_block_sort_key = block_sort_key
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Sort key helpers
-#
-# Naive ``sorted(site_ids)`` gives string ordering:
-#   blocks.0, blocks.1, blocks.10, blocks.11, blocks.2, ...
-# which is wrong for heatmaps.  We extract the numeric block index.
-# ---------------------------------------------------------------------------
-
-_BLOCK_RE = re.compile(r"blocks\.(\d+)")
-
-
-def _site_sort_key(site_id: str) -> tuple[int, int]:
-    """Return a numeric sort key for a site identifier.
-
-    Sorts ``patch_embed/...`` first ``(0, 0)``, then ``blocks.{N}/...`` by
-    numeric N ``(1, N)``.  Unknown prefixes sort last ``(2, 0)``.
-
-    Parameters
-    ----------
-    site_id:
-        Site identifier string, e.g. ``"blocks.5/pre_gelu"``.
-
-    Returns
-    -------
-    tuple[int, int]
-        Sort key for use with ``sorted(key=...)``.
-    """
-    if site_id.startswith("patch_embed"):
-        return (0, 0)
-    m = _BLOCK_RE.search(site_id)
-    if m:
-        return (1, int(m.group(1)))
-    return (2, 0)
-
-
-def _block_sort_key(site_id: str) -> tuple[int, int | str]:
-    """Return a sort key for the block portion of a site identifier."""
-    if site_id.startswith("patch_embed"):
-        return (0, 0)
-    if site_id.startswith("blocks."):
-        try:
-            n = int(site_id.split(".", 1)[1].split("/")[0])
-            return (1, n)
-        except (ValueError, IndexError):
-            pass
-    return (2, site_id)
 
 
 # ===========================================================================
@@ -161,20 +124,34 @@ def _plot_per_channel_heatmap(
     cbar_label: str,
     title: str,
 ) -> None:
-    """Generic per-channel heatmap: layers × channels."""
+    """Generic per-channel heatmap: layers × channels.
+
+    Uses a consistent aspect ratio regardless of the number of rows.
+    For high-dimensional data (e.g. 768 or 3072 channels), the heatmap
+    is replaced with a summary line plot showing per-layer statistics
+    (mean ± std band) rather than a dense, unreadable barcode.
+    """
     if not data:
         logger.warning("Empty data dict; skipping per-channel heatmap.")
         return
 
-    sorted_keys = sorted(data.keys(), key=_site_sort_key)
+    sorted_keys = sorted(data.keys(), key=site_sort_key)
     matrix = np.array([data[k] for k in sorted_keys])  # (L, D)
+    num_layers, num_channels = matrix.shape
+
+    # For high-dimensional data, use a summary line plot instead of a
+    # dense heatmap that looks like an unreadable barcode.
+    if num_channels > 100:
+        _plot_per_channel_summary_line(matrix, sorted_keys, output_path,
+                                        cbar_label, title, num_channels)
+        return
 
     fig, ax = plt.subplots(figsize=(12, max(4, len(sorted_keys) * 0.4)))
     im = ax.imshow(matrix, aspect="auto", cmap="viridis", interpolation="nearest")
 
     ax.set_yticks(range(len(sorted_keys)))
-    ax.set_yticklabels(sorted_keys, fontsize=7)
-    ax.set_xlabel("Channel index")
+    ax.set_yticklabels([format_site_label(k) for k in sorted_keys], fontsize=7)
+    ax.set_xlabel(LABELS["channel_index"])
     ax.set_title(title, fontsize=10)
 
     cbar = fig.colorbar(im, ax=ax)
@@ -184,6 +161,59 @@ def _plot_per_channel_heatmap(
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
     logger.debug("Saved per-channel heatmap to %s", output_path)
+
+
+def _plot_per_channel_summary_line(
+    matrix: np.ndarray,
+    sorted_keys: list[str],
+    output_path: Path,
+    cbar_label: str,
+    title: str,
+    num_channels: int,
+) -> None:
+    """Plot per-layer summary statistics as a line chart with ±1σ band.
+
+    Replaces the dense barcode heatmap for high-dimensional channel data.
+    Shows the mean per-channel value per layer with a shaded band for
+    ±1 standard deviation, plus min/max envelope lines to highlight
+    rogue outlier channels.
+    """
+    num_layers = matrix.shape[0]
+    layer_means = np.mean(matrix, axis=1)
+    layer_stds = np.std(matrix, axis=1)
+    layer_mins = np.min(matrix, axis=1)
+    layer_maxs = np.max(matrix, axis=1)
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    x = np.arange(num_layers)
+
+    # ±1σ band.
+    ax.fill_between(x,
+                    layer_means - layer_stds,
+                    layer_means + layer_stds,
+                    alpha=0.2, color="steelblue", linewidth=0,
+                    label="±1σ of per-channel values")
+    # Min/max envelope (dashed).
+    ax.plot(x, layer_mins, "--", color="coral", linewidth=0.8, alpha=0.7,
+            label="Min / Max per layer")
+    ax.plot(x, layer_maxs, "--", color="coral", linewidth=0.8, alpha=0.7)
+    # Mean line.
+    ax.plot(x, layer_means, "o-", color="steelblue", linewidth=2, markersize=6,
+            label="Mean per-channel value")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([format_site_label(k) for k in sorted_keys],
+                        rotation=45, ha="right", fontsize=7)
+    ax.set_xlabel("Layer")
+    ax.set_ylabel(cbar_label)
+    ax.set_title(f"{title}\n({num_channels} channels per layer — summary statistics)", fontsize=10)
+    ax.legend(fontsize=8, loc="upper left")
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    logger.debug("Saved per-channel summary line plot to %s", output_path)
 
 
 def plot_per_channel_std_heatmap(
@@ -237,6 +267,9 @@ def plot_attention_entropy_heatmap(
     entropies: dict[str, list[float]],
     output_path: Path,
     title: str = "Attention entropy per head (nats)",
+    *,
+    vmin: float | None = None,
+    vmax: float | None = None,
 ) -> None:
     """Save a heatmap of per-head mean attention entropy across blocks.
 
@@ -253,21 +286,26 @@ def plot_attention_entropy_heatmap(
         File path where the PNG is written.  Parent directories must exist.
     title:
         Plot title (used to distinguish CLS vs patch heatmaps).
+    vmin, vmax:
+        Fixed colour scale limits.  When provided, the colour mapping is
+        locked so that CLS and patch entropy heatmaps can be compared
+        visually with a shared scale.
     """
     if not entropies:
         logger.warning("Empty entropies dict; skipping attention entropy heatmap.")
         return
 
-    sorted_keys = sorted(entropies.keys(), key=_site_sort_key)
+    sorted_keys = sorted(entropies.keys(), key=site_sort_key)
     data = np.array([entropies[k] for k in sorted_keys])  # (num_blocks, num_heads)
 
     fig, ax = plt.subplots(figsize=(10, max(4, len(sorted_keys) * 0.4)))
-    im = ax.imshow(data, aspect="auto", cmap="viridis", interpolation="nearest")
+    im = ax.imshow(data, aspect="auto", cmap="viridis", interpolation="nearest",
+                   vmin=vmin, vmax=vmax)
 
     ax.set_yticks(range(len(sorted_keys)))
-    ax.set_yticklabels(sorted_keys, fontsize=7)
-    ax.set_xlabel("Head index")
-    ax.set_ylabel("Block")
+    ax.set_yticklabels([format_site_label(k) for k in sorted_keys], fontsize=7)
+    ax.set_xlabel(LABELS["head_index"])
+    ax.set_ylabel(LABELS["block"])
     ax.set_title(title, fontsize=10)
 
     cbar = fig.colorbar(im, ax=ax)
@@ -312,9 +350,9 @@ def plot_kurtosis_heatmap(
         if "/" in sid
     })
     blocks = sorted({
-        int(_BLOCK_RE.search(sid).group(1))
+        bi
         for sid in kurtosis_by_site
-        if _BLOCK_RE.search(sid) and "/" in sid
+        if "/" in sid and (bi := extract_block_index(sid)) is not None
     })
 
     if not blocks or not site_types:
@@ -330,17 +368,24 @@ def plot_kurtosis_heatmap(
 
     fig, ax = plt.subplots(figsize=(max(8, len(site_types) * 1.8),
                                      max(4, len(blocks) * 0.4)))
-    im = ax.imshow(matrix, aspect="auto", cmap="coolwarm", interpolation="nearest",
-                   vmin=-2, vmax=5)  # reasonable kurtosis range for activations
+    # Use symlog scale to handle extreme kurtosis spikes (>4000) without
+    # letting them hijack the entire colourbar.  Linear threshold = 1.0
+    # means values below 1 are linear, above 1 are logarithmic.
+    # Also clip vmax to 500 so the Block 6/7 anomaly saturates in deep
+    # colour while the rest of the model becomes visible.
+    vmin = float(np.nanmin(matrix))
+    vmax_clipped = min(float(np.nanmax(matrix)), 500.0)
+    im = ax.imshow(matrix, aspect="auto", cmap="YlOrRd", interpolation="nearest",
+                   norm=matplotlib.colors.SymLogNorm(linthresh=1.0, vmin=vmin, vmax=vmax_clipped))
 
     ax.set_yticks(range(len(blocks)))
     ax.set_yticklabels([f"Block {b}" for b in blocks], fontsize=7)
     ax.set_xticks(range(len(site_types)))
     ax.set_xticklabels(site_types, fontsize=7, rotation=45, ha="right")
-    ax.set_title("Per-site excess kurtosis\n(Gaussian = 0, positive = heavy tails)", fontsize=10)
+    ax.set_title("Per-site excess kurtosis\n(Gaussian = 0, positive = heavy tails; symlog scale, vmax=500)", fontsize=10)
 
     cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("Excess kurtosis")
+    cbar.set_label("Excess kurtosis (symlog)")
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
@@ -357,6 +402,8 @@ def plot_outlier_fraction_heatmap(
     outlier_fractions: dict[str, dict[str, float]],
     sigma_key: str,
     output_path: Path,
+    *,
+    vmax: float | None = None,
 ) -> None:
     """Save a heatmap of per-site outlier fractions at a given sigma threshold.
 
@@ -372,6 +419,10 @@ def plot_outlier_fraction_heatmap(
         Which outlier fraction key to plot, e.g. ``"3.0_sigma"``.
     output_path:
         File path where the PNG is written.
+    vmax:
+        Fixed upper bound for the LogNorm.  When provided, the colour scale
+        is locked across calls so that multiple sigma thresholds can be
+        compared visually.  When None, uses the data max.
     """
     # Extract scalar per site.
     scalar: dict[str, float] = {}
@@ -388,9 +439,9 @@ def plot_outlier_fraction_heatmap(
         if "/" in sid
     })
     blocks = sorted({
-        int(_BLOCK_RE.search(sid).group(1))
+        bi
         for sid in scalar
-        if _BLOCK_RE.search(sid) and "/" in sid
+        if "/" in sid and (bi := extract_block_index(sid)) is not None
     })
 
     if not blocks or not site_types:
@@ -406,15 +457,19 @@ def plot_outlier_fraction_heatmap(
 
     fig, ax = plt.subplots(figsize=(max(8, len(site_types) * 1.8),
                                      max(4, len(blocks) * 0.4)))
+    data_min = float(np.nanmin(matrix))
+    data_max = float(np.nanmax(matrix))
+    # Use provided vmax for consistent scaling, or data max.
+    colour_vmax = vmax if vmax is not None else data_max
     im = ax.imshow(matrix, aspect="auto", cmap="YlOrRd", interpolation="nearest",
-                   norm=matplotlib.colors.LogNorm(vmin=max(1e-5, np.nanmin(matrix)),
-                                                  vmax=max(1e-1, np.nanmax(matrix))))
+                   norm=matplotlib.colors.LogNorm(vmin=max(1e-5, data_min),
+                                                  vmax=colour_vmax))
 
     ax.set_yticks(range(len(blocks)))
     ax.set_yticklabels([f"Block {b}" for b in blocks], fontsize=7)
     ax.set_xticks(range(len(site_types)))
     ax.set_xticklabels(site_types, fontsize=7, rotation=45, ha="right")
-    ax.set_title(f"Outlier fraction at {sigma_key.replace('_', ' ')}\n(log scale)", fontsize=10)
+    ax.set_title(f"Outlier fraction at {sigma_key.replace('_', ' ')}", fontsize=10)
 
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label("Fraction")
@@ -453,18 +508,25 @@ def plot_ln2_amplification_ratio(
         logger.warning("Empty ratios dict; skipping LN2 amplification plot.")
         return
 
-    sorted_ids = sorted(ratios.keys(), key=_site_sort_key)
-    labels = [sid.replace("/residual_stream", "") for sid in sorted_ids]
+    sorted_ids = sorted(ratios.keys(), key=site_sort_key)
+    # Format labels as "Block N" instead of raw "blocks.N".
+    labels: list[str] = []
+    for sid in sorted_ids:
+        bi = extract_block_index(sid)
+        if bi is not None:
+            labels.append(f"Block {bi}")
+        else:
+            labels.append(sid.replace("/residual_stream", ""))
     values = [ratios[sid] for sid in sorted_ids]
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    colors = ["steelblue" if v >= 0 else "coral" for v in values]
+    colors = [ANALYTICAL_COLORS["histogram"] for _ in values]
     ax.bar(range(len(values)), values, color=colors, edgecolor="black", linewidth=0.5)
     ax.axhline(y=1.0, color="gray", linestyle="--", linewidth=0.8, label="Ratio = 1 (no amplification)")
     ax.set_xticks(range(len(labels)))
-    ax.set_xticklabels(labels, fontsize=7, rotation=45, ha="right")
+    ax.set_xticklabels(labels, fontsize=8, rotation=45, ha="right")
     ax.set_xlabel("Encoder Block")
-    ax.set_ylabel("‖LN2(x)‖₂ / ‖x_skip‖₂")
+    ax.set_ylabel(r"$\|\mathrm{LN2}(x)\|_2 \,/\, \|x_{\mathrm{skip}}\|_2$")
     ax.set_title("LN2 Amplification Ratio per Block\n(>1 = LN2 amplifies signal before MLP)")
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3, axis="y")
@@ -485,13 +547,14 @@ def plot_accuracy_vs_threshold(
     output_path: Path,
     label: str | None = None,
     color: str = "steelblue",
-    linestyle: str = "o-",
 ) -> None:
-    """Save a line plot of top-1 accuracy against sigma threshold.
+    """Save a dot plot of top-1 accuracy against sigma threshold.
 
     Aggregates results across all layers for each unique
     ``sigma_threshold`` value and plots the mean top-1 accuracy with
-    baseline shown as a horizontal reference line.
+    baseline shown as a horizontal reference line.  Uses unconnected
+    markers because sigma thresholds are discrete hyperparameter
+    evaluations, not a continuous variable.
 
     Parameters
     ----------
@@ -503,9 +566,7 @@ def plot_accuracy_vs_threshold(
     label:
         Legend label for this curve.  Defaults to None (no legend entry).
     color:
-        Line colour.
-    linestyle:
-        Matplotlib linestyle + marker string.
+        Marker colour.
     """
     if not results:
         logger.warning("Empty results; skipping accuracy-vs-threshold plot.")
@@ -519,15 +580,20 @@ def plot_accuracy_vs_threshold(
 
     ks = sorted(by_k.keys())
     means = [np.mean(by_k[k]) for k in ks]
+    stds = [np.std(by_k[k]) for k in ks]
 
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(ks, means, linestyle, color=color, linewidth=2, markersize=6,
+    ax.fill_between(ks, [m - s for m, s in zip(means, stds)],
+                    [m + s for m, s in zip(means, stds)],
+                    color=color, alpha=0.15, linewidth=0)
+    # Use unconnected markers — sigma thresholds are discrete, not continuous.
+    ax.plot(ks, means, "o", color=color, linewidth=2, markersize=8,
             label=label)
-    ax.axhline(baseline, color="gray", linestyle="--", linewidth=1,
+    ax.axhline(baseline, color=ANALYTICAL_COLORS["baseline"], linestyle="--", linewidth=1,
                label=f"Baseline ({baseline:.2f}%)")
-    ax.set_xlabel("Sigma threshold (k)")
-    ax.set_ylabel("Top-1 accuracy (%)")
-    ax.set_title(f"Accuracy vs outlier threshold — {results[0].site}")
+    ax.set_xlabel(LABELS["sigma_threshold"])
+    ax.set_ylabel(LABELS["accuracy"])
+    ax.set_title(f"Accuracy vs sigma threshold — {results[0].site}")
     if label:
         ax.legend(fontsize=8)
     else:
@@ -567,17 +633,19 @@ def plot_pct_zeroed_per_layer(
         )
         return
 
-    filtered.sort(key=lambda r: _site_sort_key(r.site_identifier))
-    labels = [r.site_identifier for r in filtered]
+    filtered.sort(key=lambda r: site_sort_key(r.site_identifier))
+    labels = [format_site_label(r.site_identifier) for r in filtered]
     values = [r.pct_zeroed for r in filtered]
 
-    fig, ax = plt.subplots(figsize=(10, max(4, len(labels) * 0.3)))
+    # Cap figure height to prevent absurdly tall plots with many layers.
+    fig_height = min(12, max(4, len(labels) * 0.3))
+    fig, ax = plt.subplots(figsize=(10, fig_height))
     y_pos = range(len(labels))
-    ax.barh(y_pos, values, color="steelblue", alpha=0.8)
+    ax.barh(y_pos, values, color=ANALYTICAL_COLORS["per_channel"], alpha=0.8)
     ax.set_yticks(y_pos)
     ax.set_yticklabels(labels, fontsize=7)
-    ax.set_xlabel("% Zeroed")
-    ax.set_title(f"Percentage zeroed at k={sigma_k}σ — {filtered[0].site}")
+    ax.set_xlabel(LABELS["pct_zeroed"])
+    ax.set_title(f"Percentage zeroed at k={sigma_k} — {filtered[0].site}")
     ax.invert_yaxis()
     ax.grid(True, alpha=0.3, axis="x")
 
@@ -600,7 +668,11 @@ def plot_accuracy_comparison(
     label_b: str = "B",
     title: str | None = None,
 ) -> None:
-    """Overlay two accuracy-vs-threshold curves on one plot.
+    """Grouped bar chart comparing accuracy at discrete sigma thresholds.
+
+    Uses grouped bars instead of a line plot because sigma thresholds are
+    discrete categorical steps (3.0, 4.0, 6.0), not a continuous variable.
+    A dashed baseline line anchors the comparison.
 
     Parameters
     ----------
@@ -611,9 +683,9 @@ def plot_accuracy_comparison(
     output_path:
         Destination PNG path.
     label_a:
-        Legend label for the first curve.
+        Legend label for the first condition.
     label_b:
-        Legend label for the second curve.
+        Legend label for the second condition.
     title:
         Override plot title.  If None, derived from ``results_a[0].site``.
     """
@@ -623,28 +695,53 @@ def plot_accuracy_comparison(
 
     baseline = results_a[0].baseline_top1
 
-    def _group(results: list[AblationResult]) -> tuple[list[float], list[float]]:
+    def _group(results: list[AblationResult]) -> tuple[list[float], list[float], list[float]]:
         by_k: dict[float, list[float]] = {}
         for r in results:
             by_k.setdefault(r.sigma_threshold, []).append(r.top1_accuracy)
         ks = sorted(by_k.keys())
-        return ks, [np.mean(by_k[k]) for k in ks]
+        return ks, [np.mean(by_k[k]) for k in ks], [np.std(by_k[k]) for k in ks]
 
-    ks_a, means_a = _group(results_a)
-    ks_b, means_b = _group(results_b)
+    ks_a, means_a, stds_a = _group(results_a)
+    ks_b, means_b, stds_b = _group(results_b)
+
+    # Use common ks (intersection) for grouped bars.
+    common_ks = sorted(set(ks_a) & set(ks_b))
+    if not common_ks:
+        common_ks = sorted(set(ks_a) | set(ks_b))
+
+    # Build lookup for common ks.
+    lookup_a = dict(zip(ks_a, zip(means_a, stds_a)))
+    lookup_b = dict(zip(ks_b, zip(means_b, stds_b)))
+
+    m_a = [lookup_a[k][0] for k in common_ks]
+    s_a = [lookup_a[k][1] for k in common_ks]
+    m_b = [lookup_b[k][0] for k in common_ks]
+    s_b = [lookup_b[k][1] for k in common_ks]
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(ks_a, means_a, "o-", color="coral", linewidth=2, markersize=6,
-            label=label_a)
-    ax.plot(ks_b, means_b, "s--", color="steelblue", linewidth=2, markersize=6,
-            label=label_b)
-    ax.axhline(baseline, color="gray", linestyle="--", linewidth=1,
+    x = np.arange(len(common_ks))
+    width = 0.35
+
+    ax.bar(x - width / 2, m_a, width, label=label_a,
+           color=ANALYTICAL_COLORS["global"], edgecolor="black", linewidth=0.5,
+           yerr=s_a, capsize=4)
+    ax.bar(x + width / 2, m_b, width, label=label_b,
+           color=ANALYTICAL_COLORS["per_channel"], edgecolor="black", linewidth=0.5,
+           yerr=s_b, capsize=4)
+
+    ax.axhline(baseline, color=ANALYTICAL_COLORS["baseline"], linestyle="--", linewidth=1,
                label=f"Baseline ({baseline:.2f}%)")
-    ax.set_xlabel("Sigma threshold (k)")
-    ax.set_ylabel("Top-1 accuracy (%)")
-    ax.set_title(title or f"Accuracy vs outlier threshold — {results_a[0].site}")
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{k} σ" for k in common_ks], fontsize=10)
+    ax.set_xlabel(LABELS["sigma_threshold"])
+    ax.set_ylabel(LABELS["accuracy"])
+    ax.set_title(title or f"Accuracy at discrete thresholds — {results_a[0].site}")
     ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.3, axis="y")
+
+    # Consistent y-axis: start from 0 to avoid exaggerating differences.
+    ax.set_ylim(0, baseline + 5)
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
@@ -694,6 +791,7 @@ def plot_ablation_mode_comparison(
     baseline: float | None = None
     mode_names: list[str] = []
     accuracies: list[float] = []
+    acc_stds: list[float] = []
 
     for mode, results in mode_results.items():
         filtered = [r for r in results if r.sigma_threshold == sigma_k]
@@ -702,7 +800,9 @@ def plot_ablation_mode_comparison(
         if baseline is None:
             baseline = filtered[0].baseline_top1
         mode_names.append(mode)
-        accuracies.append(np.mean([r.top1_accuracy for r in filtered]))
+        accs = [r.top1_accuracy for r in filtered]
+        accuracies.append(np.mean(accs))
+        acc_stds.append(np.std(accs))
 
     if not mode_names:
         logger.warning("No results at k=%.1f for any mode.", sigma_k)
@@ -710,24 +810,28 @@ def plot_ablation_mode_comparison(
 
     fig, ax = plt.subplots(figsize=(max(6, len(mode_names) * 1.5), 5))
     x = np.arange(len(mode_names))
-    colors = ["steelblue", "coral", "seagreen"][:len(mode_names)]
-    ax.bar(x, accuracies, color=colors, edgecolor="black", linewidth=0.5, width=0.5)
+    mode_colors = [ANALYTICAL_COLORS["per_channel"], ANALYTICAL_COLORS["global"], "seagreen"][:len(mode_names)]
+    ax.bar(x, accuracies, yerr=acc_stds, color=mode_colors, edgecolor="black", linewidth=0.5, width=0.5,
+           capsize=5)
 
     if baseline is not None:
-        ax.axhline(baseline, color="gray", linestyle="--", linewidth=1,
+        ax.axhline(baseline, color=ANALYTICAL_COLORS["baseline"], linestyle="--", linewidth=1,
                    label=f"Baseline ({baseline:.2f}%)")
 
     ax.set_xticks(x)
     ax.set_xticklabels(mode_names, fontsize=9)
-    ax.set_ylabel("Top-1 accuracy (%)")
-    ax.set_title(f"Ablation mode comparison at k={sigma_k}σ")
+    ax.set_ylabel(LABELS["accuracy"])
+    ax.set_title(f"Ablation mode comparison at k={sigma_k}")
     if baseline is not None:
         ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3, axis="y")
 
-    # Set ylim to show the baseline clearly.
+    # Set ylim to show the baseline clearly, but don't compress differences.
     min_acc = min(accuracies) if accuracies else 0
-    ax.set_ylim(min_acc - 2, (baseline or 100) + 2)
+    max_acc = max(accuracies) if accuracies else 100
+    y_lower = max(0, min(min_acc, (baseline or 100)) - 5)
+    y_upper = max(max_acc, (baseline or 100)) + 5
+    ax.set_ylim(y_lower, y_upper)
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
@@ -741,77 +845,101 @@ def plot_ablation_mode_comparison(
 
 
 def plot_entropy_delta_heatmap(
-    entropy_deltas: dict[str, dict[str, float]],
+    per_head_deltas: dict[str, list[float]],
     output_path: Path,
-    delta_key: str = "mean_cls_delta",
     title: str | None = None,
 ) -> None:
-    """Save a heatmap of per-head (or per-site) entropy deltas after ablation.
+    """Save a heatmap of per-head entropy deltas across blocks.
+
+    Renders a (num_heads × num_blocks) matrix using ``imshow`` with a
+    diverging colormap.  Each row is one attention head; each column is
+    one block.  Positive deltas (red) mean entropy *increased* after
+    ablation (more uniform attention); negative (blue) mean it decreased.
 
     Parameters
     ----------
-    entropy_deltas:
-        Mapping from site_identifier to a dict with keys like
-        ``"mean_cls_delta"`` and ``"mean_patch_delta"``.
+    per_head_deltas:
+        Mapping from site_identifier (e.g. ``"blocks.3/pre_softmax"``) to
+        a list of per-head entropy deltas ``[H]``.
     output_path:
         Destination PNG path.
-    delta_key:
-        Which delta key to visualise.
     title:
         Override plot title.
     """
-    scalar: dict[str, float] = {}
-    for sid, deltas in entropy_deltas.items():
-        if delta_key in deltas:
-            scalar[sid] = deltas[delta_key]
-
-    if not scalar:
-        logger.warning("No entropy delta data for key=%s; skipping.", delta_key)
+    if not per_head_deltas:
+        logger.warning("No per-head entropy delta data; skipping.")
         return
 
-    sorted_ids = sorted(scalar.keys(), key=_site_sort_key)
-    values = np.array([scalar[sid] for sid in sorted_ids])
+    # Build (num_heads, num_blocks) matrix.
+    entries: list[tuple[int, list[float]]] = []
+    for sid, deltas in per_head_deltas.items():
+        bi = extract_block_index(sid)
+        if bi is None:
+            continue
+        entries.append((bi, deltas))
 
-    fig, ax = plt.subplots(figsize=(10, max(4, len(sorted_ids) * 0.3)))
-    y_pos = range(len(sorted_ids))
-    colors = ["steelblue" if v >= 0 else "coral" for v in values]
-    ax.barh(y_pos, values, color=colors, edgecolor="black", linewidth=0.5)
-    ax.axvline(x=0, color="black", linewidth=0.5)
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels([sid.replace("/pre_softmax", "") for sid in sorted_ids], fontsize=7)
-    ax.set_xlabel("Δ Entropy (nats)")
-    ax.set_title(title or f"Attention entropy delta — {delta_key}")
-    ax.invert_yaxis()
-    ax.grid(True, alpha=0.3, axis="x")
+    if not entries:
+        logger.warning("No valid block indices in entropy delta data; skipping.")
+        return
+
+    entries.sort(key=lambda x: x[0])
+    num_blocks = max(b for b, _ in entries) + 1
+    num_heads = len(entries[0][1]) if entries else 1
+
+    matrix = np.full((num_heads, num_blocks), np.nan)
+    for blk, deltas in entries:
+        for h in range(min(num_heads, len(deltas))):
+            matrix[h, blk] = deltas[h]
+
+    # Diverging colormap centred at 0.
+    v_abs = max(abs(float(np.nanmin(matrix))), abs(float(np.nanmax(matrix))), 1e-10)
+
+    fig, ax = plt.subplots(figsize=(max(8, num_blocks * 0.6),
+                                     max(4, num_heads * 0.5)))
+    im = ax.imshow(matrix, aspect="auto", cmap="RdBu_r", interpolation="nearest",
+                   vmin=-v_abs, vmax=v_abs)
+
+    ax.set_yticks(range(num_heads))
+    ax.set_yticklabels([f"Head {h}" for h in range(num_heads)], fontsize=8)
+    ax.set_xticks(range(num_blocks))
+    ax.set_xticklabels([f"{b}" for b in range(num_blocks)], fontsize=8)
+    ax.set_xlabel(LABELS["block"], fontsize=10)
+    ax.set_ylabel(LABELS["head_index"], fontsize=10)
+    ax.set_title(title or "Per-head entropy delta", fontsize=10)
+
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label(LABELS["delta_entropy"])
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
-    logger.debug("Saved entropy delta plot to %s", output_path)
+    logger.debug("Saved entropy delta heatmap to %s", output_path)
 
 
 # ---------------------------------------------------------------------------
-# Bootstrap CI on accuracy delta (migrated from analyze_ablation_results.py)
+# 95% CI on accuracy delta
 # ---------------------------------------------------------------------------
 
 
-def plot_bootstrap_ci_delta(
+def plot_ci_delta(
     ci_results: dict[float, dict[str, float]],
     output_path: Path,
 ) -> None:
-    """Plot bootstrap 95% CI for per-channel minus global accuracy delta.
+    """Plot 95% CI for per-channel minus global accuracy delta.
+
+    Computed via closed-form two-proportion z-interval.
 
     Parameters
     ----------
     ci_results:
         Mapping from sigma_k to ``{"delta_point_estimate", "delta_ci_low_pct",
-        "delta_ci_high_pct"}``, as produced by the bootstrap computation in
+        "delta_ci_high_pct"}``, as produced by ``_compute_ci_delta`` in
         ``scripts/analyze_ablation_results.py``.
     output_path:
         Destination PNG path.
     """
     if not ci_results:
-        logger.warning("Empty CI results; skipping bootstrap CI plot.")
+        logger.warning("Empty CI results; skipping CI delta plot.")
         return
 
     ks = sorted(ci_results.keys())
@@ -822,23 +950,25 @@ def plot_bootstrap_ci_delta(
     errors_high = [h - d for d, h in zip(deltas, ci_highs)]
 
     fig, ax = plt.subplots(figsize=(8, 5))
+    # Use unconnected dots (no line) — sigma thresholds are discrete
+    # hyperparameter evaluations, not a continuous variable.
     ax.errorbar(
         ks, deltas,
         yerr=[errors_low, errors_high],
-        fmt="o-", capsize=5, color="steelblue", markersize=8,
-        label="Per-channel − Global (95% bootstrap CI)",
+        fmt="o", capsize=5, color=ANALYTICAL_COLORS["per_channel"], markersize=10,
+        elinewidth=1.5, label="Per-channel − Global (95% CI)",
     )
-    ax.axhline(y=0, color="gray", linestyle="--", linewidth=0.8)
-    ax.set_xlabel("Sigma threshold k")
-    ax.set_ylabel("Δ Top-1 Accuracy (%)")
-    ax.set_title("Per-Channel vs Global Ablation Delta\n(95% bootstrap CI)")
+    ax.axhline(y=0, color=ANALYTICAL_COLORS["baseline"], linestyle="--", linewidth=0.8)
+    ax.set_xlabel(LABELS["sigma_threshold"])
+    ax.set_ylabel(LABELS["delta_accuracy"])
+    ax.set_title("Per-Channel vs Global Ablation Delta\n(95% CI, two-proportion z-interval)")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
-    logger.info("Saved bootstrap CI plot to %s", output_path)
+    logger.info("Saved CI delta plot to %s", output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -853,7 +983,12 @@ def plot_effective_channels(
     dim_label: str = "D_mlp",
     channel_count: int = 3072,
 ) -> None:
-    """Plot effective channels preserved: two conditions per block.
+    """Plot ablated (dropped) channels: two conditions per block.
+
+    Plots *dropped* channels rather than preserved channels to avoid the
+    "dynamite plot" trap where all bars look identical because they hover
+    near the top of a 0–3072 y-axis.  Comparing a bar of height 5 against
+    a bar of height 20 instantly communicates a 4× difference.
 
     Parameters
     ----------
@@ -873,22 +1008,25 @@ def plot_effective_channels(
         logger.warning("Empty channels dict; skipping effective channels plot.")
         return
 
-    sids = sorted(channels.keys(), key=_site_sort_key)
-    labels = [sid.split("/")[0] for sid in sids]
+    sids = sorted(channels.keys(), key=site_sort_key)
+    labels = [format_site_label(sid) for sid in sids]
     x = np.arange(len(sids))
     width = 0.35
 
-    g_ch = [channels[sid].get("global_channels", channels[sid].get("channels_a", 0)) for sid in sids]
-    p_ch = [channels[sid].get("pc_channels", channels[sid].get("channels_b", 0)) for sid in sids]
+    # Plot *dropped* channels = total − preserved.
+    g_preserved = [channels[sid].get("global_channels", channels[sid].get("channels_a", 0)) for sid in sids]
+    p_preserved = [channels[sid].get("pc_channels", channels[sid].get("channels_b", 0)) for sid in sids]
+    g_dropped = [channel_count - ch for ch in g_preserved]
+    p_dropped = [channel_count - ch for ch in p_preserved]
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar(x - width / 2, g_ch, width, label="Global", color="coral",
+    ax.bar(x - width / 2, g_dropped, width, label="Global", color=ANALYTICAL_COLORS["global"],
            edgecolor="black", linewidth=0.5)
-    ax.bar(x + width / 2, p_ch, width, label="Per-channel", color="steelblue",
+    ax.bar(x + width / 2, p_dropped, width, label="Per-channel", color=ANALYTICAL_COLORS["per_channel"],
            edgecolor="black", linewidth=0.5)
-    ax.set_xlabel("Encoder Block")
-    ax.set_ylabel(f"Effective Channels (of {channel_count})")
-    ax.set_title(f"Effective {dim_label} Channels Preserved at k={sigma_k}\n(Higher = more channels active)")
+    ax.set_xlabel(LABELS["block"])
+    ax.set_ylabel(f"Channels Dropped (of {channel_count})")
+    ax.set_title(f"{dim_label} Channels Dropped at k={sigma_k}\n(Lower = more channels preserved)")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=45, ha="right")
     ax.legend()
@@ -909,13 +1047,19 @@ def plot_degradation_efficiency(
     deg_results: dict[float, dict[str, float]],
     output_path: Path,
 ) -> None:
-    """Plot accuracy degradation per 1% sparsity for two conditions.
+    """Plot Pareto frontier: ΔAccuracy vs % Sparsity for two conditions.
+
+    Replaces the unstable ratio metric (ΔAccuracy / %Sparsity, which blows
+    up at near-zero sparsity denominators) with a Pareto frontier scatter
+    plot.  Each condition traces a path through (sparsity, accuracy_drop)
+    space, with points labelled by sigma threshold k.
 
     Parameters
     ----------
     deg_results:
-        Mapping from sigma_k to ``{"global_degradation_per_pct",
-        "pc_degradation_per_pct", "efficiency_ratio", ...}``.
+        Mapping from sigma_k to ``{"mean_pct_zeroed_a",
+        "mean_pct_zeroed_b", "degradation_a_per_pct",
+        "degradation_b_per_pct", ...}``.
     output_path:
         Destination PNG path.
     """
@@ -924,27 +1068,43 @@ def plot_degradation_efficiency(
         return
 
     ks = sorted(deg_results.keys())
-    g_deg = [deg_results[k].get("global_degradation_per_pct",
-                                 deg_results[k].get("degradation_a_per_pct", 0))
-             for k in ks]
-    p_deg = [deg_results[k].get("pc_degradation_per_pct",
-                                 deg_results[k].get("degradation_b_per_pct", 0))
-             for k in ks]
-    x = np.arange(len(ks))
-    width = 0.35
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.bar(x - width / 2, g_deg, width, label="Global", color="coral",
-           edgecolor="black", linewidth=0.5)
-    ax.bar(x + width / 2, p_deg, width, label="Per-channel", color="steelblue",
-           edgecolor="black", linewidth=0.5)
-    ax.set_xlabel("Sigma threshold k")
-    ax.set_ylabel("Accuracy loss per 1% sparsity (pp / %)")
-    ax.set_title("Accuracy Degradation Efficiency\n(Lower = more accuracy preserved per unit sparsity)")
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"k={k}" for k in ks])
-    ax.legend()
-    ax.grid(True, alpha=0.3, axis="y")
+    # Extract sparsity (x) and accuracy drop (y) for each condition.
+    g_sparsity = [deg_results[k].get("mean_pct_zeroed_a", 0) for k in ks]
+    p_sparsity = [deg_results[k].get("mean_pct_zeroed_b", 0) for k in ks]
+    # Accuracy drop = degradation_per_pct × sparsity (recover from stored values).
+    g_drop = [
+        deg_results[k].get("degradation_a_per_pct", 0) * deg_results[k].get("mean_pct_zeroed_a", 0)
+        for k in ks
+    ]
+    p_drop = [
+        deg_results[k].get("degradation_b_per_pct", 0) * deg_results[k].get("mean_pct_zeroed_b", 0)
+        for k in ks
+    ]
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # Draw connecting lines to show the Pareto frontier.
+    ax.plot(g_sparsity, g_drop, "o-", color=ANALYTICAL_COLORS["global"],
+            linewidth=2, markersize=10, label="Global", zorder=3)
+    ax.plot(p_sparsity, p_drop, "s--", color=ANALYTICAL_COLORS["per_channel"],
+            linewidth=2, markersize=10, label="Per-channel", zorder=3)
+
+    # Annotate each point with its k value.
+    for k, sx, sy in zip(ks, g_sparsity, g_drop):
+        ax.annotate(f"k={k:.0f}", (sx, sy),
+                    textcoords="offset points", xytext=(10, 5),
+                    fontsize=9, color=ANALYTICAL_COLORS["global"], fontweight="bold")
+    for k, sx, sy in zip(ks, p_sparsity, p_drop):
+        ax.annotate(f"k={k:.0f}", (sx, sy),
+                    textcoords="offset points", xytext=(10, -12),
+                    fontsize=9, color=ANALYTICAL_COLORS["per_channel"], fontweight="bold")
+
+    ax.set_xlabel(LABELS["pct_zeroed"])
+    ax.set_ylabel(LABELS["delta_accuracy"])
+    ax.set_title("Pareto Frontier: Accuracy Drop vs Sparsity\n(Lower-left = better: less drop at lower sparsity)")
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
