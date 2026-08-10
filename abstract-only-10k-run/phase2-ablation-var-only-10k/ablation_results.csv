@@ -1,0 +1,13 @@
+site,sigma_threshold,site_identifier,pct_zeroed,top1_accuracy,top5_accuracy,baseline_top1,baseline_top5,is_random,granularity,ablation_mode,cls_entropy,patch_entropy,baseline_cls_entropy,baseline_patch_entropy
+pre_gelu,3.0,blocks.0/pre_gelu,15.252690700588712,6.6,18.58,84.76,97.48,False,per_channel,var_only,[],[],[],[]
+pre_gelu,3.0,blocks.1/pre_gelu,8.555098072548581,6.6,18.58,84.76,97.48,False,per_channel,var_only,[],[],[],[]
+pre_gelu,3.0,blocks.10/pre_gelu,2.446282426025837,6.6,18.58,84.76,97.48,False,per_channel,var_only,[],[],[],[]
+pre_gelu,3.0,blocks.11/pre_gelu,6.375819174157586,6.6,18.58,84.76,97.48,False,per_channel,var_only,[],[],[],[]
+pre_gelu,3.0,blocks.2/pre_gelu,5.300299026024569,6.6,18.58,84.76,97.48,False,per_channel,var_only,[],[],[],[]
+pre_gelu,3.0,blocks.3/pre_gelu,4.5587282414269295,6.6,18.58,84.76,97.48,False,per_channel,var_only,[],[],[],[]
+pre_gelu,3.0,blocks.4/pre_gelu,3.102409575063332,6.6,18.58,84.76,97.48,False,per_channel,var_only,[],[],[],[]
+pre_gelu,3.0,blocks.5/pre_gelu,2.119533526622186,6.6,18.58,84.76,97.48,False,per_channel,var_only,[],[],[],[]
+pre_gelu,3.0,blocks.6/pre_gelu,1.3971748453369186,6.6,18.58,84.76,97.48,False,per_channel,var_only,[],[],[],[]
+pre_gelu,3.0,blocks.7/pre_gelu,1.1488614835224713,6.6,18.58,84.76,97.48,False,per_channel,var_only,[],[],[],[]
+pre_gelu,3.0,blocks.8/pre_gelu,0.9572010641549803,6.6,18.58,84.76,97.48,False,per_channel,var_only,[],[],[],[]
+pre_gelu,3.0,blocks.9/pre_gelu,0.4622167964009153,6.6,18.58,84.76,97.48,False,per_channel,var_only,[],[],[],[]

@@ -17,22 +17,12 @@ class DataDirectoryError(FileNotFoundError):
     """
 
 
-class HookRegistrationError(RuntimeError):
-    """Raised when no ``nn.GELU`` modules are found to attach hooks to.
+class ProfilingError(RuntimeError):
+    """Raised when the nnsight profiling trace fails or produces unexpected results.
 
     Examples
     --------
-    Raised by ``hooks.register_profiling_hooks`` when iterating over a model
-    that contains no ``torch.nn.GELU`` submodules, which would silently
-    produce an empty stats dict without this guard.
-    """
-
-
-class ShapeMismatchError(ValueError):
-    """Raised when tensor shapes are incompatible for a given operation.
-
-    Examples
-    --------
-    Raised by any function that requires two tensors to have matching shapes
-    (e.g. element-wise comparisons during ablation or LUT application).
+    Raised by ``profiler.profile_vit`` when the nnsight trace raises an
+    exception, when the model has no ``blocks`` attribute, or when zero
+    transformer blocks are found.
     """

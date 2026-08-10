@@ -1,0 +1,420 @@
+"""Post-hoc analysis of Phase 2 ablation results.
+
+Performs three analyses on existing ablation CSV data (zero GPU cost) and
+delegates all plotting to ``src/plotting.py``:
+
+1. **95% CI on global vs per-channel delta**: Computes 95% confidence
+   intervals (closed-form two-proportion z-interval) on the accuracy
+   difference between two conditions at each sigma threshold.
+
+2. **Effective channels preserved**: Translates %-zeroed into "effective
+   channels preserved" per block, comparing two conditions at each sigma
+   threshold.
+
+3. **Accuracy degradation per %-zeroed**: Normalises accuracy drop by the
+   fraction of elements zeroed — "how much accuracy is lost per unit of
+   sparsity?"
+
+Usage:
+    python scripts/analyze_ablation_results.py \
+        --csv-a outputs/phase2-ablation-global-50k/ablation_results.csv \
+        --csv-b outputs/phase2-ablation-per-channel-50k/ablation_results.csv \
+        --output-dir outputs/ablation-analysis
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import logging
+import sys
+from pathlib import Path
+
+import matplotlib
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Ensure project root is on sys.path so `src` imports work when run directly.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+matplotlib.use("Agg")
+
+from src.plotting import (
+    plot_ci_delta,
+    plot_degradation_efficiency,
+    plot_effective_channels,
+)
+
+logger = logging.getLogger(__name__)
+
+# ViT-B/16 MLP hidden dimension.
+_D_MLP: int = 3072
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Post-hoc analysis of Phase 2 ablation results.",
+    )
+    parser.add_argument(
+        "--csv-a",
+        type=Path,
+        default=Path("outputs/phase2-ablation-global-50k/ablation_results.csv"),
+        help="Path to first ablation results CSV (e.g. global).",
+    )
+    parser.add_argument(
+        "--csv-b",
+        type=Path,
+        default=Path("outputs/phase2-ablation-per-channel-50k/ablation_results.csv"),
+        help="Path to second ablation results CSV (e.g. per-channel).",
+    )
+    parser.add_argument(
+        "--label-a", type=str, default="Global",
+        help="Legend label for CSV A.",
+    )
+    parser.add_argument(
+        "--label-b", type=str, default="Per-channel",
+        help="Legend label for CSV B.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("outputs/ablation-analysis"),
+        help="Directory for output plots and JSON.",
+    )
+    # --run-dir convenience flag
+    parser.add_argument(
+        "--run-dir", type=Path, default=None,
+        help="Convenience: auto-discover files from a run directory "
+             "(e.g. outputs/full-run-2026-8-4).",
+    )
+    return parser.parse_args()
+
+
+def _load_accuracy_by_k(
+    path: Path, site: str = "pre_gelu",
+) -> dict[float, float]:
+    """Load top-1 accuracy per sigma threshold for a given site.
+
+    Returns mapping from sigma_k (float) to top1_accuracy (float).
+    Only includes non-random rows.
+    """
+    acc: dict[float, float] = {}
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["site"] != site:
+                continue
+            if row["is_random"] == "True":
+                continue
+            k = float(row["sigma_threshold"])
+            acc[k] = float(row["top1_accuracy"])
+    return acc
+
+
+def _load_pct_zeroed_by_block(
+    path: Path, sigma_k: float, site: str = "pre_gelu",
+) -> dict[str, float]:
+    """Load per-layer %-zeroed for a given sigma threshold.
+
+    Returns mapping from site_identifier to pct_zeroed.
+    """
+    pct: dict[str, float] = {}
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["site"] != site:
+                continue
+            if row["is_random"] == "True":
+                continue
+            if float(row["sigma_threshold"]) != sigma_k:
+                continue
+            pct[row["site_identifier"]] = float(row["pct_zeroed"])
+    return pct
+
+
+# ---------------------------------------------------------------------------
+# Analysis 1: 95% CI on accuracy delta
+# ---------------------------------------------------------------------------
+
+
+def _compute_ci_delta(
+    acc_a: dict[float, float],
+    acc_b: dict[float, float],
+    n_images: int = 50000,
+) -> dict[float, dict[str, float]]:
+    """Compute 95% CI for (B − A) accuracy delta via two-proportion z-interval.
+
+    For each pair of independent binomial proportions (top-1 accuracy on
+    n_images), computes the point estimate and closed-form 95% confidence
+    interval for the difference:
+
+        Δ̂ ± 1.96 · √(p̂_A(1−p̂_A)/n + p̂_B(1−p̂_B)/n)
+
+    where p̂ = accuracy / 100.
+
+    Parameters
+    ----------
+    acc_a:
+        Mapping from sigma_k to condition A top-1 accuracy (%).
+    acc_b:
+        Mapping from sigma_k to condition B top-1 accuracy (%).
+    n_images:
+        Number of images evaluated (denominator for each proportion).
+
+    Returns
+    -------
+    dict[float, dict[str, float]]
+        Mapping from sigma_k to {"delta_point_estimate", "delta_ci_low_pct",
+        "delta_ci_high_pct", "acc_a", "acc_b"}.
+    """
+    z = 1.96  # 95% CI
+    results: dict[float, dict[str, float]] = {}
+
+    for k in sorted(acc_a.keys()):
+        p_a = acc_a[k] / 100.0
+        p_b = acc_b.get(k, p_a) / 100.0
+        delta = p_b - p_a
+
+        se = np.sqrt(p_a * (1 - p_a) / n_images + p_b * (1 - p_b) / n_images)
+        margin = z * se
+
+        delta_pct = delta * 100.0
+        ci_low = (delta - margin) * 100.0
+        ci_high = (delta + margin) * 100.0
+
+        results[k] = {
+            "delta_point_estimate": round(delta_pct, 4),
+            "delta_ci_low_pct": round(ci_low, 4),
+            "delta_ci_high_pct": round(ci_high, 4),
+            "acc_a": acc_a[k],
+            "acc_b": acc_b.get(k, acc_a[k]),
+        }
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Analysis 2: Effective channels preserved
+# ---------------------------------------------------------------------------
+
+
+def _effective_channels(
+    pct_a: dict[str, float],
+    pct_b: dict[str, float],
+) -> dict[str, dict[str, float]]:
+    """Compute effective channels preserved per block.
+
+    effective_channels = (1 - pct_zeroed/100) * D_MLP
+
+    Returns mapping from site_identifier to:
+        {"channels_a", "channels_b", "delta_channels"}
+    """
+    results: dict[str, dict[str, float]] = {}
+    for sid in sorted(pct_a.keys()):
+        a_pct = pct_a[sid]
+        b_pct = pct_b.get(sid, a_pct)
+        a_ch = (1.0 - a_pct / 100.0) * _D_MLP
+        b_ch = (1.0 - b_pct / 100.0) * _D_MLP
+        results[sid] = {
+            "channels_a": round(a_ch, 1),
+            "channels_b": round(b_ch, 1),
+            "delta_channels": round(b_ch - a_ch, 1),
+            "pct_zeroed_a": a_pct,
+            "pct_zeroed_b": b_pct,
+        }
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Analysis 3: Accuracy degradation per unit sparsity
+# ---------------------------------------------------------------------------
+
+
+def _degradation_per_sparsity(
+    acc_a: dict[float, float],
+    acc_b: dict[float, float],
+    pct_a: dict[str, float],
+    pct_b: dict[str, float],
+    baseline_top1: float,
+) -> dict[float, dict[str, float]]:
+    """Compute accuracy degradation normalised by mean %-zeroed.
+
+    degradation_per_pct = (baseline - accuracy) / mean_pct_zeroed
+
+    Returns mapping from sigma_k to:
+        {"degradation_a_per_pct", "degradation_b_per_pct", "efficiency_ratio"}
+    """
+    results: dict[float, dict[str, float]] = {}
+    for k in sorted(acc_a.keys()):
+        a_mean_pct = sum(v for v in pct_a.values()) / max(len(pct_a), 1)
+        b_mean_pct = sum(v for v in pct_b.values()) / max(len(pct_b), 1)
+
+        a_degrad = (baseline_top1 - acc_a[k]) / a_mean_pct if a_mean_pct > 0 else 0.0
+        b_degrad = (baseline_top1 - acc_b.get(k, baseline_top1)) / b_mean_pct if b_mean_pct > 0 else 0.0
+
+        results[k] = {
+            "mean_pct_zeroed_a": round(a_mean_pct, 4),
+            "mean_pct_zeroed_b": round(b_mean_pct, 4),
+            "degradation_a_per_pct": round(a_degrad, 4),
+            "degradation_b_per_pct": round(b_degrad, 4),
+            "efficiency_ratio": round(a_degrad / b_degrad, 4) if b_degrad > 0 else float("inf"),
+        }
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def _discover_files_from_run_dir(run_dir: Path) -> dict[str, Path | None]:
+    """Auto-discover ablation CSVs from a run directory."""
+    discovered: dict[str, Path | None] = {"csv_a": None, "csv_b": None}
+
+    global_dir = run_dir / "phase2-global"
+    if global_dir.is_dir():
+        for seed_dir in sorted(global_dir.iterdir()):
+            if seed_dir.is_dir() and seed_dir.name.startswith("seed_"):
+                candidate = seed_dir / "ablation_results.csv"
+                if candidate.is_file():
+                    discovered["csv_a"] = candidate
+                    break
+
+    pc_dir = run_dir / "phase2-per-channel"
+    if pc_dir.is_dir():
+        for seed_dir in sorted(pc_dir.iterdir()):
+            if seed_dir.is_dir() and seed_dir.name.startswith("seed_"):
+                candidate = seed_dir / "ablation_results.csv"
+                if candidate.is_file():
+                    discovered["csv_b"] = candidate
+                    break
+
+    return discovered
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    args = _parse_args()
+
+    # --- Handle --run-dir auto-discovery ---
+    if args.run_dir is not None:
+        discovered = _discover_files_from_run_dir(args.run_dir)
+        if args.csv_a == Path("outputs/phase2-ablation-global-50k/ablation_results.csv"):
+            args.csv_a = discovered["csv_a"] or args.csv_a
+        if args.csv_b == Path("outputs/phase2-ablation-per-channel-50k/ablation_results.csv"):
+            args.csv_b = discovered["csv_b"] or args.csv_b
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load data.
+    acc_a = _load_accuracy_by_k(args.csv_a)
+    acc_b = _load_accuracy_by_k(args.csv_b)
+
+    # Determine baseline from CSV A.
+    with open(args.csv_a, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        first_row = next(reader)
+        baseline_top1 = float(first_row["baseline_top1"])
+
+    logger.info("Baseline top-1: %.2f%%", baseline_top1)
+    logger.info("%s acc: %s", args.label_a, {f"k={k}": f"{v:.2f}%" for k, v in sorted(acc_a.items())})
+    logger.info("%s acc: %s", args.label_b, {f"k={k}": f"{v:.2f}%" for k, v in sorted(acc_b.items())})
+
+    # --- Analysis 1: 95% CI ---
+    logger.info("=== 95%% CI on delta (%s − %s) ===", args.label_b, args.label_a)
+    ci_results = _compute_ci_delta(acc_a, acc_b)
+    for k in sorted(ci_results.keys()):
+        r = ci_results[k]
+        logger.info(
+            "  k=%.1f: delta=%.2f%%  [95%% CI: %.2f%%, %.2f%%]",
+            k, r["delta_point_estimate"], r["delta_ci_low_pct"], r["delta_ci_high_pct"],
+        )
+
+    plot_ci_delta(ci_results, args.output_dir / "ci_delta.png")
+
+    # --- Analysis 2: Effective channels ---
+    logger.info("=== Effective channels preserved ===")
+    for k in sorted(acc_a.keys()):
+        pct_a = _load_pct_zeroed_by_block(args.csv_a, k)
+        pct_b = _load_pct_zeroed_by_block(args.csv_b, k)
+        if not pct_b:
+            continue
+        channels = _effective_channels(pct_a, pct_b)
+
+        total_a = sum(ch["channels_a"] for ch in channels.values())
+        total_b = sum(ch["channels_b"] for ch in channels.values())
+        logger.info(
+            "  k=%.1f: %s total=%.0f, %s total=%.0f, delta=%.0f",
+            k, args.label_a, total_a, args.label_b, total_b, total_b - total_a,
+        )
+
+        # Map to legacy keys for the plotting function.
+        channels_for_plot: dict[str, dict[str, float]] = {
+            sid: {
+                "global_channels": ch["channels_a"],
+                "pc_channels": ch["channels_b"],
+            }
+            for sid, ch in channels.items()
+        }
+        plot_effective_channels(
+            channels_for_plot, k,
+            args.output_dir / f"effective_channels_k{k:.1f}.png",
+        )
+
+    # --- Analysis 3: Degradation per sparsity ---
+    logger.info("=== Accuracy degradation per unit sparsity ===")
+    for k in sorted(acc_a.keys()):
+        pct_a = _load_pct_zeroed_by_block(args.csv_a, k)
+        pct_b = _load_pct_zeroed_by_block(args.csv_b, k)
+        if not pct_b:
+            continue
+        deg_results = _degradation_per_sparsity(
+            acc_a, acc_b, pct_a, pct_b, baseline_top1,
+        )
+        for k2, r in deg_results.items():
+            logger.info(
+                "  k=%.1f: %s=%.4f pp/%%, %s=%.4f pp/%%, efficiency=%.2fx",
+                k2,
+                args.label_a,
+                r["degradation_a_per_pct"],
+                args.label_b,
+                r["degradation_b_per_pct"],
+                r["efficiency_ratio"],
+            )
+
+        plot_degradation_efficiency(
+            deg_results, args.output_dir / "degradation_efficiency.png",
+        )
+        break  # Only one plot needed (same structure across k values)
+
+    # Save all results as JSON.
+    summary: dict[str, object] = {
+        "baseline_top1": baseline_top1,
+        "label_a": args.label_a,
+        "label_b": args.label_b,
+        "ci_95pct": {
+            str(k): v for k, v in ci_results.items()
+        },
+    }
+    # Add effective channels for k=3.
+    pct_a_3 = _load_pct_zeroed_by_block(args.csv_a, 3.0)
+    pct_b_3 = _load_pct_zeroed_by_block(args.csv_b, 3.0)
+    if pct_b_3:
+        channels_3 = _effective_channels(pct_a_3, pct_b_3)
+        summary["effective_channels_k3"] = {
+            str(k): v for k, v in channels_3.items()
+        }
+
+    json_path = args.output_dir / "ablation_analysis.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    logger.info("Saved full analysis to %s", json_path)
+
+
+if __name__ == "__main__":
+    main()

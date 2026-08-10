@@ -1,0 +1,396 @@
+# EXP2-IMPL: Experiment 2 — Outlier Ablation (Zeroing)
+
+> **Status:** Phase 2 implementation complete (2026-08-02).
+> Mean-centered thresholding (T-020), random-zeroing control (T-021),
+> class-imbalance fix (T-022), per-channel ablation (T-024).
+> See `docs/issues.md` for details.
+> Tested with PyTorch 2.12.1, nnsight 0.7.0, CUDA 13.0, NVIDIA RTX 3070 (8 GB).
+
+---
+
+## 0. What "done" looks like
+
+```bash
+# Full ablation sweep across all three sites with default sigma thresholds.
+python run_phase2_ablation.py --data-dir data --num-images 50000 \
+    --layer-stats outputs/phase1-profiling/seed_42/profiling_result.json
+
+# Fast subset for smoke-testing (now class-balanced via seeded permutation).
+python run_phase2_ablation.py --data-dir data --num-images 1024 \
+    --layer-stats outputs/phase1-profiling/seed_42/profiling_result.json \
+    --sigma-thresholds 3.0 6.0
+```
+
+produces:
+
+```
+outputs/phase2-ablation/
+├── ablation_results.csv              # (3 sites × 3 thresholds × N layers) rows
+│                                       # + random-control rows (is_random=True)
+│                                       # Includes entropy fields as JSON strings
+├── entropy_deltas.csv                # Per-layer CLS/patch entropy deltas (pre_softmax only)
+├── accuracy_vs_threshold_pre_gelu.png
+├── accuracy_vs_threshold_pre_gelu_random.png   # Random control comparison
+├── accuracy_vs_threshold_pre_softmax.png
+├── accuracy_vs_threshold_residual_stream.png
+├── accuracy_vs_threshold_residual_stream_random.png  # Random control comparison
+├── pct_zeroed_pre_gelu_k3.0.png
+├── ...                               # one pct_zeroed PNG per (site, k)
+└── pct_zeroed_residual_stream_k6.0.png
+```
+
+---
+
+## 1. Files and their status
+
+| Step | File | Status |
+|------|------|--------|
+| 7 | `src/ablation.py` | ✅ Done — nnsight-based intervention, mean-centered thresholding, random-zeroing control |
+| 7 | `tests/test_ablation.py` | ✅ Done — 30 fast + 13 slow tests |
+| 8 | `src/exp2_ablation.py` | ✅ Done — orchestrator with outlier sweep + random-control sweep |
+| 8 | `run_phase2_ablation.py` | ✅ Done — CLI with sigma_thresholds matching Phase 1 |
+| — | `src/plotting.py` | ✅ Done — `plot_accuracy_vs_threshold`, `plot_pct_zeroed_per_layer` |
+| — | `src/data_loader.py` | ✅ Done — class-balanced subset sampling (T-022) |
+
+---
+
+## 2. Architecture: nnsight-based intervention
+
+Phase 2 uses the same nnsight trace mechanism as Phase 1, but with **tensor replacement** instead of observation. The core function is `zero_outliers_in_trace`, which:
+
+1. Opens an nnsight trace context on the input batch
+2. For each encoder block, replaces the activation tensor at the specified site with a zeroed version
+3. For pre_softmax, also captures per-head CLS and patch entropy on the zeroed attention weights
+4. Saves the output logits via `.save()`
+5. Returns logits + per-layer %-zeroed + per-layer entropy data
+
+### 2.1 Intervention sites
+
+| Site | Intervention point | Shape | σ/μ source | Per-channel? |
+|------|-------------------|-------|----------|-------------|
+| `pre_gelu` | `block.mlp.act.input` | `(B, N, 3072)` | `blocks.{i}/pre_gelu` | Yes |
+| `pre_softmax` | Reconstructed QKᵀ/√d → `attn.proj.input` | `(B, H, N, N)` | `blocks.{i}/pre_softmax` | No (no channel dim) |
+| `post_softmax` | `attn.attn_drop.input` | `(B, H, N, N)` | `blocks.{i}/post_softmax` | No (no channel dim) |
+| `residual_stream` | `block.norm1.input` (CLS preserved) | `(B, N, 768)` | `blocks.{i-1}/residual_stream` | Yes |
+| `post_layernorm_1` | `block.norm1.output` | `(B, N, 768)` | `blocks.{i}/post_layernorm_1` | Yes |
+| `post_layernorm_2` | `block.norm2.output` | `(B, N, 768)` | `blocks.{i}/post_layernorm_2` | Yes |
+
+### 2.2 Threshold definition (mean-centered)
+
+The zeroing threshold uses the **mean-centered** definition consistent with Phase 1:
+
+```
+|x − μ| > k·σ
+```
+
+where μ and σ are the per-layer population mean and standard deviation from
+Phase 1's `profiling_result.json`.  This is the standard statistical definition
+used in the quantization literature (Wei et al. 2022, §3.1; Bondarenko et al.
+2021, §4.1).
+
+Previously (before T-020 fix), the threshold used a zero-centered definition
+(`|x| > k·σ`), which was inconsistent with Phase 1's outlier definition.
+
+### 2.3 Random-zeroing control
+
+For `pre_gelu` and `residual_stream` sites, a random-zeroing control condition
+is run alongside the outlier-threshold sweep.  After each outlier forward pass,
+the per-layer %-zeroed is collected and used as the target fraction for a
+random pass on the **same batch**.  This ensures the random control zeros
+exactly the same fraction of elements as the outlier condition on every batch,
+eliminating the confound of differing zeroing rates.
+
+The only difference between conditions is *which* elements are zeroed (outliers
+vs. random), not *how many*.  This is the strongest possible control for
+attributing accuracy degradation to outliers specifically.
+
+Random-control results are marked with `is_random=True` in `ablation_results.csv`
+and plotted separately (`accuracy_vs_threshold_{site}_random.png`).
+
+`pre_softmax`, `post_layernorm_1`, and `post_layernorm_2` are excluded from the
+random control because random zeroing of attention logits would require
+reconstructing QKᵀ/√d inside the random path, and the post_layernorm sites are
+primarily of interest in per-channel mode where the outlier vs. random comparison
+is less informative (per-channel statistics already isolate the effect).
+
+### 2.4 pre_softmax reconstruction
+
+The pre-softmax intervention reconstructs QKᵀ/√d from `attn.qkv.output` using the exact same computation as Phase 1's `_register_pre_softmax_saves` (profiler.py L1226-1237):
+
+```
+qkv → reshape(B, N, 3, H, D) → permute(3, B, H, N, D)
+q_scaled = qkv[0] * scale
+k = qkv[1]
+v = qkv[2]
+logits = q_scaled @ kᵀ
+```
+
+After zeroing outliers in the logit matrix, attention weights are recomputed via softmax. Per-head entropy is captured using `torch.special.entr` (consistent with Phase 1 after T-017 fix). The attention output is then injected via `block.attn.proj.input`.
+
+### 2.5 Entropy delta computation
+
+For `pre_softmax` ablation, per-head CLS and patch attention entropy is captured on the zeroed attention weights. These are compared against Phase 1 baseline entropy values from `profiling_result.json` using `compute_entropy_delta`, which returns mean per-head delta in nats. Results are saved to `entropy_deltas.csv`.
+
+### 2.6 CLS token preservation
+
+For `residual_stream` zeroing, the CLS token (position 0 along the token dimension) is explicitly preserved. Zeroing the CLS token would destroy the classification signal regardless of outlier status. Ref: Wei et al. (2022), arXiv:2209.13325, §3.1.
+
+### 2.7 Per-channel ablation (granularity)
+
+Per-channel ablation uses per-channel μ_c and σ_c from Phase 1's
+``per_channel_mean`` and ``per_channel_std`` fields instead of the global
+scalar μ and σ.  The threshold for channel ``c`` is:
+
+```
+|x_c − μ_c| > k·σ_c
+```
+
+This is meaningful for all channel-structured sites — any tensor of shape
+``(B, N, D)`` where ``D`` is a channel dimension.  Per-channel mode:
+- Ablates all four channel-structured sites by default: ``pre_gelu``,
+  ``post_layernorm_1``, ``post_layernorm_2``, ``residual_stream``.
+- Excludes ``pre_softmax`` and ``post_softmax`` — they have shape
+  ``(B, H, N, N)`` with no channel dimension.
+- Runs the random-zeroing control for ``pre_gelu`` and ``residual_stream``
+  (enabled 2026-08-05; was previously disabled).
+- Supports ``--per-channel-sites`` CLI flag to restrict to a subset of sites
+  (e.g. ``--per-channel-sites pre_gelu`` for RQ2 mean_only/var_only runs).
+- Writes ``granularity=per_channel`` in the CSV output.
+
+Enabled via ``--granularity per_channel`` on the CLI or
+``AblationConfig(granularity="per_channel")``.
+
+**Hypothesis:** High-variance channels carry proportionally more
+outlier-dependent signal.  A global threshold over-zeroes them while
+under-zeroing low-variance channels.  Per-channel thresholds redistribute
+the zeroing budget, preserving more accuracy at aggressive thresholds.
+
+**Result (50k images, pre_gelu only):** Confirmed.  At k=3, per-channel
+preserves 47.00% vs 43.24% global (+3.76%).  At k≥4 the difference vanishes.
+Results for post_layernorm_1, post_layernorm_2, and residual_stream per-channel
+ablation are pending Phase 1 re-run with ``track_per_channel=True`` on residual
+stream saves.
+
+---
+
+## 3. `src/ablation.py` — Public API
+
+### 3.1 `AblationResult`
+
+```python
+@dataclass
+class AblationResult:
+    site: str              # "pre_gelu", "pre_softmax", "residual_stream",
+                           # "post_layernorm_1", "post_layernorm_2"
+    sigma_threshold: float # k value
+    site_identifier: str   # e.g. "blocks.3/pre_gelu"
+    pct_zeroed: float      # [0, 100]
+    top1_accuracy: float
+    top5_accuracy: float
+    baseline_top1: float   # unablated accuracy
+    baseline_top5: float
+    is_random: bool        # True for random-zeroing control condition
+    granularity: str       # "global" or "per_channel"
+    ablation_mode: str     # "outlier", "mean_only", or "var_only"
+    cls_entropy: list[float]           # per-head CLS entropy after ablation [H]
+    patch_entropy: list[float]         # per-head patch entropy after ablation [H]
+    baseline_cls_entropy: list[float]  # Phase 1 baseline [H]
+    baseline_patch_entropy: list[float] # Phase 1 baseline [H]
+```
+
+### 3.2 `compute_pct_zeroed` — REMOVED
+
+This function was dead code (never called in the codebase; pct_zeroed is computed
+inline in the intervention functions via ``(~mask).float().mean().item()``).
+Deleted 2026-08-03.
+
+### 3.3 `_build_zeroing_mask(tensor, sigma_k, sigma, mean) -> Tensor`
+
+Builds a boolean keep-mask where `|x − μ| ≤ k·σ`.  The `mean` parameter is
+required and must always be provided from `layer_stats`.
+
+### 3.4 `_build_per_channel_zeroing_mask(tensor, sigma_k, per_channel_sigma, per_channel_mean, device) -> Tensor`
+
+Builds a boolean keep-mask where `|x_c − μ_c| ≤ k·σ_c` per channel.
+Broadcasts per-channel statistics of shape `(D,)` against tensor of shape
+`(B, N, D)`.  Valid for any channel-structured site (pre_gelu, post_layernorm_1,
+post_layernorm_2, residual_stream).
+
+### 3.5 `_build_random_mask(tensor, fraction, seed=None, salt=0) -> Tensor`
+
+Builds a boolean keep-mask where exactly `fraction` of elements are zeroed
+at uniformly random positions.  Used for the random-zeroing control condition.
+
+### 3.6 `compute_entropy_delta(ablated_cls, ablated_patch, baseline_cls, baseline_patch) -> dict`
+
+Returns `{"mean_cls_delta": float, "mean_patch_delta": float}`. Positive means entropy increased (more uniform attention) after zeroing.
+
+### 3.7 `zero_outliers_in_trace(wrapped_model, input_batch, site, sigma_k, layer_stats, random_fractions=None, random_seed=None, per_channel=False, ablation_mode="outlier", layer_range=None) -> (logits, pct_zeroed, entropy_data)`
+
+Core intervention function. Runs one forward pass with outlier zeroing (or
+random zeroing if `random_fractions` is provided).  If `per_channel=True`,
+uses per-channel μ_c and σ_c for thresholding at all channel-structured sites
+(pre_gelu, post_layernorm_1, post_layernorm_2, residual_stream).  Returns
+3-tuple with logits, per-layer %-zeroed, and per-layer entropy (for pre_softmax).
+
+Accepts five site values: ``"pre_gelu"``, ``"pre_softmax"``, ``"residual_stream"``,
+``"post_layernorm_1"``, ``"post_layernorm_2"``.
+
+### 3.8 `save_ablation_results(results, path) -> None`
+
+Persists results to CSV. Includes `is_random` and `granularity` columns.
+Entropy fields serialised as JSON strings.
+
+### 3.9 `save_entropy_deltas(results, path) -> None`
+
+Persists per-layer entropy deltas for pre_softmax ablation to a separate CSV.
+
+---
+
+## 4. `src/exp2_ablation.py` — `run(config)`
+
+Pipeline:
+1. Load ViT-B/16, wrap with NNsight
+2. Load Phase 1 stats from `profiling_result.json` (includes baseline entropy and outlier fractions)
+3. Build val loader (shuffle=False, class-balanced subset via seeded permutation)
+4. Measure baseline accuracy (no intervention)
+5. For each site × k:
+   a. Outlier-threshold sweep: evaluate accuracy with mean-centered zeroing
+   b. Random-control sweep (pre_gelu, residual_stream): evaluate accuracy with
+      random zeroing at the **exact same per-batch per-layer fraction** as the
+      outlier condition
+6. Save `ablation_results.csv` + `entropy_deltas.csv` + generate plots (outlier + random)
+
+---
+
+## 5. Test coverage
+
+### Fast tests (39)
+
+### Slow tests (23, marked `@pytest.mark.slow`)
+- 4 pre_gelu tests (logits-change, returns-pct, shape, random-mode)
+- 3 residual_stream tests (logits-change, no-zeroing-at-high-k, random-mode)
+- 3 pre_softmax tests (logits-change, returns-pct, returns-entropy)
+- 3 edge case tests (invalid-site-raises, missing-stats, zero-sigma)
+- 5 pre_gelu per-channel tests (logits-change, returns-pct, no-zeroing-at-high-k, mean_only, var_only)
+- 1 pre_gelu per-channel missing-stats fallback test
+- 4 layer_range tests (restricts-intervention, multi-block, no-blocks-outside-range, single-block-no-zeroing)
+- 2 post_layernorm_1 per-channel tests (logits-change, returns-pct)
+- 2 post_layernorm_2 per-channel tests (logits-change, returns-pct)
+- 3 residual_stream per-channel tests (logits-change, returns-pct, no-zeroing-at-high-k)
+- 1 post_layernorm_1 per-channel mean_only test
+- 1 post_layernorm_2 per-channel var_only test
+
+---
+
+## 6. Design decisions
+
+### 6.1 nnsight over raw PyTorch hooks
+
+**Decision:** Use nnsight trace intervention, not `register_forward_pre_hook`.
+
+**Rationale:** nnsight gives us the same granular access to intermediate activations that Phase 1 profiling uses. Raw PyTorch hooks cannot intercept the attention logit matrix (computed inline in `Attention.forward()`) or the residual stream at the correct point (before `norm1`).
+
+### 6.2 CLS token preservation in residual_stream
+
+**Decision:** Preserve the CLS token (position 0) when zeroing the residual stream.
+
+**Rationale:** The CLS token is the classification signal. Zeroing it would destroy accuracy regardless of outlier status, confounding the ablation. Wei et al. (2022) preserve special tokens in their outlier suppression experiments.
+
+### 6.3 pre_softmax reconstruction matches Phase 1
+
+**Decision:** Use the exact same QKᵀ/√d reconstruction as `_register_pre_softmax_saves`.
+
+**Rationale:** Consistency with Phase 1 profiling. The σ and μ values used for thresholding come from Phase 1's profiling of the same reconstructed tensor.
+
+### 6.4 Baseline accuracy measured once
+
+**Decision:** Measure baseline accuracy once before any ablation, not per-site.
+
+**Rationale:** The baseline is the model's accuracy without any intervention. It doesn't depend on which site is being ablated.
+
+### 6.5 Entropy deltas as separate CSV
+
+**Decision:** Save entropy deltas to `entropy_deltas.csv` alongside `ablation_results.csv`.
+
+**Rationale:** Entropy deltas are only meaningful for pre_softmax ablation. Keeping them in a separate file avoids cluttering the main results CSV with NaN/empty columns for pre_gelu and residual_stream sites. The full per-head entropy values are still embedded in `ablation_results.csv` as JSON strings for reproducibility.
+
+### 6.6 Mean-centered thresholding (T-020)
+
+**Decision:** Use `|x − μ| > k·σ` for zeroing, consistent with Phase 1's outlier definition.
+
+**Rationale:** Phase 1 defines outliers as mean-centered. Phase 2 must use the same definition to ensure the experiment zeros the elements Phase 1 identified as outliers. For pre_gelu sites with large mean shifts (μ ≈ −28), the zero-centered definition would zero a different set of elements.
+
+### 6.7 Random-zeroing control (T-021)
+
+**Decision:** Run a random-zeroing sweep alongside the outlier-threshold sweep
+for pre_gelu and residual_stream, using the **exact per-batch per-layer %-zeroed**
+from the outlier pass as the target fraction for the random pass.
+
+**Rationale:** Without a random-zeroing control, it is impossible to attribute
+accuracy degradation to outliers specifically rather than to activation sparsity
+in general.  Matching the zeroing rate on a per-batch basis eliminates the
+confound of differing zeroing rates between conditions — the only difference is
+*which* elements are zeroed, not *how many*.
+
+### 6.8 Class-balanced subset sampling (T-022)
+
+**Decision:** Use seeded random permutation for subset selection when `shuffle=False`.
+
+**Rationale:** ImageFolder returns images grouped by class in alphabetical order. Taking the first N images would sample only from the first few classes, producing meaningless accuracy numbers for small `--num-images` values.
+
+### 6.9 Per-channel ablation (T-024)
+
+**Decision:** Add per-channel zeroing as a separate granularity mode for all
+channel-structured sites (pre_gelu, post_layernorm_1, post_layernorm_2,
+residual_stream), using per-channel μ_c and σ_c from Phase 1.
+
+**Rationale:** Phase 1 profiling showed per-channel σ varies 12× within
+block 10 (2.06–25.54).  A global threshold over-zeroes high-variance
+channels while under-zeroing low-variance channels.  Per-channel ablation
+tests whether this concentration drives accuracy degradation — and whether
+per-channel quantization of the MLP hidden dimension would reduce the
+accuracy penalty of INT8 range clipping.  The 3.76% improvement at k=3
+(pre_gelu only) confirms this hypothesis.  Expanding to post_layernorm_1,
+post_layernorm_2, and residual_stream (2026-08-05) tests whether the same
+pattern holds at other channel-structured sites.
+
+**Implementation:** A single generic function ``_intervene_per_channel_generic``
+handles per-channel zeroing at any ``(B, N, D)`` site via a configurable proxy
+path and optional CLS preservation.  The ``--per-channel-sites`` CLI flag allows
+restricting to a subset of sites (e.g. ``--per-channel-sites pre_gelu`` for RQ2
+mean_only/var_only runs that are specifically about the MLP hidden dimension).
+
+### 6.10 Per-channel mean added to Phase 1 (T-023)
+
+**Decision:** Add ``per_channel_mean`` to ``LayerStats`` alongside existing
+``per_channel_std``.
+
+**Rationale:** Per-channel standard deviation without per-channel mean is
+only half the picture.  Any mean-centered threshold (``|x_c − μ_c| > k·σ_c``)
+requires both.  The data existed in memory during profiling but was discarded.
+Phase 1 was re-run to regenerate the JSON with this field.
+
+---
+
+## 7. Critical constraints
+
+- `fused_attn=False` must be set before wrapping with NNsight (done by `load_vit`).
+- Model must be in `eval()` mode (done by `load_vit`, asserted in `profile_vit`).
+- Phase 1 `profiling_result.json` must exist at `config.layer_stats_path` and contain `mean`, `std`, `outlier_fractions`, and `attention_entropy_cls`/`attention_entropy_patches`.
+- For per-channel ablation, `profiling_result.json` must also contain `per_channel_mean` and `per_channel_std` for all channel-structured sites (pre_gelu, post_layernorm_1, post_layernorm_2, residual_stream).  Requires Phase 1 re-run after 2026-08-05 (residual stream `track_per_channel=True` was added).
+- The `pre_softmax` intervention reconstructs QKᵀ/√d and injects via `attn.proj.input`. This bypasses the attention dropout (`attn_drop`) — acceptable since dropout is disabled in eval mode.
+- Random-zeroing control uses per-batch per-layer %-zeroed from the outlier pass
+  as the target fraction — no dependency on Phase 1 `outlier_fractions`.
+- Per-channel mode ablates all four channel-structured sites by default;
+  `pre_softmax` and `post_softmax` are excluded (no channel dimension).
+- `--per-channel-sites` can restrict to a subset (e.g. `pre_gelu` only for RQ2).
+
+---
+
+## 8. Test checklist
+
+- [ ] `pytest -m "not slow" tests/test_ablation.py` — 39 fast tests
+- [ ] `pytest -m "slow" tests/test_ablation.py` — 23 slow tests
+- [ ] End-to-end smoke test: `python run_phase2_ablation.py --data-dir data --num-images 1024 --sigma-thresholds 3.0 6.0`
+- [ ] Full run: `python run_phase2_ablation.py --data-dir data --num-images 50000`

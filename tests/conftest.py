@@ -13,7 +13,7 @@ import pytest
 import torch
 from PIL import Image
 
-from src.hooks import LayerStats
+from src.profiler import LayerStats
 
 
 @pytest.fixture()
@@ -68,27 +68,29 @@ def temp_image_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def tiny_layer_stats() -> dict[str, LayerStats]:
-    """Return a dict of three fake :class:`~src.hooks.LayerStats` entries.
+    """Return a dict of three fake :class:`~src.profiler.LayerStats` entries.
 
     Values are chosen to be easy to reason about in tests:
 
-    - ``std=2.0`` → a threshold of ``1.0 * std = 2.0``
-    - ``mean=0.1`` → effectively centred
-    - ``maximum=8.0``, ``minimum=-8.0`` → symmetric, four standard deviations
+    - ``std=2.0``, ``mean=0.1`` — effectively centred Gaussian-ish
+    - ``max=8.0``, ``min=-8.0`` — symmetric, four standard deviations out
+    - ``kurtosis=1.5`` — leptokurtic (heavy-tailed)
+    - ``outlier_fractions`` — small but non-zero fractions for each threshold
 
-    Returns
-    -------
-    dict[str, LayerStats]
-        Mapping from layer name to :class:`~src.hooks.LayerStats`.
+    Returns:
+        Mapping from ``"{layer_name}/{site}"`` to :class:`~src.profiler.LayerStats`.
     """
     names = ["blocks.0.mlp.act", "blocks.6.mlp.act", "blocks.11.mlp.act"]
     return {
-        name: LayerStats(
-            layer_name=name,
-            maximum=8.0,
-            minimum=-8.0,
-            std=2.0,
+        f"{name}/pre_gelu": LayerStats(
+            site_identifier=f"{name}/pre_gelu",
             mean=0.1,
+            std=2.0,
+            kurtosis=1.5,
+            outlier_fractions={"3.0_sigma": 0.0027, "4.0_sigma": 0.0001, "6.0_sigma": 0.0},
+            n_samples=1_000_000,
+            max=8.0,
+            min=-8.0,
         )
         for name in names
     }

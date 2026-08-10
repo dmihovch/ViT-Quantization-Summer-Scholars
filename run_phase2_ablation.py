@@ -29,7 +29,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("data/imagenet-val"),
+        default=Path("data"),
         help="Root directory of the ImageNet validation split (ImageFolder layout).",
     )
     parser.add_argument(
@@ -54,35 +54,87 @@ def _parse_args() -> argparse.Namespace:
         "--seed",
         type=int,
         default=42,
-        help="Global random seed for reproducibility.",
+        help="Base random seed for reproducibility.",
+    )
+    parser.add_argument(
+        "--num-seeds",
+        type=int,
+        default=1,
+        help="Number of independent runs with different seeds. "
+        "Results saved to output_dir/seed_{s}/ for each seed.",
     )
     parser.add_argument(
         "--sigma-thresholds",
         type=float,
         nargs="+",
-        default=[2.0, 3.0, 4.0, 5.0],
+        default=[3.0, 4.0, 6.0],
         metavar="K",
-        help="Sigma multipliers k to sweep (e.g. --sigma-thresholds 2 3 4 5).",
+        help="Sigma multipliers k to sweep (default: 3 4 6, matching Phase 1 OUTLIER_SIGMAS).",
     )
     parser.add_argument(
         "--layer-stats",
         type=Path,
-        default=Path("outputs/phase1-profiling/layer_stats.json"),
-        help="Path to the layer_stats.json produced by Phase 1.",
+        default=Path("outputs/phase1-profiling/seed_42/profiling_result.json"),
+        help="Path to the profiling_result.json produced by Phase 1.",
+    )
+    parser.add_argument(
+        "--granularity",
+        type=str,
+        default="global",
+        choices=["global", "per_channel", "all"],
+        help="Zeroing granularity: 'global' (per-layer μ,σ), 'per_channel' "
+        "(per-channel μ_c,σ_c for pre_gelu only), or 'all' (run both back-to-back).",
+    )
+    parser.add_argument(
+        "--ablation-mode",
+        type=str,
+        default="outlier",
+        choices=["outlier", "mean_only", "var_only"],
+        help="Per-channel ablation variant (only with --granularity per_channel): "
+        "'outlier' (full per-channel), 'mean_only' (per-channel μ_c + global σ), "
+        "'var_only' (global μ + per-channel σ_c).",
+    )
+    parser.add_argument(
+        "--layer-range",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("START", "END"),
+        help="Only ablate blocks in this inclusive range (0-based).  "
+        "E.g. '--layer-range 10 10' for block 10 only.",
+    )
+    parser.add_argument(
+        "--per-channel-sites",
+        type=str,
+        nargs="+",
+        default=["pre_gelu", "post_layernorm_1", "post_layernorm_2", "residual_stream"],
+        metavar="SITE",
+        help="Sites to ablate in per-channel mode (default: all four "
+        "channel-structured sites).  Use '--per-channel-sites pre_gelu' to "
+        "restrict to pre_gelu only (e.g. for RQ2 mean_only/var_only runs).",
     )
     return parser.parse_args()
 
 
-def main() -> None:
-    """Configure logging, seed RNGs, build config, and run Phase 2."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-    args = _parse_args()
-    seed_everything(args.seed)
+def _build_config(args: argparse.Namespace, granularity: str) -> AblationConfig:
+    """Build an AblationConfig for a specific granularity mode.
 
-    config = AblationConfig(
+    Parameters
+    ----------
+    args:
+        Parsed command-line arguments.
+    granularity:
+        One of ``"global"`` or ``"per_channel"``.
+
+    Returns
+    -------
+    AblationConfig
+    """
+    layer_range: tuple[int, int] | None = None
+    if args.layer_range is not None:
+        layer_range = (args.layer_range[0], args.layer_range[1])
+
+    return AblationConfig(
         data_dir=args.data_dir,
         output_dir=args.output_dir,
         num_images=args.num_images,
@@ -90,8 +142,33 @@ def main() -> None:
         device=get_device(),
         sigma_thresholds=tuple(args.sigma_thresholds),
         layer_stats_path=args.layer_stats,
+        seed=args.seed,
+        num_seeds=args.num_seeds,
+        granularity=granularity,
+        ablation_mode=args.ablation_mode,
+        layer_range=layer_range,
+        per_channel_sites=tuple(args.per_channel_sites),
     )
-    run(config)
+
+
+def main() -> None:
+    """Configure logging, seed RNGs, build config(s), and run Phase 2."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    args = _parse_args()
+    seed_everything(args.seed)
+
+    if args.granularity == "all":
+        # Run global first, then per_channel, back-to-back.
+        logger.info("=== Running global granularity ===")
+        run(_build_config(args, "global"))
+
+        logger.info("=== Running per_channel granularity ===")
+        run(_build_config(args, "per_channel"))
+    else:
+        run(_build_config(args, args.granularity))
 
 
 if __name__ == "__main__":

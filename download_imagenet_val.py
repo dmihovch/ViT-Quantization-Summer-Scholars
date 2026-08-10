@@ -97,7 +97,7 @@ def parse_config() -> DownloadConfig:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("data/imagenet-val"),
+        default=Path("data"),
         help="Folder to save images into (created if missing).",
     )
     parser.add_argument(
