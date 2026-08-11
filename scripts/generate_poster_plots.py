@@ -59,13 +59,14 @@ from src.ablation import AblationResult
 from src.data_loader import build_val_loader
 from src.model import load_vit
 from src.plotting_poster import (
-    plot_ablation_waterfall,
+    plot_ablation_comparison,
     plot_accuracy_vs_sparsity_scatter,
     plot_activation_distribution_overlay,
-    plot_attention_entropy_streamgraph,
+    plot_attention_entropy_heatmap,
+    plot_effective_gain_scatter,
     plot_outlier_site_grid,
-    plot_per_channel_mean_hinton,
-    plot_per_channel_sigma_ridgeline,
+    plot_per_channel_mean_histogram,
+    plot_per_channel_sigma_line,
 )
 from src.profiler import LayerStats, SiteId, histogram_profile_vit, load_profiling_result
 from src.utils import ensure_dir, get_device, seed_everything
@@ -147,7 +148,7 @@ def _generate_phase1_poster_plots(
     }
     if pc_stds:
         p = output_dir / "poster_sigma_ridgeline.png"
-        plot_per_channel_sigma_ridgeline(pc_stds, p)
+        plot_per_channel_sigma_line(pc_stds, p)
         written.append(p)
 
     # 3. Attention entropy streamgraph.
@@ -157,7 +158,7 @@ def _generate_phase1_poster_plots(
     }
     if cls_ent:
         p = output_dir / "poster_entropy_streamgraph.png"
-        plot_attention_entropy_streamgraph(cls_ent, p)
+        plot_attention_entropy_heatmap(cls_ent, p)
         written.append(p)
 
     # 4. Per-channel mean Hinton (block 10).
@@ -167,10 +168,64 @@ def _generate_phase1_poster_plots(
     }
     if pc_means:
         p = output_dir / "poster_mean_hinton_blk10.png"
-        plot_per_channel_mean_hinton(pc_means, 10, p)
+        plot_per_channel_mean_histogram(pc_means, 10, p)
         written.append(p)
 
+    # 5. Effective gain vs σ_c scatter (requires model weights — skip if unavailable).
+    try:
+        p = output_dir / "poster_gain_sigma_scatter.png"
+        _generate_gain_sigma_scatter(stats, p)
+        written.append(p)
+    except Exception:
+        logger.info("Skipping gain-σ scatter (model weights unavailable).")
+
     return written
+
+
+# Helper: gain-sigma scatter (requires model + profiling data)
+
+def _generate_gain_sigma_scatter(
+    raw_stats: dict[str, dict],
+    output_path: Path,
+    block_indices: tuple[int, ...] = (8, 9, 10),
+) -> None:
+    """Generate effective-gain vs σ_c scatter — 3-panel, late blocks."""
+    from src.model import load_vit
+    from src.utils import get_device, seed_everything
+
+    seed_everything(42)
+    device = get_device()
+    model, _ = load_vit(device)
+
+    fc1_weights = {}
+    for bidx in range(12):
+        fc1_weights[bidx] = (
+            model.blocks[bidx].mlp.fc1.weight.detach().cpu().numpy()
+        )
+    del model
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    gains: list[np.ndarray] = []
+    stds: list[np.ndarray] = []
+    for bidx in block_indices:
+        ln_gamma = np.array(
+            raw_stats[f"blocks.{bidx}/post_layernorm_2"]["layernorm_gamma"],
+            dtype=np.float64,
+        )
+        pc_std = np.array(
+            raw_stats[f"blocks.{bidx}/pre_gelu"]["per_channel_std"],
+            dtype=np.float64,
+        )
+        weighted = fc1_weights[bidx] * ln_gamma[np.newaxis, :]
+        gains.append(np.linalg.norm(weighted, axis=1))
+        stds.append(pc_std)
+
+    from src.plotting_poster import plot_effective_gain_scatter
+    plot_effective_gain_scatter(
+        gains, stds, output_path,
+        block_indices=list(block_indices),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +287,7 @@ def _generate_phase2_poster_plots(
 
     if global_k3 > 0 and pc_outlier_k3 > 0 and mean_only_k3 > 0 and var_only_k3 > 0:
         p = output_dir / "poster_ablation_waterfall.png"
-        plot_ablation_waterfall(
+        plot_ablation_comparison(
             baseline, global_k3, mean_only_k3, var_only_k3, pc_outlier_k3, p,
             sigma_k=3.0,
         )

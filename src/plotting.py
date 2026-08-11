@@ -108,7 +108,7 @@ def plot_activation_histogram(
     ax.legend(fontsize=7, loc="upper right")
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
     logger.debug("Saved histogram to %s", output_path)
 
@@ -158,7 +158,7 @@ def _plot_per_channel_heatmap(
     cbar.set_label(cbar_label)
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
     logger.debug("Saved per-channel heatmap to %s", output_path)
 
@@ -211,7 +211,7 @@ def _plot_per_channel_summary_line(
     ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
     logger.debug("Saved per-channel summary line plot to %s", output_path)
 
@@ -312,7 +312,7 @@ def plot_attention_entropy_heatmap(
     cbar.set_label("Mean entropy (nats)")
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
     logger.debug("Saved attention entropy heatmap to %s", output_path)
 
@@ -388,7 +388,7 @@ def plot_kurtosis_heatmap(
     cbar.set_label("Excess kurtosis (symlog)")
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
     logger.debug("Saved kurtosis heatmap to %s", output_path)
 
@@ -475,7 +475,7 @@ def plot_outlier_fraction_heatmap(
     cbar.set_label("Fraction")
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
     logger.debug("Saved outlier fraction heatmap to %s", output_path)
 
@@ -532,7 +532,7 @@ def plot_ln2_amplification_ratio(
     ax.grid(True, alpha=0.3, axis="y")
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
     logger.debug("Saved LN2 amplification ratio plot to %s", output_path)
 
@@ -601,7 +601,7 @@ def plot_accuracy_vs_threshold(
     ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
     logger.debug("Saved accuracy-vs-threshold plot to %s", output_path)
 
@@ -650,7 +650,7 @@ def plot_pct_zeroed_per_layer(
     ax.grid(True, alpha=0.3, axis="x")
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
     logger.debug("Saved pct-zeroed plot to %s", output_path)
 
@@ -744,7 +744,7 @@ def plot_accuracy_comparison(
     ax.set_ylim(0, baseline + 5)
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
     logger.info("Saved accuracy comparison plot to %s", output_path)
 
@@ -834,7 +834,7 @@ def plot_ablation_mode_comparison(
     ax.set_ylim(y_lower, y_upper)
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
     logger.info("Saved ablation mode comparison to %s", output_path)
 
@@ -911,7 +911,7 @@ def plot_entropy_delta_heatmap(
     cbar.set_label(LABELS["delta_entropy"])
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
     logger.debug("Saved entropy delta heatmap to %s", output_path)
 
@@ -966,7 +966,7 @@ def plot_ci_delta(
     ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
     logger.info("Saved CI delta plot to %s", output_path)
 
@@ -1033,7 +1033,7 @@ def plot_effective_channels(
     ax.grid(True, alpha=0.3, axis="y")
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
     logger.info("Saved effective channels plot to %s", output_path)
 
@@ -1107,6 +1107,6 @@ def plot_degradation_efficiency(
     ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=300)
     plt.close(fig)
     logger.info("Saved degradation efficiency plot to %s", output_path)

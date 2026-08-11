@@ -107,6 +107,16 @@ def plot_accuracy_cost_vs_sparsity(
     ax.plot(sparsity_a, cost_a, 'o-', color=_PALETTE["coral"], label=label_a, linewidth=2.5, markersize=8)
     ax.plot(sparsity_b, cost_b, 'o-', color=_PALETTE["teal"], label=label_b, linewidth=2.5, markersize=8)
 
+    # Annotate each point with its sigma threshold k
+    for k, sx, cx in zip(agg_a.keys(), sparsity_a, cost_a):
+        ax.annotate(f"{int(k)}σ", (sx, cx), textcoords="offset points",
+                    xytext=(8, -4), fontsize=11, color=_PALETTE["coral"],
+                    ha="left", va="top")
+    for k, sx, cx in zip(agg_b.keys(), sparsity_b, cost_b):
+        ax.annotate(f"{int(k)}σ", (sx, cx), textcoords="offset points",
+                    xytext=(8, -4), fontsize=11, color=_PALETTE["teal"],
+                    ha="left", va="top")
+
     ax.set_xlabel("Induced Activation Sparsity (%)", fontsize=16)
     ax.set_ylabel("Accuracy Drop (pp)", fontsize=16)
     ax.set_title("Accuracy Cost of Sparsification", fontsize=18, fontweight="bold")
@@ -116,7 +126,7 @@ def plot_accuracy_cost_vs_sparsity(
     ax.set_ylim(bottom=0)
 
     fig.tight_layout(pad=1.2)
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     logger.info("Saved accuracy cost vs sparsity line plot to %s", output_path)
 
@@ -182,7 +192,7 @@ def plot_main_accuracy_bars(
     ax.grid(True, which='major', linestyle='--', linewidth=0.5, color='#CCCCCC')
     
     fig.tight_layout(pad=1.2)
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     logger.info("Saved accuracy vs sparsity scatter plot to %s", output_path)
 
@@ -230,7 +240,7 @@ def plot_main_accuracy_bars(
     ax.set_ylim(bottom=min(0, np.min(means_a)-5 if means_a else 0), top=baseline+2)
 
     fig.tight_layout(pad=1.2)
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     logger.info("Saved main accuracy bar chart to %s", output_path)
 
@@ -253,10 +263,9 @@ def main():
     profiling_dir = data_root / "phase1-profiling"
 
     output_root = args.output_dir
-    poster_dir = output_root / "poster_figures"
+    poster_dir = output_root
     
     ensure_dir(output_root)
-    ensure_dir(poster_dir)
 
     global_paths = sorted(global_dir.glob("**/ablation_results.csv"))
     pc_paths = sorted(per_channel_dir.glob("**/ablation_results.csv"))
@@ -309,7 +318,7 @@ def main():
         logger.warning("Skipping Figure 1 (Activation Overlay). Use --run-live-overlay to generate.")
 
     pc_stds = {k: s.per_channel_std for k, s in stats.items() if s.per_channel_std}
-    plot_per_channel_sigma_line(pc_stds, poster_dir / "fig2_sigma_ridgeline.png", title="Per-Channel Standard Deviation by Block")
+    plot_per_channel_sigma_line(pc_stds, poster_dir / "fig2_sigma_ridgeline.png", title="Per-Channel Standard Deviation by Block: pre-GELU")
 
     outlier_fracs = {k: s.outlier_fractions for k, s in stats.items() if s.outlier_fractions}
     plot_outlier_site_grid(outlier_fracs, poster_dir / "fig3_outlier_grid.png", sigma_key="3.0_sigma", title="Outlier Fraction at 3σ Threshold")
@@ -328,6 +337,51 @@ def main():
         plot_ablation_comparison(baseline, global_k3, mean_only_k3, var_only_k3, pc_k3, poster_dir / "fig6_ablation_waterfall.png", sigma_k=3.0)
     except Exception as e:
         logger.error("Could not generate waterfall plot: %s", e)
+
+    # --- Figure 7: Effective gain vs σ_c scatter ---
+    logger.info("Generating Figure 7 (Gain-σ Scatter)...")
+    try:
+        from src.model import load_vit
+        from src.utils import get_device, seed_everything
+
+        seed_everything(42)
+        device = get_device()
+        model, _ = load_vit(device)
+        fc1_weights = {}
+        for bidx in range(12):
+            fc1_weights[bidx] = (
+                model.blocks[bidx].mlp.fc1.weight.detach().cpu().numpy()
+            )
+        del model
+        if device.type == "cuda":
+            import torch
+            torch.cuda.empty_cache()
+
+        # Re-read profiling JSON for raw per-channel data + LN γ.
+        with open(profiling_path, "r") as f:
+            raw_stats = json.load(f)["stats"]
+
+        gains, stds_list = [], []
+        for bidx in (8, 9, 10):
+            ln_gamma = np.array(
+                raw_stats[f"blocks.{bidx}/post_layernorm_2"]["layernorm_gamma"],
+                dtype=np.float64,
+            )
+            pc_std = np.array(
+                raw_stats[f"blocks.{bidx}/pre_gelu"]["per_channel_std"],
+                dtype=np.float64,
+            )
+            weighted = fc1_weights[bidx] * ln_gamma[np.newaxis, :]
+            gains.append(np.linalg.norm(weighted, axis=1))
+            stds_list.append(pc_std)
+
+        from src.plotting_poster import plot_effective_gain_scatter
+        plot_effective_gain_scatter(
+            gains, stds_list, poster_dir / "fig7_gain_sigma_scatter.png",
+            block_indices=[8, 9, 10],
+        )
+    except Exception as e:
+        logger.error("Could not generate gain-σ scatter: %s", e)
 
     logger.info("--- Poster Figure Generation Complete ---")
 

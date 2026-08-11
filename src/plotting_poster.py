@@ -210,7 +210,7 @@ def plot_activation_distribution_overlay(
               edgecolor="#DDDDDD")
 
     fig.tight_layout(pad=1.2)
-    fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
+    fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     logger.info("Saved activation distribution overlay to %s", output_path)
 
@@ -363,7 +363,7 @@ def plot_outlier_site_grid(
         cbar = fig.colorbar(sm, cax=cax)
         cbar.set_label("Outlier fraction (%)", fontsize=10, color=_PALETTE["dark"])
         cbar.ax.tick_params(labelsize=8)
-    fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
+    fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     logger.info("Saved outlier site grid to %s", output_path)
 
@@ -472,7 +472,7 @@ def plot_accuracy_vs_sparsity_scatter(
     ax.set_ylim(0, baseline + 10)
 
     fig.tight_layout(pad=1.2)
-    fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
+    fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     logger.info("Saved accuracy grouped bar chart to %s", output_path)
 
@@ -558,7 +558,7 @@ def plot_per_channel_sigma_line(
               facecolor="white", edgecolor="#DDDDDD")
 
     fig.tight_layout(pad=1.2)
-    fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
+    fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     logger.info("Saved per-channel σ line chart to %s", output_path)
 
@@ -635,7 +635,7 @@ def plot_attention_entropy_heatmap(
     cbar.ax.tick_params(labelsize=11)
 
     fig.tight_layout(pad=1.2)
-    fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
+    fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     logger.info("Saved attention entropy heatmap to %s", output_path)
 
@@ -729,7 +729,7 @@ def plot_ablation_comparison(
     ax.set_ylim(0, baseline + 15)
 
     fig.tight_layout(pad=1.2)
-    fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
+    fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     logger.info("Saved ablation comparison to %s", output_path)
 
@@ -805,6 +805,87 @@ def plot_per_channel_mean_histogram(
               facecolor="white", edgecolor="#DDDDDD")
 
     fig.tight_layout(pad=1.2)
-    fig.savefig(output_path, dpi=200, bbox_inches="tight", facecolor="white")
+    fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     logger.info("Saved per-channel mean histogram to %s", output_path)
+
+
+# ===========================================================================
+# 9. Effective gain vs σ_c scatter — architectural mechanism figure
+# ===========================================================================
+
+
+def plot_effective_gain_scatter(
+    effective_gains: list[np.ndarray],
+    pc_stds: list[np.ndarray],
+    output_path: Path,
+    *,
+    block_indices: list[int] | None = None,
+    title: str | None = None,
+) -> None:
+    """Plot effective per-channel gain |w_c x y|_2 against per-channel σ_c.
+
+    One scatter panel per block, one point per MLP hidden channel.
+    A regression line and annotated Pearson r quantify the
+    architectural encoding of activation spread.
+    """
+    if block_indices is None:
+        block_indices = [8, 9, 10]
+    n = len(block_indices)
+    if n == 0:
+        return
+
+    fig, axes = plt.subplots(1, n, figsize=(4.8 * n, 4.2),
+                              facecolor="white", squeeze=False)
+
+    for i, (ax, bidx) in enumerate(zip(axes[0], block_indices)):
+        gain = effective_gains[i]
+        stds = pc_stds[i]
+        r = float(np.corrcoef(gain, stds)[0, 1])
+
+        ax.scatter(gain, stds, s=3, alpha=0.25,
+                   color=_PALETTE["blue"], edgecolors="none", zorder=2)
+
+        if len(stds) > 1 and np.std(gain) > 0:
+            slope, intercept = np.polyfit(gain, stds, 1)
+            xs = np.linspace(gain.min(), gain.max(), 100)
+            ax.plot(xs, slope * xs + intercept, "-",
+                    color=_PALETTE["red"], linewidth=1.5, zorder=3)
+
+        ax.text(0.97, 0.05,
+                f"x: [{gain.min():.1f}, {gain.max():.1f}]\n"
+                f"y: [{stds.min():.1f}, {stds.max():.1f}]",
+                transform=ax.transAxes, ha="right", va="bottom",
+                fontsize=6.5, color=_PALETTE["gray"])
+
+        ax.text(0.97, 0.97, f"r = {r:+.3f}  (n={len(gain):,})",
+                transform=ax.transAxes, ha="right", va="top",
+                fontsize=8.5,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                           alpha=0.85, edgecolor="#CCCCCC"))
+
+        _poster_style(ax, fontsize=13)
+        ax.set_xlabel(
+            r"Effective per-channel gain  $\|\mathbf{w}_c \odot \gamma\|_2$",
+            fontsize=12, color=_PALETTE["dark"])
+        ax.set_ylabel(
+            r"Per-channel $\sigma_c$",
+            fontsize=12, color=_PALETTE["dark"])
+        ax.set_title(f"Block {bidx}", fontsize=14, fontweight="bold",
+                     color=_PALETTE["dark"])
+        ax.grid(True, alpha=0.15, linewidth=0.3)
+
+    fig.suptitle(
+        title or "Learned Weights Encode Activation Spread: Late Blocks",
+        fontsize=15, fontweight="bold", color=_PALETTE["dark"])
+
+    fig.text(0.5, -0.04,
+             r"$\|\mathbf{w}_c \odot \gamma\|_2$ = L2 norm of fc1.weight row "
+             r"$c$ element-wise multiplied by LayerNorm scale $\gamma$",
+             ha="center", fontsize=9, color=_PALETTE["gray"],
+             transform=fig.transFigure)
+
+    fig.tight_layout(pad=1.2)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    logger.info("Saved effective gain-σ scatter to %s", output_path)

@@ -294,7 +294,7 @@ def main() -> None:  # noqa: C901
     ax.grid(True, alpha=0.3, axis="y")
     fig.tight_layout()
     bar_path = args.output_dir / "effective_gain_correlation_bars.png"
-    fig.savefig(bar_path, dpi=150)
+    fig.savefig(bar_path, dpi=300)
     plt.close(fig)
     logger.info("Saved correlation dot plot to %s", bar_path)
 
