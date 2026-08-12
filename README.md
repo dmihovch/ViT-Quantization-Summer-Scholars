@@ -1,8 +1,6 @@
 # ViT Quantization & Outlier Profiling
 
-Research codebase for profiling and ablating massive activation outliers in a
-Vision Transformer, with a pathway toward integer-only inference on NVIDIA
-Jetson edge hardware.
+Research codebase for profiling and ablating activation outliers in a Vision Transformer, with a view toward integer-only inference on edge hardware.
 
 **Target model:** `vit_base_patch16_224.augreg2_in21k_ft_in1k` via [`timm`](https://github.com/huggingface/pytorch-image-models)
 **Dataset:** ImageNet-1K validation split
@@ -11,92 +9,82 @@ Jetson edge hardware.
 
 ## Research Summary
 
-Pre-GELU activations and attention logits in ViTs exhibit heavy-tailed distributions
-dominated by a small number of massive outliers. This project investigates two
-questions:
+This project profiles activation statistics at 73 measurement sites across all 12 encoder blocks of a ViT-B/16, then measures the accuracy impact of zeroing activations that exceed per-layer outlier thresholds.
 
-1. **Where are the outliers?** We profile activation statistics (mean, std, kurtosis,
-   outlier fractions, per-channel σ and μ) at **6 measurement sites** across all 12 encoder
-   blocks (Phase 1). ✅ Complete.
-2. **How much do they matter, and why?** We zero out values beyond k·σ and measure the
-   accuracy degradation curve. A random-zeroing control condition isolates
-   the effect of outliers specifically. Per-channel ablation decomposes the effect
-   into mean-correction and variance-correction components across all four
-   channel-structured sites (pre_gelu, post_layernorm_1, post_layernorm_2,
-   residual_stream). Layer-group ablation isolates which blocks drive the
-   degradation (Phase 2). ✅ Complete; expansion complete.
+**Phase 1** collects mean, std, kurtosis, outlier fractions, and per-channel statistics (σ_c, μ_c) at six sites per block over 50,000 images using exact Pébay parallel-merge statistics.
+
+**Phase 2** zeros activations beyond k·σ thresholds and records top-1/top-5 accuracy. A random-zeroing control runs at matched sparsity to separate the effect of outlier removal from the effect of sparsity alone. Per-channel ablation decomposes the accuracy difference into mean-correction and variance-correction components.
 
 ---
 
-## Key Results (50,000 images, 5 seeds: 42–46)
+## Key Results (50,000 images, 5 seeds: 42-46)
 
 ### Phase 1: Activation Profiling
 
-| Metric | Finding |
-|--------|---------|
+| Metric | Value |
+|--------|-------|
 | Sites profiled | 73 (6 per block + final residual stream) |
-| Pre-GELU block 10 | μ = −28.33, σ = 11.20, kurtosis = 0.60 |
-| Per-channel σ spread (block 10) | 2.06 - 25.54 (12× range) |
-| LN2 γ vs σ_c correlation | r ≈ 0.0003 (no correlation; per-channel variance emerges from fc1.weight interaction) |
-| Attention entropy | CLS entropy collapses in later blocks (entropy sink phenomenon) |
+| Pre-GELU block 10 mean | -28.33 |
+| Pre-GELU block 10 std | 11.20 |
+| Pre-GELU block 10 kurtosis | 0.60 |
+| Per-channel σ range (block 10) | 2.06 - 25.54 (12.4x spread) |
+| Per-channel μ range (block 10) | -71.18 - 26.01 |
+| Outlier fraction at 3σ (block 10) | 0.39% |
+| LN2 γ vs σ_c Pearson r | 0.0003 |
 
 ### Phase 2: Outlier Ablation
 
-**Baseline top-1: 85.03%**, baseline top-5: 97.52%
+**Baseline top-1: 85.03%, top-5: 97.52%**
 
-| k | Global (top-1) | Per-channel (top-1) | Δ | 95% CI |
+| k | Global top-1 | Per-channel top-1 | Delta | 95% CI |
 |---|---|---|---|---|
-| 3.0 | 43.24% | 47.00% | **+3.76%** | [3.12%, 4.36%] |
-| 4.0 | 75.12% | 75.54% | +0.42% | [−0.11%, 0.96%] |
-| 6.0 | 84.58% | 84.11% | −0.47% | [−0.93%, −0.03%] |
+| 3.0 | 43.24% | 47.00% | +3.76 pp | [3.12, 4.36] |
+| 4.0 | 75.12% | 75.54% | +0.42 pp | [-0.11, 0.96] |
+| 6.0 | 84.58% | 84.11% | -0.47 pp | [-0.93, -0.03] |
 
-**Key finding:** Per-channel thresholds preserve 3.76% more accuracy at k=3
-(95% CI: [3.12%, 4.36%], which is statistically significant). The effect vanishes
-by k=4. The random-zeroing control confirms that accuracy degradation is caused
-by outliers specifically, as opposed to general activation sparsity.
+At k=3, per-channel thresholds yield 3.76 pp higher top-1 accuracy than global thresholds (95% CI: [3.12, 4.36] pp, two-proportion z-interval, N=50,000). The difference is within the confidence interval at k=4 and k=6.
 
-### Post-Hoc Analysis
-
-**Degradation efficiency (accuracy loss per 1% sparsity):**
-
-| k | Global | Per-channel | Efficiency ratio |
-|---|---|---|---|
-| 3.0 | 100.97 pp/% | 53.43 pp/% | **1.89×** |
-| 4.0 | 23.94 pp/% | 13.33 pp/% | 1.80× |
-| 6.0 | 1.07 pp/% | 1.28 pp/% | 0.83× |
-
-Per-channel thresholds are **1.89× more efficient** at k=3. Each 1% of zeroed
-elements costs half as much accuracy. This indicates that per-channel thresholds
-selectively preserve channels that carry more classification signal.
-
-**Effective channels preserved (of 36,864 total across 12 blocks × 3,072):**
-
-| k | Global | Per-channel | Δ |
-|---|---|---|---|
-| 3.0 | 36,711 | 36,602 | −110 |
-| 4.0 | 36,844 | 36,822 | −21 |
-| 6.0 | 36,862 | 36,855 | −8 |
-
-Per-channel ablation achieves 3.76% *higher* accuracy while preserving slightly
-*fewer* total channels (110 fewer at k=3). This confirms that per-channel thresholds
-redistribute the zeroing budget from low-importance channels to high-importance
-channels.
+The random-zeroing control preserves accuracy within 0.1 pp of baseline at all sparsity levels, confirming that the degradation under outlier zeroing is driven by the specific values removed, not by sparsity alone.
 
 ### Per-Channel Ablation Decomposition (k=3)
 
-| Condition | top-1 | Δ vs global |
-|-----------|-------|-------------|
-| Baseline | 85.03% | — |
-| Global outlier | 43.24% | — |
+| Condition | top-1 | Delta vs global |
+|-----------|-------|-----------------|
+| Baseline | 85.03% | -- |
+| Global outlier | 43.24% | -- |
 | Per-channel outlier | 47.00% | +3.76 pp |
-| Per-channel mean_only | **63.32%** | **+20.08 pp** |
-| Per-channel var_only | 6.56% | −36.68 pp |
+| Per-channel mean_only | 63.32% | +20.08 pp |
+| Per-channel var_only | 6.56% | -36.68 pp |
 
-**Key finding:** Mean correction dominates.  Per-channel μ_c recovers 20 pp over
-the global condition by correcting for shifted channel means (μ_c ∈ [−71.18, 26.01]
-at Block 10).  Variance correction alone (per-channel σ_c with global μ) is
-catastrophic — it applies narrow thresholds to channels with negative means,
-zeroing activations that are genuinely within-channel normal.
+Using per-channel μ_c with global σ (mean_only) recovers 20.08 pp over the global condition. Using per-channel σ_c with global μ (var_only) reduces accuracy to 6.56%. The mean_only condition corrects for shifted channel means (μ_c ranges from -71.18 to 26.01 at block 10). The var_only condition applies narrow per-channel thresholds centered on the global mean, which falls outside the true center of many channels, causing over-zeroing.
+
+### Post-Hoc Analysis
+
+**Degradation efficiency (accuracy loss per 1% of activations zeroed):**
+
+| k | Global | Per-channel | Ratio |
+|---|---|---|---|
+| 3.0 | 100.97 pp/% | 53.43 pp/% | 1.89x |
+| 4.0 | 23.94 pp/% | 13.33 pp/% | 1.80x |
+| 6.0 | 1.07 pp/% | 1.28 pp/% | 0.83x |
+
+**Effective channels preserved (12 blocks x 3,072 = 36,864 total):**
+
+| k | Global | Per-channel | Delta |
+|---|---|---|---|
+| 3.0 | 36,711 | 36,602 | -110 |
+| 4.0 | 36,844 | 36,822 | -21 |
+| 6.0 | 36,862 | 36,855 | -8 |
+
+**Effective gain correlation (Pearson r between ||fc1.weight[c,:] x γ||_2 and per-channel σ_c):**
+
+| Block | r |
+|-------|---|
+| 0-7 | -0.13 to +0.21 |
+| 8 | +0.755 |
+| 9 | +0.775 |
+| 10 | +0.650 |
+| 11 | +0.767 |
 
 ---
 
@@ -104,19 +92,20 @@ zeroing activations that are genuinely within-channel normal.
 
 ```
 .
-├── run_phase1_profiling.py      # Phase 1 entry point (--all, --num-seeds, --seed, --approximate-outliers)
-├── run_phase2_ablation.py       # Phase 2 entry point (--sigma-thresholds, --granularity, --ablation-mode, --layer-range, --per-channel-sites)
+├── run_phase1_profiling.py      # Phase 1 entry point
+├── run_phase2_ablation.py       # Phase 2 entry point
 │
 ├── src/
-│   ├── config.py                # frozen dataclasses for all experiment configs
-│   ├── model.py                 # load ViT-B/16, evaluate top-1/top-5 accuracy
-│   ├── data_loader.py           # ImageFolder DataLoader with auto-shuffle
-│   ├── profiler.py              # nnsight-based profiler (6-site + Welford multi-batch + outlier recount)
-│   ├── ablation.py              # nnsight-based outlier zeroing with random control + per-channel
-│   ├── plotting.py              # workhorse figure generation (headless matplotlib)
-│   ├── plotting_poster.py       # poster-quality figures (custom palettes, annotation-driven)
-│   ├── utils.py                 # seed_everything, get_device, ensure_dir, log_system_info
-│   ├── exceptions.py            # DataDirectoryError, ProfilingError
+│   ├── config.py                # frozen dataclasses for experiment configs
+│   ├── model.py                 # ViT-B/16 loading and top-1/top-5 evaluation
+│   ├── data_loader.py           # ImageNet-1K DataLoader
+│   ├── profiler.py              # nnsight-based activation profiler (Welford pipeline)
+│   ├── ablation.py              # outlier zeroing with random control and per-channel modes
+│   ├── plotting.py              # workhorse figure generation
+│   ├── plotting_poster.py       # poster-quality figures
+│   ├── plotting_utils.py        # shared colour palettes and label formatting
+│   ├── utils.py                 # seed_everything, get_device, system metadata
+│   ├── exceptions.py            # custom exception types
 │   ├── exp1_profiling.py        # Phase 1 orchestrator
 │   └── exp2_ablation.py         # Phase 2 orchestrator
 │
@@ -133,23 +122,33 @@ zeroing activations that are genuinely within-channel normal.
 │   └── test_utils.py
 │
 ├── scripts/
-│   ├── regenerate_all.sh                  # unified plot regeneration from a run directory
-│   ├── run_full_experiment.sh             # full experiment orchestration (Phase 1 + Phase 2)
-│   ├── generate_poster_plots.py           # poster-quality figure generation
-│   ├── regenerate_plots.py               # workhorse plot regeneration from data files
-│   ├── analyze_ablation_results.py       # CI, sufficiency, degradation efficiency
-│   ├── analyze_layernorm_gamma.py        # LN γ vs per-channel σ correlation
-│   ├── analyze_effective_gain.py         # fc1.weight ⊙ γ effective gain analysis
+│   ├── run_full_experiment.sh             # Phase 1 + Phase 2 orchestration
+│   ├── regenerate_all.sh                  # regenerate all plots from a run directory
+│   ├── regenerate_plots.py                # workhorse plot regeneration from data files
+│   ├── generate_poster_plots.py           # poster figure generation
+│   ├── generate_all_plots.py              # batch plot generation
+│   ├── generate_gain_sigma_scatter.py     # effective gain vs per-channel σ scatter plots
+│   ├── generate_gain_sigma_scatter_vertical.py
+│   ├── generate_final_report_plots.py
+│   ├── analyze_ablation_results.py        # CI and degradation efficiency
+│   ├── analyze_layernorm_gamma.py         # LN γ vs per-channel σ correlation
+│   ├── analyze_effective_gain.py          # fc1.weight x γ effective gain analysis
+│   ├── validate_gain_correlation.py
 │   ├── smoke_test_nnsight_intervention.py
 │   └── verify_pre_softmax_fidelity.py
 │
 ├── docs/
-│   ├── CITATIONS.md                  # verified bibliography
-│   └── TOUR-OF-THE-WORK.md           # comprehensive project guide
+│   └── CITATIONS.md
 │
-├── outputs/                     # written by runners (git-ignored)
+├── plots/                       # figures (committed)
+│   ├── phase1/
+│   ├── phase2/
+│   ├── poster/
+│   └── analysis/
+│
+├── outputs/                     # experiment outputs (git-ignored)
 ├── data/                        # ImageNet val images (git-ignored)
-├── download_imagenet_val.py     # helper to download ImageNet-1K val split
+├── download_imagenet_val.py
 ├── environment.yml
 └── pytest.ini
 ```
@@ -159,110 +158,79 @@ zeroing activations that are genuinely within-channel normal.
 ## Setup
 
 ```sh
-# Create the environment (once).
 conda env create -f environment.yml
 conda activate vit-quant
 ```
 
-> **Requirements:** PyTorch ≥2.5, nnsight ≥0.7, timm ≥1.0, CUDA-capable GPU
-> with ≥8 GB VRAM recommended. Tested on Python 3.13, PyTorch 2.12.1, nnsight 0.7.0,
-> NVIDIA RTX 3070 (8 GB).
+Requirements: PyTorch >= 2.5, nnsight >= 0.7, timm >= 1.0, CUDA-capable GPU with >= 8 GB VRAM. Tested on Python 3.13, PyTorch 2.12.1, nnsight 0.7.0, NVIDIA RTX 3070 (8 GB).
 
 ---
 
 ## Getting the Data
 
-The experiments need ImageNet-1K validation images under `data/` in ImageFolder
-layout (`data/<class_name>/<image>.JPEG`). The dataset should contain 50,000
-images across 1,000 classes (50 images per class).
+The experiments require ImageNet-1K validation images under `data/` in ImageFolder layout (`data/<class_name>/<image>.JPEG`), 50,000 images across 1,000 classes.
 
-Use `download_imagenet_val.py` to download the validation split automatically.
+```sh
+python download_imagenet_val.py
+```
 
 ---
 
 ## Methodological Note
 
-This is a **mechanistic interpretability and ablation study**, not a
-generalisation claim.  Phase 1 calibrates per-layer outlier thresholds (μ, σ)
-on the ImageNet-1K validation set.  Phase 2 then applies those thresholds to
-the **same** validation set to measure the accuracy impact of zeroing
-elements that exceed them.
+Phase 1 calibrates per-layer outlier thresholds (μ, σ) on the ImageNet-1K validation set. Phase 2 applies those thresholds to the same validation set to measure the accuracy impact of zeroing elements that exceed them.
 
-This is not a train/test leak in the traditional ML sense. No model
-parameters are updated, no hyperparameters are tuned, and no optimisation
-occurs on the validation set. The thresholds are purely descriptive
-population statistics of the activation distributions. Using a separate
-calibration set (e.g., the ImageNet training split) would produce different
-thresholds and would answer a *different question*: "what happens when
-you zero elements based on activation statistics from a disjoint set of
-images?" That is a relevant follow-up, not the question this study
-sets out to answer.
+No model parameters are updated, no hyperparameters are tuned, and no optimisation occurs on the validation set. The thresholds are descriptive population statistics of the activation distributions. The study characterises the observed activation statistics on these specific images and measures what happens when outlier-valued activations are zeroed.
 
-The same validation set is used for three distinct purposes:
+The same 50,000 images are used for three purposes:
 1. **Profiling** (Phase 1): computing population μ and σ of activation tensors.
-2. **Ablation** (Phase 2): zeroing elements beyond k·σ and measuring accuracy.
-3. **Accuracy evaluation** (Phase 2): computing top-1/top-5 on the zeroed model.
+2. **Ablation** (Phase 2): zeroing elements beyond k·σ.
+3. **Evaluation** (Phase 2): computing top-1/top-5 on the zeroed model.
 
-All three operate on the same 50,000 images. This is acceptable for a
-descriptive mechanistic study. We are characterising the *observed*
-activation statistics and measuring what happens when we surgically remove
-outliers from those specific statistics on those specific images.
-
-**Disclosure for reviewers:** A more rigorous separation would profile on
-the ImageNet-1K training set (1.28M images) and ablate/evaluate on the
-validation set.  This would eliminate any concern about distributional
-overlap between calibration and evaluation, at the cost of ~12 additional
-GPU-hours.  We disclose this design decision explicitly and welcome reviewer
-guidance on whether the additional compute is warranted for the claims made.
+A more rigorous design would profile on the ImageNet-1K training set and evaluate on the validation set. This would eliminate calibration/evaluation overlap at the cost of roughly 12 additional GPU-hours.
 
 ---
 
 ## Running the Experiments
 
-### Full orchestration (recommended)
+### Full run
 
 ```sh
-# Full run (50k images, 3 seeds, all ablation modes).
+# Full run (50k images, 5 seeds, all ablation modes).
 bash scripts/run_full_experiment.sh
 
-# Smoke test (128 images, 1 seed, ~2 min).
+# Smoke test (128 images, 1 seed).
 bash scripts/run_full_experiment.sh --smoke
 
-# Named run with custom settings.
+# Custom settings.
 bash scripts/run_full_experiment.sh --name my-run --num-seeds 5 --batch-size 128
 
 # Show all options.
 bash scripts/run_full_experiment.sh --help
 ```
 
-### Individual experiment runs
+### Phase 1 - Activation Profiling
 
-### Phase 1 — Activation Profiling
-
-> **⚠️ Important:** Phase 1 MUST be re-run if the profiler has changed since the
-> last profiling output was produced (e.g., new ``track_per_channel`` sites added,
-> ``LayerStats`` fields changed). Per-channel Phase 2 ablation will refuse to run
-> with stale profiling data. See ``_check_residual_stream_per_channel_stats`` in
-> ``src/exp2_ablation.py``.
+> **Note:** Phase 2 per-channel ablation requires Phase 1 output. Re-run Phase 1 if `LayerStats` fields have changed since the last profiling run. See `_check_residual_stream_per_channel_stats` in `src/exp2_ablation.py`.
 
 ```sh
 # Quick run (1,024 images).
 python run_phase1_profiling.py --num-images 1024
 
-# Multi-seed (3 independent runs).
+# Multi-seed run.
 python run_phase1_profiling.py --num-images 1024 --num-seeds 3 --seed 42
 
-# Full dataset profiling.
+# Full dataset.
 python run_phase1_profiling.py --all
 
-# Fast iteration (skip the second-pass global-σ outlier recount).
+# Skip the second-pass outlier recount.
 python run_phase1_profiling.py --num-images 1024 --approximate-outliers
 ```
 
-### Phase 2 — Outlier Ablation
+### Phase 2 - Outlier Ablation
 
 ```sh
-# Global ablation sweep (default: 50k images, k ∈ {3, 4, 6}).
+# Global ablation sweep (k in {3, 4, 6}).
 python run_phase2_ablation.py \
     --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json
 
@@ -275,24 +243,14 @@ python run_phase2_ablation.py --num-images 1024 \
 python run_phase2_ablation.py --num-images 50000 --granularity per_channel \
     --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json
 
-# Per-channel ablation restricted to pre_gelu only (e.g. for RQ2).
-python run_phase2_ablation.py --num-images 50000 --granularity per_channel \
-    --per-channel-sites pre_gelu \
-    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json
-
-# Mean-only per-channel (isolates mean-correction component).
+# Mean-only per-channel (mean-correction component only).
 python run_phase2_ablation.py --num-images 50000 \
     --granularity per_channel --ablation-mode mean_only \
     --sigma-thresholds 3.0
 
-# Var-only per-channel (isolates variance-correction component).
+# Var-only per-channel (variance-correction component only).
 python run_phase2_ablation.py --num-images 50000 \
     --granularity per_channel --ablation-mode var_only \
-    --sigma-thresholds 3.0
-
-# Layer-group ablation (block 10 only).
-python run_phase2_ablation.py --num-images 50000 \
-    --granularity per_channel --layer-range 10 10 \
     --sigma-thresholds 3.0
 ```
 
@@ -300,90 +258,39 @@ python run_phase2_ablation.py --num-images 50000 \
 
 ## Generating Plots
 
-Plots are **not** generated during experiment runs (except activation histograms
-in Phase 1, which need the live model).  All visualisation is done offline from
-data files via dedicated scripts.
+Plots are generated offline from saved data files. Experiment runs produce JSON and CSV output; plotting scripts consume those files separately.
 
-### One-command regeneration (recommended)
-
-Regenerate everything from a single run directory:
+### One-command regeneration
 
 ```sh
 bash scripts/regenerate_all.sh --run-dir outputs/5-seed-full-run-2026-08-05
 ```
 
-This auto-discovers all data files and produces:
+Outputs to `plots/` with subdirectories `phase1/`, `phase2/`, `poster/`, and `analysis/`.
 
-| Subdirectory | Contents |
-|-------------|----------|
-| `plots/phase1/` | Phase 1 profiling plots (heatmaps, histograms) |
-| `plots/phase2/` | Phase 2 single-run and comparison plots |
-| `plots/poster/` | Poster-quality figures |
-| `plots/analysis/` | Ablation analysis, effective gain, layernorm gamma |
-
-### Workhorse plots (researcher iteration)
-
-Regenerate standard plots from existing data. This is fast, functional, and requires no GPU
-(except `--histograms`):
+### Workhorse plots
 
 ```sh
-# Phase 1 plots from profiling_result.json.
+# Phase 1 plots.
 python scripts/regenerate_plots.py \
     --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
     --output-dir outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/
 
-# Phase 2 plots from a single ablation CSV.
+# Phase 2 single-condition plots.
 python scripts/regenerate_plots.py \
     --csv outputs/5-seed-full-run-2026-08-05/phase2-global/seed_42/ablation_results.csv \
     --output-dir outputs/5-seed-full-run-2026-08-05/phase2-global/seed_42/
 
-# Phase 2 comparison (global vs per-channel overlay).
+# Phase 2 global vs per-channel comparison.
 python scripts/regenerate_plots.py \
     --csv-a outputs/5-seed-full-run-2026-08-05/phase2-global/seed_42/ablation_results.csv \
     --csv-b outputs/5-seed-full-run-2026-08-05/phase2-per-channel/seed_42/ablation_results.csv \
     --output-dir outputs/phase2-comparison/
-
-# Full suite with activation histograms (needs model + GPU).
-python scripts/regenerate_plots.py \
-    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
-    --csv-a outputs/5-seed-full-run-2026-08-05/phase2-global/seed_42/ablation_results.csv \
-    --csv-b outputs/5-seed-full-run-2026-08-05/phase2-per-channel/seed_42/ablation_results.csv \
-    --output-dir outputs/all-plots/ \
-    --histograms --data-dir data
-
-# Convenience: auto-discover from a run directory.
-python scripts/regenerate_plots.py \
-    --run-dir outputs/5-seed-full-run-2026-08-05 \
-    --output-dir outputs/5-seed-full-run-2026-08-05/plots/
 ```
 
-### Poster-quality plots (presentation / publication)
-
-Generate polished figures suitable for posters and papers. These use custom colour
-palettes, direct annotation, ≥14 pt fonts, and have no chartjunk:
+### Poster figures
 
 ```sh
-# Phase 1 only (profiling stats).
-python scripts/generate_poster_plots.py \
-    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
-    --output-dir outputs/poster-plots
-
-# Phase 1 + Phase 2 comparison.
-python scripts/generate_poster_plots.py \
-    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
-    --csv-a outputs/5-seed-full-run-2026-08-05/phase2-global/seed_42/ablation_results.csv \
-    --csv-b outputs/5-seed-full-run-2026-08-05/phase2-per-channel/seed_42/ablation_results.csv \
-    --output-dir outputs/poster-plots
-
-# Full suite including activation distribution overlay (needs model + GPU).
-python scripts/generate_poster_plots.py \
-    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
-    --csv-a outputs/5-seed-full-run-2026-08-05/phase2-global/seed_42/ablation_results.csv \
-    --csv-b outputs/5-seed-full-run-2026-08-05/phase2-per-channel/seed_42/ablation_results.csv \
-    --output-dir outputs/poster-plots \
-    --histogram-data-dir data
-
-# Merge mean_only + var_only + outlier CSVs for the waterfall chart.
 python scripts/generate_poster_plots.py \
     --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
     --csv-a outputs/5-seed-full-run-2026-08-05/phase2-global/seed_42/ablation_results.csv \
@@ -391,24 +298,7 @@ python scripts/generate_poster_plots.py \
     --csv-b outputs/5-seed-full-run-2026-08-05/phase2-per-channel-mean-only/seed_42/ablation_results.csv \
     --csv-b outputs/5-seed-full-run-2026-08-05/phase2-per-channel-var-only/seed_42/ablation_results.csv \
     --output-dir outputs/poster-plots
-
-# Convenience: auto-discover from a run directory.
-python scripts/generate_poster_plots.py \
-    --run-dir outputs/5-seed-full-run-2026-08-05 \
-    --output-dir outputs/5-seed-full-run-2026-08-05/plots/poster
 ```
-
-**Poster plots generated:**
-
-| Plot | Description |
-|------|-------------|
-| `poster_outlier_grid_*.png` | 12x6 tile grid showing outlier fractions across all sites at a glance. |
-| `poster_sigma_ridgeline.png` | Per-channel σ distributions as overlapping density curves. Block depth maps to colour. |
-| `poster_entropy_streamgraph.png` | CLS attention entropy stream. Collapse is visible as narrowing bands. |
-| `poster_mean_hinton_blk10.png` | Hinton diagram of per-channel μ (area is proportional to |μ|, colour is sign). |
-| `poster_accuracy_vs_sparsity.png` | Connected scatter plot of accuracy vs %-zeroed, color-coded by condition. |
-| `poster_ablation_waterfall.png` | Waterfall chart decomposing the per-channel accuracy benefit. |
-| `poster_activation_overlay_blk10.png` | Hero figure showing an activation histogram with global vs per-channel threshold bands. |
 
 ---
 
@@ -426,15 +316,10 @@ python scripts/analyze_layernorm_gamma.py \
     --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
     --output-dir outputs/layernorm-gamma-analysis
 
-# Effective per-channel gain (‖fc1⊙γ‖) vs per-channel σ correlation.
+# Effective per-channel gain (||fc1 x γ||) vs per-channel σ correlation.
 python scripts/analyze_effective_gain.py \
     --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
     --output-dir outputs/effective-gain-analysis
-
-# Convenience: auto-discover from a run directory.
-python scripts/analyze_ablation_results.py \
-    --run-dir outputs/5-seed-full-run-2026-08-05 \
-    --output-dir outputs/5-seed-full-run-2026-08-05/plots/analysis/ablation
 ```
 
 ---
@@ -442,6 +327,6 @@ python scripts/analyze_ablation_results.py \
 ## Running the Tests
 
 ```sh
-pytest -m "not slow"      # Fast suite (192 tests), no model download required
-pytest                     # Full suite (252 tests, includes model-dependent slow tests)
+pytest -m "not slow"   # fast suite, no model download required
+pytest                  # full suite, includes GPU-dependent tests
 ```
