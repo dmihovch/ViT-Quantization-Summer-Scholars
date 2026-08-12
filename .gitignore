@@ -92,3 +92,4 @@ torch_cache/
 .DS_Store
 Thumbs.db
 desktop.ini
+docs/TOUR-OF-THE-WORK.md

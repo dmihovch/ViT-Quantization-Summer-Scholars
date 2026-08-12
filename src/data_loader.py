@@ -89,8 +89,7 @@ def build_val_loader(
     # Resolve effective shuffle before subsetting so the auto-selected
     # value controls both random sampling and DataLoader shuffling.
     # Always shuffle by default — class-diverse batches produce
-    # representative per-batch σ, reducing the outlier-fraction
-    # overestimate documented in docs/MISTAKES.md §1.3.
+    # representative per-batch σ.
     if shuffle is None:
         shuffle = True
 

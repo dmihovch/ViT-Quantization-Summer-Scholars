@@ -216,7 +216,7 @@ echo "=== [2/5] Generating poster plots ==="
 
 POSTER_ARGS=()
 if [[ -n "$PHASE1_JSON" ]]; then
-    POSTER_ARGS+=(--layer-stats "$PHASE1_JSON")
+    POSTER_ARGS+=(--phase1-json "$PHASE1_JSON")
 fi
 if [[ -n "$CSV_A" ]]; then
     POSTER_ARGS+=(--csv-a "$CSV_A")

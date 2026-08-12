@@ -110,17 +110,17 @@ def plot_accuracy_cost_vs_sparsity(
     # Annotate each point with its sigma threshold k
     for k, sx, cx in zip(agg_a.keys(), sparsity_a, cost_a):
         ax.annotate(f"{int(k)}σ", (sx, cx), textcoords="offset points",
-                    xytext=(8, -4), fontsize=11, color=_PALETTE["coral"],
+                    xytext=(8, -4), fontsize=14, color=_PALETTE["coral"],
                     ha="left", va="top")
-    for k, sx, cx in zip(agg_b.keys(), sparsity_b, cost_b):
-        ax.annotate(f"{int(k)}σ", (sx, cx), textcoords="offset points",
-                    xytext=(8, -4), fontsize=11, color=_PALETTE["teal"],
+        for k, sx, cx in zip(agg_b.keys(), sparsity_b, cost_b):
+            ax.annotate(f"{int(k)}σ", (sx, cx), textcoords="offset points",
+                        xytext=(8, -4), fontsize=14, color=_PALETTE["teal"],
                     ha="left", va="top")
 
     ax.set_xlabel("Induced Activation Sparsity (%)", fontsize=16)
     ax.set_ylabel("Accuracy Drop (pp)", fontsize=16)
     ax.set_title("Accuracy Cost of Sparsification", fontsize=18, fontweight="bold")
-    ax.legend(fontsize=14, loc="upper left")
+    ax.legend(fontsize=16, loc="upper left")
     ax.grid(True, which='major', linestyle='--', linewidth=0.5, color='#CCCCCC')
     ax.set_xlim(left=0)
     ax.set_ylim(bottom=0)
@@ -131,70 +131,7 @@ def plot_accuracy_cost_vs_sparsity(
     logger.info("Saved accuracy cost vs sparsity line plot to %s", output_path)
 
 
-def plot_main_accuracy_bars(
-    results_a: list[AblationResult],
-    results_b: list[AblationResult],
-    output_path: Path,
-    label_a: str = "Global",
-    label_b: str = "Per-channel",
-) -> None:
-    """Plot accuracy vs. induced sparsity as a true scatter plot."""
-    
-    def aggregate_by_k(results: list[AblationResult]):
-        grouped = collections.defaultdict(lambda: {'accs': [], 'sparsities': []})
-        for r in results:
-            if r.site == "pre_gelu" and not r.is_random:
-                grouped[r.sigma_threshold]['accs'].append(r.top1_accuracy)
-                grouped[r.sigma_threshold]['sparsities'].append(r.pct_zeroed)
-        
-        agg = {}
-        for k, data in grouped.items():
-            agg[k] = {
-                'mean_acc': np.mean(data['accs']),
-                'std_acc': np.std(data['accs']),
-                'mean_sparsity': np.mean(data['sparsities']),
-                'std_sparsity': np.std(data['sparsities']),
-            }
-        return agg
 
-    agg_a = aggregate_by_k(results_a)
-    agg_b = aggregate_by_k(results_b)
-
-    fig, ax = plt.subplots(figsize=(10, 7), facecolor="white")
-    _poster_style(ax, fontsize=16)
-
-    baseline = results_a[0].baseline_top1 if results_a else 85.03
-
-    # Plot data points with error bars for both dimensions
-    for k in sorted(agg_a.keys()):
-        ax.errorbar(
-            agg_a[k]['mean_sparsity'], agg_a[k]['mean_acc'],
-            xerr=agg_a[k]['std_sparsity'], yerr=agg_a[k]['std_acc'],
-            fmt='o', color=_PALETTE["coral"], capsize=5,
-            label=label_a if k == 3.0 else "",
-        )
-        ax.errorbar(
-            agg_b[k]['mean_sparsity'], agg_b[k]['mean_acc'],
-            xerr=agg_b[k]['std_sparsity'], yerr=agg_b[k]['std_acc'],
-            fmt='o', color=_PALETTE["teal"], capsize=5,
-            label=label_b if k == 3.0 else "",
-        )
-        ax.text(agg_a[k]['mean_sparsity'] + 0.1, agg_a[k]['mean_acc'], f"k={k}", fontsize=12, va='bottom')
-        ax.text(agg_b[k]['mean_sparsity'] + 0.1, agg_b[k]['mean_acc'], f"k={k}", fontsize=12, va='bottom')
-
-    ax.axhline(baseline, color=_PALETTE["gray"], linestyle="--", linewidth=2.0,
-               zorder=-1, alpha=0.8, label=f"Baseline ({baseline:.2f}%)")
-
-    ax.set_xlabel("Induced Activation Sparsity (%)", fontsize=16)
-    ax.set_ylabel("Top-1 Accuracy (%)", fontsize=16)
-    ax.set_title("Accuracy vs. Sparsity Trade-off", fontsize=18, fontweight="bold")
-    ax.legend(fontsize=14, loc="lower left")
-    ax.grid(True, which='major', linestyle='--', linewidth=0.5, color='#CCCCCC')
-    
-    fig.tight_layout(pad=1.2)
-    fig.savefig(output_path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    logger.info("Saved accuracy vs sparsity scatter plot to %s", output_path)
 
 
 def plot_main_accuracy_bars(
@@ -227,8 +164,8 @@ def plot_main_accuracy_bars(
     bars1 = ax.bar(x - width / 2, means_a, width, yerr=stds_a, label=label_a, color=_PALETTE["coral"], capsize=5)
     bars2 = ax.bar(x + width / 2, means_b, width, yerr=stds_b, label=label_b, color=_PALETTE["teal"], capsize=5)
     
-    ax.bar_label(bars1, fmt='%.2f', padding=3, fontsize=10)
-    ax.bar_label(bars2, fmt='%.2f', padding=3, fontsize=10)
+    ax.bar_label(bars1, fmt='%.2f', padding=3, fontsize=18)
+    ax.bar_label(bars2, fmt='%.2f', padding=3, fontsize=18)
 
     ax.axhline(baseline, color=_PALETTE["gray"], linestyle="--", linewidth=2.0, label=f"Baseline ({baseline:.2f}%)")
     
@@ -236,7 +173,7 @@ def plot_main_accuracy_bars(
     ax.set_title("Accuracy After Outlier Clipping", fontweight="bold", fontsize=18)
     ax.set_xticks(x)
     ax.set_xticklabels([f"{k}σ Threshold" for k in sigma_ks])
-    ax.legend(fontsize=14, loc="lower right")
+    ax.legend(fontsize=16, loc="lower right")
     ax.set_ylim(bottom=min(0, np.min(means_a)-5 if means_a else 0), top=baseline+2)
 
     fig.tight_layout(pad=1.2)
@@ -256,10 +193,10 @@ def main():
     args = parser.parse_args()
 
     data_root = args.input_dir
-    global_dir = data_root / "phase2-global"
-    per_channel_dir = data_root / "phase2-per-channel"
-    mean_only_dir = data_root / "phase2-per-channel-mean-only"
-    var_only_dir = data_root / "phase2-per-channel-var-only"
+    global_dir = data_root / "phase2-ablation-global-10k"
+    per_channel_dir = data_root / "phase2-ablation-per-channel-10k"
+    mean_only_dir = data_root / "phase2-ablation-mean-only-10k"
+    var_only_dir = data_root / "phase2-ablation-var-only-10k"
     profiling_dir = data_root / "phase1-profiling"
 
     output_root = args.output_dir
@@ -330,10 +267,10 @@ def main():
     logger.info("Generating Figure 6 (Waterfall Plot)...")
     try:
         baseline = results_global[0].baseline_top1
-        global_k3 = np.mean([r.top1_accuracy for r in results_global if r.sigma_threshold == 3.0])
-        pc_k3 = np.mean([r.top1_accuracy for r in results_pc if r.sigma_threshold == 3.0])
-        mean_only_k3 = np.mean([r.top1_accuracy for r in results_mean_only if r.sigma_threshold == 3.0])
-        var_only_k3 = np.mean([r.top1_accuracy for r in results_var_only if r.sigma_threshold == 3.0])
+        global_k3 = np.mean([r.top1_accuracy for r in results_global if r.sigma_threshold == 3.0 and not r.is_random])
+        pc_k3 = np.mean([r.top1_accuracy for r in results_pc if r.sigma_threshold == 3.0 and not r.is_random])
+        mean_only_k3 = np.mean([r.top1_accuracy for r in results_mean_only if r.sigma_threshold == 3.0 and not r.is_random])
+        var_only_k3 = np.mean([r.top1_accuracy for r in results_var_only if r.sigma_threshold == 3.0 and not r.is_random])
         plot_ablation_comparison(baseline, global_k3, mean_only_k3, var_only_k3, pc_k3, poster_dir / "fig6_ablation_waterfall.png", sigma_k=3.0)
     except Exception as e:
         logger.error("Could not generate waterfall plot: %s", e)

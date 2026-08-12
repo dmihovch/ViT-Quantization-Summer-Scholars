@@ -6,8 +6,6 @@ forward pass, without retaining any full activation tensors in memory.
 
 Key references:
 - Pébay (2008) SAND2008-6212: parallel higher-moments merge (M2, M3, M4).
-- Zhai et al. (2023) ICML, arXiv:2303.06296: attention entropy collapse.
-- Maisonnave et al. (2025) arXiv:2508.16311: CLS/patch entropy separation.
 - Bondarenko et al. (2021) arXiv:2109.12948: transformer quantization challenges.
 - Dettmers et al. (2022) NeurIPS, arXiv:2208.07339: LLM.int8() outlier handling.
 - Xiao et al. (2023) ICML, arXiv:2211.10438: SmoothQuant.
@@ -127,12 +125,10 @@ class LayerStats:
     # Per-head Shannon entropy (nats) of the CLS query's attention distribution,
     # averaged over the batch dimension only.  Shape: [num_heads].
     # None for all sites except post_softmax.
-    # Cite: Maisonnave et al. 2025 (arXiv:2508.16311); Mali 2025 (arXiv:2511.18925).
     attention_entropy_patches: list[float] | None = None
     # Per-head mean Shannon entropy (nats) of patch query attention distributions,
     # averaged over batch and all N-1 patch query rows (rows 1..N-1).
     # Shape: [num_heads].  None for all sites except post_softmax.
-    # Cite: Maisonnave et al. 2025; Lee & Kim 2025 (10.1109/isocc66390.2025.11329950).
     layernorm_gamma: list[float] | None = None
     # Learned scale parameters (γ) of the LayerNorm module at this site.
     # Shape [D] for post_layernorm_1 and post_layernorm_2; None for all other sites.
@@ -722,14 +718,12 @@ def run_outlier_counting_pass(
     for k in OUTLIER_SIGMAS.  Accumulates raw counts across all batches and
     returns the final fractions.
 
-    This corrects the per-batch σ overestimate documented in docs/MISTAKES.md §1.3.
-
-    The standard practice in the quantization literature (Bondarenko et al. 2023;
+    The standard practice in the quantization literature (Bondarenko et al. 2021;
     Dettmers et al. 2022; Xiao et al. 2023; Wei et al. 2022) is to report
     outlier fractions relative to global σ, computed in a two-pass manner.
 
     References:
-    - Bondarenko et al. (2023), "Understanding and Overcoming the Challenges
+    - Bondarenko et al. (2021), "Understanding and Overcoming the Challenges
       of Efficient Transformer Quantization," arXiv:2109.12948.
     - Dettmers et al. (2022), "LLM.int8(): 8-bit Matrix Multiplication for
       Transformers at Scale," NeurIPS 2022, arXiv:2208.07339.
@@ -793,7 +787,7 @@ def run_outlier_counting_pass(
 
                     # --- residual_stream ---
                     # Site labeling convention: blocks.{k}/residual_stream = output
-                    # of block k (input to block k+1).  See docs/EXP1-IMPL.md §0.1.
+                    # of block k (input to block k+1).
                     residual_label: SiteId = (
                         "patch_embed/residual_stream" if i == 0
                         else f"blocks.{i - 1}/residual_stream"
@@ -1065,12 +1059,8 @@ def _register_entropy_saves(
 
     Follows the literature convention of treating CLS-to-all attention and
     patch-to-patch attention as distinct distributions.
-    Ref: Maisonnave et al. 2025 (arXiv:2508.16311);
-         Mali 2025 (arXiv:2511.18925).
-
-    The Shannon entropy formula H = -Σ p_j log(p_j) follows Zhai et al. (2023,
-    ICML, arXiv:2303.06296), who define attention entropy collapse as a
-    diagnostic for transformer training stability.
+    Per-head Shannon entropy H = -Σ p_j log(p_j) is computed separately for
+    CLS and patch query rows.
 
     For each head h and query position i, entropy is:
         H(i, h) = -Σ_{j=1..N} p_{h,i,j} · log(p_{h,i,j})
@@ -1354,7 +1344,7 @@ def profile_vit(
                 # (not a (args, kwargs) tuple), so no [0][0] indexing.
 
                 # --- residual_stream ---
-                # Site labeling convention (see docs/EXP1-IMPL.md §0.1):
+                # Site labeling convention:
                 #   blocks.{k}/residual_stream = output of block k (input to block k+1)
                 #   patch_embed/residual_stream = patch embed + pos encoding + CLS (input to block 0)
                 #   blocks.11/residual_stream = final encoder output (before head LN)

@@ -6,8 +6,6 @@ Jetson edge hardware.
 
 **Target model:** `vit_base_patch16_224.augreg2_in21k_ft_in1k` via [`timm`](https://github.com/huggingface/pytorch-image-models)
 **Dataset:** ImageNet-1K validation split
-**Experimental specs:** [`docs/EXP1-IMPL.md`](docs/EXP1-IMPL.md) (Phase 1) and [`docs/EXP2-IMPL.md`](docs/EXP2-IMPL.md) (Phase 2)
-**Phase 2 expansion:** [`docs/phase2-expansion.md`](docs/phase2-expansion.md)
 
 ---
 
@@ -27,9 +25,6 @@ questions:
    channel-structured sites (pre_gelu, post_layernorm_1, post_layernorm_2,
    residual_stream). Layer-group ablation isolates which blocks drive the
    degradation (Phase 2). ✅ Complete; expansion complete.
-
-> **Note:** Phase 3 (integer GELU LUTs) was deferred on 2026-08-03 in favor of
-> deeper per-channel ablation analysis.  See `docs/phase2-expansion.md`.
 
 ---
 
@@ -101,8 +96,7 @@ channels.
 the global condition by correcting for shifted channel means (μ_c ∈ [−71.18, 26.01]
 at Block 10).  Variance correction alone (per-channel σ_c with global μ) is
 catastrophic — it applies narrow thresholds to channels with negative means,
-zeroing activations that are genuinely within-channel normal.  See
-``docs/phase2-expansion.md`` for full analysis.
+zeroing activations that are genuinely within-channel normal.
 
 ---
 
@@ -123,8 +117,8 @@ zeroing activations that are genuinely within-channel normal.  See
 │   ├── plotting_poster.py       # poster-quality figures (custom palettes, annotation-driven)
 │   ├── utils.py                 # seed_everything, get_device, ensure_dir, log_system_info
 │   ├── exceptions.py            # DataDirectoryError, ProfilingError
-│   ├── exp1_profiling.py        # Phase 1 orchestrator (✅ complete)
-│   └── exp2_ablation.py         # Phase 2 orchestrator (✅ complete)
+│   ├── exp1_profiling.py        # Phase 1 orchestrator
+│   └── exp2_ablation.py         # Phase 2 orchestrator
 │
 ├── tests/
 │   ├── conftest.py
@@ -141,7 +135,7 @@ zeroing activations that are genuinely within-channel normal.  See
 ├── scripts/
 │   ├── regenerate_all.sh                  # unified plot regeneration from a run directory
 │   ├── run_full_experiment.sh             # full experiment orchestration (Phase 1 + Phase 2)
-│   ├── generate_poster_plots.py          # poster-quality figure generation
+│   ├── generate_poster_plots.py           # poster-quality figure generation
 │   ├── regenerate_plots.py               # workhorse plot regeneration from data files
 │   ├── analyze_ablation_results.py       # CI, sufficiency, degradation efficiency
 │   ├── analyze_layernorm_gamma.py        # LN γ vs per-channel σ correlation
@@ -150,23 +144,10 @@ zeroing activations that are genuinely within-channel normal.  See
 │   └── verify_pre_softmax_fidelity.py
 │
 ├── docs/
-│   ├── EXP1-IMPL.md                  # Phase 1 implementation spec (authoritative)
-│   ├── EXP2-IMPL.md                  # Phase 2 implementation spec (authoritative)
-│   ├── EXP2b-PLAN.md                 # per-channel ablation planning (historical)
-│   ├── phase2-expansion.md           # Phase 2 expansion: research questions & experiments
-│   ├── NEXT-STEPS.md                 # implementation roadmap
-│   ├── issues.md                     # active issues & known limitations
-│   ├── MISTAKES.md                   # historical wrong approaches
 │   ├── CITATIONS.md                  # verified bibliography
-│   └── AI-DISCLAIMER.md
+│   └── TOUR-OF-THE-WORK.md           # comprehensive project guide
 │
 ├── outputs/                     # written by runners (git-ignored)
-│   ├── phase1-profiling/
-│   ├── phase2-ablation/
-│   ├── layernorm-gamma-analysis/
-│   ├── ablation-analysis/
-│   └── poster-plots/
-│
 ├── data/                        # ImageNet val images (git-ignored)
 ├── download_imagenet_val.py     # helper to download ImageNet-1K val split
 ├── environment.yml
@@ -283,21 +264,21 @@ python run_phase1_profiling.py --num-images 1024 --approximate-outliers
 ```sh
 # Global ablation sweep (default: 50k images, k ∈ {3, 4, 6}).
 python run_phase2_ablation.py \
-    --layer-stats outputs/phase1-profiling/seed_42/profiling_result.json
+    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json
 
 # Custom sigma thresholds.
 python run_phase2_ablation.py --num-images 1024 \
-    --layer-stats outputs/phase1-profiling/seed_42/profiling_result.json \
+    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
     --sigma-thresholds 3.0 6.0
 
 # Per-channel ablation (all four channel-structured sites).
 python run_phase2_ablation.py --num-images 50000 --granularity per_channel \
-    --layer-stats outputs/phase1-profiling/seed_42/profiling_result.json
+    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json
 
 # Per-channel ablation restricted to pre_gelu only (e.g. for RQ2).
 python run_phase2_ablation.py --num-images 50000 --granularity per_channel \
     --per-channel-sites pre_gelu \
-    --layer-stats outputs/phase1-profiling/seed_42/profiling_result.json
+    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json
 
 # Mean-only per-channel (isolates mean-correction component).
 python run_phase2_ablation.py --num-images 50000 \
@@ -328,7 +309,7 @@ data files via dedicated scripts.
 Regenerate everything from a single run directory:
 
 ```sh
-bash scripts/regenerate_all.sh --run-dir outputs/full-run-2026-8-4
+bash scripts/regenerate_all.sh --run-dir outputs/5-seed-full-run-2026-08-05
 ```
 
 This auto-discovers all data files and produces:
@@ -348,32 +329,32 @@ Regenerate standard plots from existing data. This is fast, functional, and requ
 ```sh
 # Phase 1 plots from profiling_result.json.
 python scripts/regenerate_plots.py \
-    --layer-stats outputs/phase1-profiling/seed_42/profiling_result.json \
-    --output-dir outputs/phase1-profiling/seed_42/
+    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
+    --output-dir outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/
 
 # Phase 2 plots from a single ablation CSV.
 python scripts/regenerate_plots.py \
-    --csv outputs/phase2-ablation/ablation_results.csv \
-    --output-dir outputs/phase2-ablation/
+    --csv outputs/5-seed-full-run-2026-08-05/phase2-global/seed_42/ablation_results.csv \
+    --output-dir outputs/5-seed-full-run-2026-08-05/phase2-global/seed_42/
 
 # Phase 2 comparison (global vs per-channel overlay).
 python scripts/regenerate_plots.py \
-    --csv-a outputs/phase2-ablation-global-50k/ablation_results.csv \
-    --csv-b outputs/phase2-ablation-per-channel-50k/ablation_results.csv \
+    --csv-a outputs/5-seed-full-run-2026-08-05/phase2-global/seed_42/ablation_results.csv \
+    --csv-b outputs/5-seed-full-run-2026-08-05/phase2-per-channel/seed_42/ablation_results.csv \
     --output-dir outputs/phase2-comparison/
 
 # Full suite with activation histograms (needs model + GPU).
 python scripts/regenerate_plots.py \
-    --layer-stats outputs/phase1-profiling/seed_42/profiling_result.json \
-    --csv-a outputs/phase2-ablation-global-50k/ablation_results.csv \
-    --csv-b outputs/phase2-ablation-per-channel-50k/ablation_results.csv \
+    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
+    --csv-a outputs/5-seed-full-run-2026-08-05/phase2-global/seed_42/ablation_results.csv \
+    --csv-b outputs/5-seed-full-run-2026-08-05/phase2-per-channel/seed_42/ablation_results.csv \
     --output-dir outputs/all-plots/ \
     --histograms --data-dir data
 
 # Convenience: auto-discover from a run directory.
 python scripts/regenerate_plots.py \
-    --run-dir outputs/full-run-2026-8-4 \
-    --output-dir outputs/full-run-2026-8-4/plots/
+    --run-dir outputs/5-seed-full-run-2026-08-05 \
+    --output-dir outputs/5-seed-full-run-2026-08-05/plots/
 ```
 
 ### Poster-quality plots (presentation / publication)
@@ -384,37 +365,37 @@ palettes, direct annotation, ≥14 pt fonts, and have no chartjunk:
 ```sh
 # Phase 1 only (profiling stats).
 python scripts/generate_poster_plots.py \
-    --layer-stats outputs/phase1-profiling/seed_42/profiling_result.json \
+    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
     --output-dir outputs/poster-plots
 
 # Phase 1 + Phase 2 comparison.
 python scripts/generate_poster_plots.py \
-    --layer-stats outputs/phase1-profiling/seed_42/profiling_result.json \
-    --csv-a outputs/phase2-ablation-global-50k/ablation_results.csv \
-    --csv-b outputs/phase2-ablation-per-channel-50k/ablation_results.csv \
+    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
+    --csv-a outputs/5-seed-full-run-2026-08-05/phase2-global/seed_42/ablation_results.csv \
+    --csv-b outputs/5-seed-full-run-2026-08-05/phase2-per-channel/seed_42/ablation_results.csv \
     --output-dir outputs/poster-plots
 
 # Full suite including activation distribution overlay (needs model + GPU).
 python scripts/generate_poster_plots.py \
-    --layer-stats outputs/phase1-profiling/seed_42/profiling_result.json \
-    --csv-a outputs/phase2-ablation-global-50k/ablation_results.csv \
-    --csv-b outputs/phase2-ablation-per-channel-50k/ablation_results.csv \
+    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
+    --csv-a outputs/5-seed-full-run-2026-08-05/phase2-global/seed_42/ablation_results.csv \
+    --csv-b outputs/5-seed-full-run-2026-08-05/phase2-per-channel/seed_42/ablation_results.csv \
     --output-dir outputs/poster-plots \
     --histogram-data-dir data
 
 # Merge mean_only + var_only + outlier CSVs for the waterfall chart.
 python scripts/generate_poster_plots.py \
-    --layer-stats outputs/phase1-profiling/seed_42/profiling_result.json \
-    --csv-a outputs/phase2-global/seed_42/ablation_results.csv \
-    --csv-b outputs/phase2-per-channel/seed_42/ablation_results.csv \
-    --csv-b outputs/phase2-per-channel-mean-only/seed_42/ablation_results.csv \
-    --csv-b outputs/phase2-per-channel-var-only/seed_42/ablation_results.csv \
+    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
+    --csv-a outputs/5-seed-full-run-2026-08-05/phase2-global/seed_42/ablation_results.csv \
+    --csv-b outputs/5-seed-full-run-2026-08-05/phase2-per-channel/seed_42/ablation_results.csv \
+    --csv-b outputs/5-seed-full-run-2026-08-05/phase2-per-channel-mean-only/seed_42/ablation_results.csv \
+    --csv-b outputs/5-seed-full-run-2026-08-05/phase2-per-channel-var-only/seed_42/ablation_results.csv \
     --output-dir outputs/poster-plots
 
 # Convenience: auto-discover from a run directory.
 python scripts/generate_poster_plots.py \
-    --run-dir outputs/full-run-2026-8-4 \
-    --output-dir outputs/full-run-2026-8-4/plots/poster
+    --run-dir outputs/5-seed-full-run-2026-08-05 \
+    --output-dir outputs/5-seed-full-run-2026-08-05/plots/poster
 ```
 
 **Poster plots generated:**
@@ -436,24 +417,24 @@ python scripts/generate_poster_plots.py \
 ```sh
 # 95% CI on global vs per-channel accuracy delta.
 python scripts/analyze_ablation_results.py \
-    --csv-a outputs/phase2-ablation-global-50k/ablation_results.csv \
-    --csv-b outputs/phase2-ablation-per-channel-50k/ablation_results.csv \
+    --csv-a outputs/5-seed-full-run-2026-08-05/phase2-global/seed_42/ablation_results.csv \
+    --csv-b outputs/5-seed-full-run-2026-08-05/phase2-per-channel/seed_42/ablation_results.csv \
     --output-dir outputs/ablation-analysis
 
 # LayerNorm γ vs per-channel σ correlation.
 python scripts/analyze_layernorm_gamma.py \
-    --layer-stats outputs/phase1-profiling/seed_42/profiling_result.json \
+    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
     --output-dir outputs/layernorm-gamma-analysis
 
 # Effective per-channel gain (‖fc1⊙γ‖) vs per-channel σ correlation.
 python scripts/analyze_effective_gain.py \
-    --layer-stats outputs/phase1-profiling/seed_42/profiling_result.json \
+    --layer-stats outputs/5-seed-full-run-2026-08-05/phase1-profiling/seed_42/profiling_result.json \
     --output-dir outputs/effective-gain-analysis
 
 # Convenience: auto-discover from a run directory.
 python scripts/analyze_ablation_results.py \
-    --run-dir outputs/full-run-2026-8-4 \
-    --output-dir outputs/full-run-2026-8-4/plots/analysis/ablation
+    --run-dir outputs/5-seed-full-run-2026-08-05 \
+    --output-dir outputs/5-seed-full-run-2026-08-05/plots/analysis/ablation
 ```
 
 ---

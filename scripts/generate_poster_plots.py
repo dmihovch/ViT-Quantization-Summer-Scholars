@@ -13,18 +13,31 @@ Usage
         --phase1-json outputs/phase1-profiling/seed_42/profiling_result.json \\
         --output-dir outputs/poster-plots
 
-    # Phase 1 + Phase 2 comparison (global vs per-channel):
+    # Phase 1 + Phase 2 comparison via CSV files (used by regenerate_all.sh):
     python scripts/generate_poster_plots.py \\
         --phase1-json outputs/phase1-profiling/seed_42/profiling_result.json \\
-        --phase2-csv-a outputs/phase2-ablation-global-50k/ablation_results.csv \\
-        --phase2-csv-b outputs/phase2-ablation-per-channel-50k/ablation_results.csv \\
+        --csv-a outputs/phase2-global/seed_42/ablation_results.csv \\
+        --csv-b outputs/phase2-per-channel/seed_42/ablation_results.csv \\
+        --csv-b outputs/phase2-per-channel-mean-only/seed_42/ablation_results.csv \\
+        --csv-b outputs/phase2-per-channel-var-only/seed_42/ablation_results.csv \\
+        --output-dir outputs/poster-plots
+
+    # Multi-seed directory mode:
+    python scripts/generate_poster_plots.py \\
+        --phase1-json outputs/phase1-profiling/seed_42/profiling_result.json \\
+        --phase2-dir-a outputs/phase2-global \\
+        --phase2-dir-b outputs/phase2-per-channel \\
+        --phase2-dir-mean-only outputs/phase2-per-channel-mean-only \\
+        --phase2-dir-var-only outputs/phase2-per-channel-var-only \\
         --output-dir outputs/poster-plots
 
     # Full suite including activation distribution overlay (needs model + GPU):
     python scripts/generate_poster_plots.py \\
         --phase1-json outputs/phase1-profiling/seed_42/profiling_result.json \\
-        --phase2-csv-a outputs/phase2-ablation-global-50k/ablation_results.csv \\
-        --phase2-csv-b outputs/phase2-ablation-per-channel-50k/ablation_results.csv \\
+        --csv-a outputs/phase2-global/seed_42/ablation_results.csv \\
+        --csv-b outputs/phase2-per-channel/seed_42/ablation_results.csv \\
+        --csv-b outputs/phase2-per-channel-mean-only/seed_42/ablation_results.csv \\
+        --csv-b outputs/phase2-per-channel-var-only/seed_42/ablation_results.csv \\
         --output-dir outputs/poster-plots \\
         --histogram-data-dir data
 
@@ -241,8 +254,20 @@ def _generate_phase2_poster_plots(
     label_b: str,
     stats: dict[SiteId, LayerStats] | None = None,
     histogram_data_dir: Path | None = None,
+    results_mean_only: list[AblationResult] | None = None,
+    results_var_only: list[AblationResult] | None = None,
 ) -> list[Path]:
-    """Generate all Phase 2 poster plots (comparison and overlay)."""
+    """Generate all Phase 2 poster plots (comparison and overlay).
+
+    Parameters
+    ----------
+    results_mean_only:
+        Optional separate results for the mean_only ablation mode.
+        If not provided, mean_only rows are looked up in ``results_b``
+        (CSV-file mode where all --csv-b files are merged).
+    results_var_only:
+        Optional separate results for the var_only ablation mode.
+    """
     written: list[Path] = []
 
     # 5. Accuracy vs sparsity scatter.
@@ -282,8 +307,14 @@ def _generate_phase2_poster_plots(
 
     global_k3 = _acc_at_k(results_a, 3.0, "global")
     pc_outlier_k3 = _acc_at_k(results_b, 3.0, "per_channel", mode="outlier")
-    mean_only_k3 = _acc_at_k(results_b, 3.0, "per_channel", mode="mean_only")
-    var_only_k3 = _acc_at_k(results_b, 3.0, "per_channel", mode="var_only")
+
+    # Look up mean_only and var_only: prefer the dedicated result lists
+    # (multi-seed directory mode), otherwise fall back to results_b
+    # (CSV-file mode where all --csv-b files are merged).
+    mean_source = results_mean_only if results_mean_only else results_b
+    var_source = results_var_only if results_var_only else results_b
+    mean_only_k3 = _acc_at_k(mean_source, 3.0, "per_channel", mode="mean_only")
+    var_only_k3 = _acc_at_k(var_source, 3.0, "per_channel", mode="var_only")
 
     if global_k3 > 0 and pc_outlier_k3 > 0 and mean_only_k3 > 0 and var_only_k3 > 0:
         p = output_dir / "poster_ablation_waterfall.png"
@@ -375,13 +406,35 @@ def _parse_args() -> argparse.Namespace:
         "--phase1-json", type=Path, default=None,
         help="Path to profiling_result.json (Phase 1).",
     )
+    # --csv-a: single CSV file (used by regenerate_all.sh).
+    parser.add_argument(
+        "--csv-a", type=Path, default=None,
+        help="Path to a single global ablation_results.csv.",
+    )
+    # --csv-b: may be repeated for outlier, mean_only, and var_only CSVs.
+    parser.add_argument(
+        "--csv-b", type=Path, action="append", default=None,
+        help=(
+            "Path to a per-channel ablation_results.csv.  Repeat for each "
+            "ablation mode (outlier, mean_only, var_only)."
+        ),
+    )
+    # --phase2-dir-a / --phase2-dir-b: multi-seed directory mode.
     parser.add_argument(
         "--phase2-dir-a", type=Path, default=None,
-        help="Path to the root directory for the first multi-seed run (e.g. global).",
+        help="Root directory for multi-seed global run (contains seed_*/).",
     )
     parser.add_argument(
         "--phase2-dir-b", type=Path, default=None,
-        help="Path to the root directory for the second multi-seed run (e.g. per-channel).",
+        help="Root directory for multi-seed per-channel outlier run.",
+    )
+    parser.add_argument(
+        "--phase2-dir-mean-only", type=Path, default=None,
+        help="Root directory for multi-seed per-channel mean_only run.",
+    )
+    parser.add_argument(
+        "--phase2-dir-var-only", type=Path, default=None,
+        help="Root directory for multi-seed per-channel var_only run.",
     )
     parser.add_argument(
         "--label-a", type=str, default="Global",
@@ -414,10 +467,19 @@ def main() -> None:
     seed_everything(args.seed)
     ensure_dir(args.output_dir)
 
-    if args.phase1_json is None and args.phase2_csv_a is None:
+    # Determine which input mode we're in.
+    has_csv_mode = args.csv_a is not None
+    has_dir_mode = (
+        args.phase2_dir_a is not None
+        or args.phase2_dir_b is not None
+        or args.phase2_dir_mean_only is not None
+        or args.phase2_dir_var_only is not None
+    )
+
+    if args.phase1_json is None and not has_csv_mode and not has_dir_mode:
         logger.error(
             "No input files specified.  Provide --phase1-json and/or "
-            "--phase2-csv-a/--phase2-csv-b."
+            "--csv-a/--csv-b or --phase2-dir-a/--phase2-dir-b."
         )
         sys.exit(1)
 
@@ -432,20 +494,20 @@ def main() -> None:
         logger.info("Loaded %d sites from %s", len(stats), args.phase1_json)
         total_written.extend(_generate_phase1_poster_plots(stats, args.output_dir))
 
-    # --- Phase 2 ---
-    if args.phase2_dir_a is not None and args.phase2_dir_b is not None:
-        logger.info("=== Phase 2 poster plots (multi-seed aggregation) ===")
-        
-        paths_a = sorted(args.phase2_dir_a.glob("**/ablation_results.csv"))
-        paths_b = sorted(args.phase2_dir_b.glob("**/ablation_results.csv"))
+    # --- Phase 2: CSV-file mode (used by regenerate_all.sh) ---
+    if has_csv_mode:
+        logger.info("=== Phase 2 poster plots (CSV-file mode) ===")
+        csv_b_list: list[Path] = args.csv_b if args.csv_b else []
 
-        if not paths_a or not paths_b:
-            logger.error("Could not find ablation_results.csv in the provided directories.")
+        if not csv_b_list:
+            logger.error("--csv-b is required when --csv-a is provided.")
             sys.exit(1)
 
-        results_a = _load_ablation_results(paths_a)
-        results_b = _load_ablation_results(paths_b)
-        
+        results_a = _load_ablation_results([args.csv_a])
+        # Merge all --csv-b files into one results list so that _acc_at_k
+        # can find outlier, mean_only, and var_only rows.
+        results_b = _load_ablation_results(csv_b_list)
+
         total_written.extend(
             _generate_phase2_poster_plots(
                 results_a, results_b, args.output_dir,
@@ -454,9 +516,56 @@ def main() -> None:
                 histogram_data_dir=args.histogram_data_dir,
             ),
         )
-    elif args.phase2_dir_a is not None or args.phase2_dir_b is not None:
-        logger.error("Both --phase2-dir-a and --phase2-dir-b are required for comparison.")
-        sys.exit(1)
+
+    # --- Phase 2: multi-seed directory mode ---
+    elif has_dir_mode:
+        logger.info("=== Phase 2 poster plots (multi-seed directory mode) ===")
+
+        if args.phase2_dir_a is None or args.phase2_dir_b is None:
+            logger.error(
+                "Both --phase2-dir-a and --phase2-dir-b are required "
+                "for multi-seed mode."
+            )
+            sys.exit(1)
+
+        paths_a = sorted(args.phase2_dir_a.glob("**/ablation_results.csv"))
+        paths_b = sorted(args.phase2_dir_b.glob("**/ablation_results.csv"))
+
+        if not paths_a or not paths_b:
+            logger.error(
+                "Could not find ablation_results.csv in the provided directories."
+            )
+            sys.exit(1)
+
+        results_a = _load_ablation_results(paths_a)
+        results_b_outlier = _load_ablation_results(paths_b)
+
+        # Load mean_only and var_only if provided.
+        results_b_mean_only: list[AblationResult] = []
+        results_b_var_only: list[AblationResult] = []
+        if args.phase2_dir_mean_only is not None:
+            paths_mean = sorted(
+                args.phase2_dir_mean_only.glob("**/ablation_results.csv")
+            )
+            if paths_mean:
+                results_b_mean_only = _load_ablation_results(paths_mean)
+        if args.phase2_dir_var_only is not None:
+            paths_var = sorted(
+                args.phase2_dir_var_only.glob("**/ablation_results.csv")
+            )
+            if paths_var:
+                results_b_var_only = _load_ablation_results(paths_var)
+
+        total_written.extend(
+            _generate_phase2_poster_plots(
+                results_a, results_b_outlier, args.output_dir,
+                label_a=args.label_a, label_b=args.label_b,
+                stats=stats,
+                histogram_data_dir=args.histogram_data_dir,
+                results_mean_only=results_b_mean_only,
+                results_var_only=results_b_var_only,
+            ),
+        )
 
     logger.info("Generated %d poster plots in %s", len(total_written), args.output_dir)
     for p in total_written:
