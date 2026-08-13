@@ -237,7 +237,6 @@ class WelfordAccumulator:
     of Covariances and Arbitrary-Order Statistical Moments," Sandia National
     Laboratories, Technical Report SAND2008-6212, 2008.
     Eq. (3.1)-(3.4) provide the exact parallel merge for M2, M3, M4.
-    The Chan et al. (1983) parallel formula for M2 is a special case.
 
     All Mk values are **sums** (not means): ``Mk = Σ(x_i − μ)^k``.
 

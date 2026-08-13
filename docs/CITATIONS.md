@@ -10,7 +10,7 @@
 - **Full citation:** P. Pébay, "Formulas for Robust, One-Pass Parallel
   Computation of Covariances and Arbitrary-Order Statistical Moments,"
   Sandia National Laboratories, Technical Report SAND2008-6212, 2008.
-- **🔗 Link:** https://prod-ng.sandia.gov/techlib-noauth/access-control.cgi/2008/086212.pdf
+- **🔗 Link:** https://www.osti.gov/servlets/purl/1028931 
 
 ### Welford 1962: Online algorithm for mean and variance
 
@@ -18,8 +18,8 @@
 - **Full citation:** B. P. Welford, "Note on a Method for Calculating
   Corrected Sums of Squares and Products," *Technometrics*, vol. 4, no. 3,
   pp. 419–420, 1962.
-- **🔗 Link:** https://doi.org/10.1080/00401706.1962.10490022
-
+- **🔗 Link:** https://www.scribd.com/document/972081339/Welford-1962-Note-on-a-Method-for-Calculating-Corrected-Sums-of-Squares-and-Products
+- I suppose because it predates the internet, this article is a bit harder to find on conventional sources
 ### Dosovitskiy et al. 2021: Vision Transformer (ViT)
 
 - **Short key:** `Dosovitskiy et al. 2021`
@@ -67,14 +67,3 @@
   arXiv:2209.13325.
 - **🔗 Link:** https://arxiv.org/abs/2209.13325
 
----
-
-## Software and tool dependencies
-
-| Tool | Version / Reference | Used in | Purpose |
-|------|---------------------|---------|---------|
-| **timm** | `vit_base_patch16_224` | `src/model.py`, `tests/test_profiler.py` | Pretrained ViT model loading. Wightman (2019), "PyTorch Image Models." https://github.com/huggingface/pytorch-image-models |
-| **nnsight** | ≥0.3 | `src/profiler.py`, `src/exp1_profiling.py`, tests | Activation interception and trace-based profiling. J. J. Geiping et al., "nnsight: The Neural Network Sighting Package." https://github.com/ndif-team/nnsight |
-| **ImageNet-1K** | ILSVRC 2012 validation split | `src/data_loader.py`, `download_imagenet_val.py` | Benchmark dataset. Deng et al. (2009), "ImageNet: A Large-Scale Hierarchical Image Database," in *Proc. CVPR*. |
-| **PyTorch** | ≥2.2 | Entire project | Deep learning framework. Paszke et al. (2019), "PyTorch: An Imperative Style, High-Performance Deep Learning Library," in *Proc. NeurIPS*. |
-| **matplotlib** | Agg backend | `src/plotting.py` | Figure generation. Hunter (2007), "Matplotlib: A 2D Graphics Environment," *Computing in Science & Engineering*. |
